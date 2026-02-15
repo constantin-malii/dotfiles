@@ -1,0 +1,41 @@
+# Never commit actual credentials or secrets
+**/credentials
+!**/credentials.template
+
+# Tokens and secrets
+**/*token*
+**/*secret*
+**/*key*
+**/*password*
+**/.*rc
+!**/*.template
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# Backups
+*.bak
+*.backup
+.backup-*/
+
+# Logs
+*.log
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Personal notes (add your own patterns)
+NOTES.md
+TODO.md
+scratch/
