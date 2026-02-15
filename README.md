@@ -59,10 +59,8 @@ dotfiles/
 │   │   └── ATLASSIAN_SETUP.md     # Setup guide
 │   │
 │   ├── skills/
-│   │   ├── jira/                  # Generic Jira skill
-│   │   ├── confluence/            # Generic Confluence skill
-│   │   ├── jira-symend/           # Symend-specific Jira
-│   │   └── confluence-symend/     # Symend-specific Confluence
+│   │   ├── jira/                  # Jira with git workflow integration
+│   │   └── confluence/            # Confluence with doc templates
 │   │
 │   └── atlassian/
 │       └── credentials.template   # Credentials template
