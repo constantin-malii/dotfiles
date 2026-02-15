@@ -2,13 +2,20 @@
 
 Personal configuration files and scripts for Claude Code, shell, and development tools.
 
+## Quick Links
+
+- 🚀 **[Multi-Machine Setup Guide](MULTI_MACHINE_SETUP.md)** - Installing on machines with different GitHub accounts
+- 📝 **[Push to Personal GitHub](PUSH_TO_PERSONAL_GITHUB.md)** - Initial setup guide
+
 ## Installation
 
 ### First Time Setup
 
+**Note:** If cloning on a machine with a different GitHub account, see [MULTI_MACHINE_SETUP.md](MULTI_MACHINE_SETUP.md) first.
+
 ```bash
-# 1. Clone this repo (if not already)
-git clone git@github.com:YOUR_USERNAME/dotfiles.git ~/repos/dotfiles
+# 1. Clone this repo
+git clone https://github.com/constantin-malii/dotfiles.git ~/repos/dotfiles
 
 # 2. Run install script
 cd ~/repos/dotfiles
