@@ -38,9 +38,14 @@ case "$1" in
 
     search)
         # Search with JQL: search "project=PL AND status=Open" [max]
+        json=$(jq -n \
+            --arg jql "$2" \
+            --argjson max "${3:-10}" \
+            '{jql: $jql, maxResults: $max, fields: ["summary", "status", "assignee"]}')
+
         curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
             -X POST -H "Content-Type: application/json" \
-            --data "{\"jql\":\"$2\",\"maxResults\":${3:-10},\"fields\":[\"summary\",\"status\",\"assignee\"]}" \
+            --data "$json" \
             "${JIRA_URL}/rest/api/3/search/jql" | \
             jq -r '.issues[]? | "[\(.key)] \(.fields.summary) | \(.fields.status.name) | \(.fields.assignee.displayName // "Unassigned")"'
         ;;
@@ -78,12 +83,21 @@ case "$1" in
                 }
             }')
 
-        curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+        response=$(curl -s -w "\n%{http_code}" -u "${JIRA_USER}:${JIRA_TOKEN}" \
             -X POST \
             -H "Content-Type: application/json" \
             --data "$json" \
-            "${JIRA_URL}/rest/api/3/issue" | \
-            jq -r '"✓ Issue created", "Key: " + .key, "URL: ${JIRA_URL}/browse/" + .key'
+            "${JIRA_URL}/rest/api/3/issue")
+        http_code=$(echo "$response" | tail -1)
+        body=$(echo "$response" | sed '$d')
+
+        if [[ "$http_code" =~ ^2 ]]; then
+            echo "$body" | jq -r '"Key: " + .key'
+            echo "URL: ${JIRA_URL}/browse/$(echo "$body" | jq -r '.key')"
+        else
+            echo "✗ Failed to create issue (HTTP $http_code)"
+            echo "$body" | jq -r '.errors // .errorMessages // .' 2>/dev/null
+        fi
         ;;
 
     update)
@@ -117,17 +131,17 @@ case "$1" in
                 ;;
         esac
 
-        curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -u "${JIRA_USER}:${JIRA_TOKEN}" \
             -X PUT \
             -H "Content-Type: application/json" \
             --data "$json" \
-            "${JIRA_URL}/rest/api/3/issue/$issue_key"
+            "${JIRA_URL}/rest/api/3/issue/$issue_key")
 
-        if [ $? -eq 0 ]; then
-            echo "✓ Issue $issue_key updated"
+        if [[ "$http_code" =~ ^2 ]]; then
+            echo "Issue $issue_key updated"
             echo "URL: ${JIRA_URL}/browse/$issue_key"
         else
-            echo "✗ Failed to update issue"
+            echo "Failed to update issue (HTTP $http_code)"
         fi
         ;;
 
@@ -182,17 +196,17 @@ case "$1" in
 
             json=$(jq -n --arg id "$transition_id" '{transition: {id: $id}}')
 
-            curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" -u "${JIRA_USER}:${JIRA_TOKEN}" \
                 -X POST \
                 -H "Content-Type: application/json" \
                 --data "$json" \
-                "${JIRA_URL}/rest/api/3/issue/$issue_key/transitions"
+                "${JIRA_URL}/rest/api/3/issue/$issue_key/transitions")
 
-            if [ $? -eq 0 ]; then
-                echo "✓ Issue $issue_key transitioned to '$status_name'"
+            if [[ "$http_code" =~ ^2 ]]; then
+                echo "Issue $issue_key transitioned to '$status_name'"
                 echo "URL: ${JIRA_URL}/browse/$issue_key"
             else
-                echo "✗ Failed to transition issue"
+                echo "Failed to transition issue (HTTP $http_code)"
             fi
         fi
         ;;
@@ -204,8 +218,10 @@ case "$1" in
         assignee="$3"
 
         if [ "$assignee" = "me" ]; then
-            # Assign to current user
-            json='{"accountId": null}'  # null means assign to self
+            # Assign to current user - fetch own account ID
+            account_id=$(curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+                "${JIRA_URL}/rest/api/3/myself" | jq -r '.accountId')
+            json=$(jq -n --arg id "$account_id" '{accountId: $id}')
         else
             # Get account ID from email
             account_id=$(curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
@@ -220,17 +236,17 @@ case "$1" in
             json=$(jq -n --arg id "$account_id" '{accountId: $id}')
         fi
 
-        curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -u "${JIRA_USER}:${JIRA_TOKEN}" \
             -X PUT \
             -H "Content-Type: application/json" \
             --data "$json" \
-            "${JIRA_URL}/rest/api/3/issue/$issue_key/assignee"
+            "${JIRA_URL}/rest/api/3/issue/$issue_key/assignee")
 
-        if [ $? -eq 0 ]; then
-            echo "✓ Issue $issue_key assigned"
+        if [[ "$http_code" =~ ^2 ]]; then
+            echo "Issue $issue_key assigned"
             echo "URL: ${JIRA_URL}/browse/$issue_key"
         else
-            echo "✗ Failed to assign issue"
+            echo "Failed to assign issue (HTTP $http_code)"
         fi
         ;;
 
@@ -258,17 +274,17 @@ case "$1" in
                 ;;
         esac
 
-        curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -u "${JIRA_USER}:${JIRA_TOKEN}" \
             -X PUT \
             -H "Content-Type: application/json" \
             --data "$json" \
-            "${JIRA_URL}/rest/api/3/issue/$issue_key"
+            "${JIRA_URL}/rest/api/3/issue/$issue_key")
 
-        if [ $? -eq 0 ]; then
-            echo "✓ Labels ${action}ed on $issue_key"
+        if [[ "$http_code" =~ ^2 ]]; then
+            echo "Labels ${action}ed on $issue_key"
             echo "URL: ${JIRA_URL}/browse/$issue_key"
         else
-            echo "✗ Failed to ${action} labels"
+            echo "Failed to ${action} labels (HTTP $http_code)"
         fi
         ;;
 
