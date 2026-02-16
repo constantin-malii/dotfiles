@@ -13,10 +13,27 @@ JIRA_TOKEN="${ATLASSIAN_API_TOKEN}"
 
 case "$1" in
     get)
-        # Get issue details: get PL-1234
+        # Get issue details: get PROJ-1234
         curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
             "${JIRA_URL}/rest/api/3/issue/$2" | \
-            jq -r '"Key: " + .key, "Summary: " + .fields.summary, "Status: " + .fields.status.name, "Assignee: " + (.fields.assignee.displayName // "Unassigned"), "Reporter: " + .fields.reporter.displayName'
+            jq -r '
+                "Key: " + .key,
+                "Summary: " + .fields.summary,
+                "Type: " + .fields.issuetype.name,
+                "Status: " + .fields.status.name,
+                "Priority: " + (.fields.priority.name // "None"),
+                "Assignee: " + (.fields.assignee.displayName // "Unassigned"),
+                "Reporter: " + (.fields.reporter.displayName // "Unknown"),
+                "",
+                "Description:",
+                if .fields.description == null then
+                    "(none)"
+                elif (.fields.description | type) == "object" then
+                    (.fields.description | [.. | .text? // empty] | join(" "))
+                else
+                    (.fields.description | tostring)
+                end
+            '
         ;;
 
     search)
