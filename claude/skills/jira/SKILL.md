@@ -1,18 +1,23 @@
 ---
 name: jira
-description: Jira workflows with git integration, branch naming, PR creation
+description: Jira issue management with git workflow integration. Use when the user asks about Jira issues, wants to check tickets, start work on a ticket, search issues, create/update tickets, manage labels, link issues, or any Jira operations. Also triggers on issue key patterns like PROJ-123.
+argument-hint: [command] [args...]
+allowed-tools: Bash Read Grep Glob
 ---
 
 # Jira Operations with Git Workflow
 
-**Trigger**: When the user asks about Jira issues, wants to check tickets, start work on a ticket, create a PR, or any Jira operations.
+If arguments are provided, interpret them as a command:
+- `/jira get PROJ-123` → run `bash ~/.claude/scripts/jira-rest-api.sh get PROJ-123`
+- `/jira mine` → run `bash ~/.claude/scripts/jira-rest-api.sh mine`
+- `/jira search "project = PROJ AND status = Open"` → run search
 
-**Goal**: Help with Jira workflows including checking tickets, starting work, creating branches, and preparing PRs with proper conventions.
+When invoked with arguments: `bash ~/.claude/scripts/jira-rest-api.sh $ARGUMENTS`
 
 ## Project Conventions
 
 These conventions adapt to your project. Replace placeholders:
-- **Project Key**: `PROJ` (e.g., PL, DEV, PROJ)
+- **Project Key**: `PROJ` (e.g., PL, DEV, WEMC)
 - **Branch Format**: `feature/{PROJ}-{number}_{description}` (lowercase with underscores)
 - **Commit Format**: `{type}: [{PROJ}-{number}] {Description}`
 - **PR Format**: `{type}: [{PROJ}-{number}] {Description}`
@@ -65,10 +70,7 @@ bash ~/.claude/scripts/jira-rest-api.sh create PROJ "Bug fix for login" "User ca
 
 ### Update issue:
 ```bash
-# Update summary
 bash ~/.claude/scripts/jira-rest-api.sh update PROJ-123 summary "New summary text"
-
-# Update description
 bash ~/.claude/scripts/jira-rest-api.sh update PROJ-123 description "New description"
 ```
 
@@ -79,29 +81,20 @@ bash ~/.claude/scripts/jira-rest-api.sh comment PROJ-123 "Work in progress"
 
 ### Change status (transition):
 ```bash
-# List available transitions
 bash ~/.claude/scripts/jira-rest-api.sh transition PROJ-123
-
-# Move to specific status
 bash ~/.claude/scripts/jira-rest-api.sh transition PROJ-123 "In Progress"
 bash ~/.claude/scripts/jira-rest-api.sh transition PROJ-123 "Done"
 ```
 
 ### Assign issue:
 ```bash
-# Assign to yourself
 bash ~/.claude/scripts/jira-rest-api.sh assign PROJ-123 me
-
-# Assign to another user
 bash ~/.claude/scripts/jira-rest-api.sh assign PROJ-123 user@example.com
 ```
 
 ### Manage labels:
 ```bash
-# Add labels
 bash ~/.claude/scripts/jira-rest-api.sh labels PROJ-123 add "bug,urgent"
-
-# Remove labels
 bash ~/.claude/scripts/jira-rest-api.sh labels PROJ-123 remove "needs-review"
 ```
 
@@ -113,15 +106,9 @@ bash ~/.claude/scripts/jira-rest-api.sh link PROJ-123 "relates to" PROJ-789
 
 ## Common Search Patterns
 
-### Service/Component-Specific Searches
 ```bash
-# Find issues by component
 bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND component = 'Frontend'" 20
-
-# Find issues by label
 bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND labels = 'technical-debt'" 20
-
-# Recent updates
 bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND updated >= -7d ORDER BY updated DESC" 20
 ```
 
@@ -129,81 +116,31 @@ bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND updated >= -7
 
 ```
 User: Show my issues
-
-You: [Run mine command]
-     Present as:
-
-     You have 5 open issues:
-     1. [PROJ-205](link) Task | Implement feature | In Progress
-     2. [PROJ-106](link) Bug | Fix login error | To Do
-     ...
+You: [Run mine command, present as numbered list with links]
 
 User: I want to work on PROJ-137
-
-You: [Get ticket details]
-     Present:
-
-     **PROJ-137: Add user authentication**
-     Status: To Do
-
-     Suggested branch name:
-     `feature/PROJ-137_add_user_auth`
-
-     Commands:
-     ```bash
-     git checkout -b feature/PROJ-137_add_user_auth
-     ```
-
-     When committing, use:
-     `feat: [PROJ-137] Add user authentication`
+You: [Get ticket, suggest branch name, show git checkout command]
 
 User: Create PR for PROJ-137
-
-You: [Get ticket]
-     Generate PR template:
-
-     **Title:** feat: [PROJ-137] Add user authentication
-
-     **Body:**
-     ## Summary
-     Implement user authentication feature.
-
-     ## Related issues
-     - [PROJ-137](jira-url)
+You: [Get ticket, suggest PR title and body with Jira link]
 
 User: Find bugs in project
-
-You: [Run search with filter]
-     bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND type = Bug" 10
+You: bash ~/.claude/scripts/jira-rest-api.sh search "project = PROJ AND type = Bug" 10
 ```
 
 ## Useful JQL Queries
 
 ```jql
-# My active work
 project = PROJ AND assignee = currentUser() AND resolution = Unresolved
-
-# Ready for dev
 project = PROJ AND status = "Ready for Dev" AND assignee is EMPTY
-
-# Current sprint
 project = PROJ AND sprint in openSprints()
-
-# Blocked tickets
-project = PROJ AND status = Blocked
-
-# Recently completed
-project = PROJ AND status = Done AND resolved >= -7d ORDER BY resolved DESC
-
-# High priority
 project = PROJ AND priority = High AND resolution = Unresolved
+project = PROJ AND status = Done AND resolved >= -7d ORDER BY resolved DESC
 ```
 
 ## Git Workflow Patterns
 
 ### Conventional Commits
-
-Use these commit type prefixes:
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `refactor:` - Code refactoring
@@ -213,37 +150,10 @@ Use these commit type prefixes:
 - `perf:` - Performance improvements
 
 ### Branch Naming
-
 Pattern: `{type}/{PROJ}-{number}_{description}`
-
-Examples:
 - `feature/PROJ-123_add_login`
 - `bugfix/PROJ-456_fix_crash`
 - `refactor/PROJ-789_update_api`
-
-### PR Template
-
-```markdown
-# Summary
-
-Brief description of changes and goals.
-
-## Related issues
-
-- [PROJ-####](jira-url)
-
-## Checklist
-
-- [ ] Tests pass
-- [ ] Code reviewed
-- [ ] Documentation updated
-- [ ] No breaking changes (or documented)
-
-## Steps to Test
-
-1. Step one
-2. Step two
-```
 
 ## Output Formatting
 
@@ -251,4 +161,3 @@ Brief description of changes and goals.
 - Show issue type prefix (Bug, Task, Story, Epic)
 - Include status and assignee
 - Suggest next steps based on context
-- Follow project naming conventions in all suggestions
