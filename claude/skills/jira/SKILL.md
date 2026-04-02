@@ -74,6 +74,11 @@ bash ~/.claude/scripts/jira-rest-api.sh update PROJ-123 summary "New summary tex
 bash ~/.claude/scripts/jira-rest-api.sh update PROJ-123 description "New description"
 ```
 
+### List comments:
+```bash
+bash ~/.claude/scripts/jira-rest-api.sh comments PROJ-123
+```
+
 ### Add comment:
 ```bash
 bash ~/.claude/scripts/jira-rest-api.sh comment PROJ-123 "Work in progress"

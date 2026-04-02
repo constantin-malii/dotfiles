@@ -145,10 +145,32 @@ case "$1" in
         fi
         ;;
 
+    comments)
+        # List comments: comments PL-1234
+        issue_key="$2"
+        if [ -z "$issue_key" ]; then
+            echo "✗ Error: issue key is required"
+            echo "Usage: $0 comments <issue-key>"
+            exit 1
+        fi
+        curl -s -u "${JIRA_USER}:${JIRA_TOKEN}" \
+            "${JIRA_URL}/rest/api/3/issue/$issue_key/comment" | \
+            jq -r '.comments[] |
+                "--- \(.author.displayName) (\(.created[:10])) ---",
+                (.body | [.. | .text? // empty] | join("")),
+                ""'
+        ;;
+
     comment)
         # Add comment: comment PL-1234 "Comment text"
         issue_key="$2"
         comment_text="$3"
+
+        if [ -z "$comment_text" ]; then
+            echo "✗ Error: comment text is required"
+            echo "Usage: $0 comment <issue-key> \"Comment text\""
+            exit 1
+        fi
 
         json=$(jq -n --arg text "$comment_text" '{
             body: {
@@ -328,6 +350,9 @@ READ Operations:
                                Example: search "project=PL AND status=Open" 20
 
   mine                         Get your open issues
+
+  comments <issue-key>         List all comments on an issue
+                               Example: comments PL-1234
 
 CREATE/UPDATE Operations:
   create <project> <summary> <description> [type]
