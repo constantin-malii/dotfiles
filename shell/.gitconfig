@@ -1,0 +1,157 @@
+# ~/.gitconfig - Git configuration
+
+# Machine-specific identity — create ~/.gitconfig.local with [user] block
+[include]
+	path = ~/.gitconfig.local
+
+[core]
+	autocrlf = true
+	editor = vim
+	# Improve performance on Windows
+	preloadindex = true
+	fscache = true
+	pager = delta
+
+[init]
+	defaultBranch = main
+
+[pull]
+	rebase = false
+
+[push]
+	default = current
+	# Automatically set up remote tracking
+	autoSetupRemote = true
+
+[fetch]
+	prune = true
+	# Prune remote tracking branches automatically
+
+[merge]
+	tool = p4merge
+	# Show common ancestor in conflict markers
+	conflictstyle = diff3
+
+[diff]
+	tool = kdiff3
+	# Use better algorithm for diffs
+	algorithm = histogram
+	# Detect renames and copies
+	renames = copies
+
+[rerere]
+	# Remember how you resolved conflicts
+	enabled = true
+
+[filter "lfs"]
+	process = git-lfs filter-process
+	required = true
+	clean = git-lfs clean -- %f
+	smudge = git-lfs smudge -- %f
+
+# ============================================================================
+# Aliases
+# ============================================================================
+
+[alias]
+	# Basic shortcuts
+	c = commit
+	co = checkout
+	br = branch
+	st = status
+
+	# Save/apply stash with status info
+	sme = !git status && git stash list && git add . && git stash create && git stash save $1 && git stash list && git status
+	ame = !git status && git stash apply stash@{0} && git status
+
+	# Fetch and pull
+	fme = !git status && git fetch && git pull
+
+	# Quick commit and push
+	pme = !git status && git add . && git commit -m $1 && git push && git status
+
+	# Delete branch (local and remote)
+	dme = !git branch -a && git branch -D $1 && git push origin :$1 && git branch --all
+
+	# View recent branches
+	recent-branches = ! git for-each-ref --sort=-committerdate --count=15 --format='%(authorname),%(color:bold yellow)%(refname:short)%(color:reset) (%(color:bold magenta)%(committerdate:relative)%(color:reset)) %(color:cyan)%(objectname:short)%(color:reset) - %(color:dim white)%(contents:subject)%(color:reset)' refs/heads/ | grep ^Travis | cut -d, -f2-
+
+	# Better log views
+	lg = log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit
+	lga = log --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit --all
+	ls = log --pretty=format:'%C(yellow)%h %Cred%ad %Cblue%an%Cgreen%d %Creset%s' --date=short
+
+	# Show what's in a stash
+	stash-show = stash show -p
+
+	# Show files in a commit
+	show-files = show --pretty="" --name-only
+
+	# Undo last commit but keep changes
+	undo = reset --soft HEAD~1
+
+	# Amend commit without editing message
+	amend = commit --amend --no-edit
+
+	# List aliases
+	aliases = config --get-regexp alias
+
+	# Show current branch name
+	current = symbolic-ref --short HEAD
+
+	# Clean up: delete merged branches
+	cleanup = !git branch --merged | grep -v '\\*\\|main\\|master\\|develop' | xargs -n 1 git branch -d
+
+	# Find commits by message
+	find = "!f() { git log --all --grep=\"$1\" --pretty=format:'%h - %s (%cr) <%an>'; }; f"
+
+	# Show contributors
+	contributors = shortlog --summary --numbered --email
+
+	# Ignore file (add to .gitignore)
+	ignore = "!f() { echo \"$1\" >> .gitignore; }; f"
+
+	# Show file history
+	history = log --follow -p --
+
+	# Quick save work in progress
+	wip = !git add -A && git commit -m "WIP: $(date +%Y-%m-%d_%H:%M:%S)"
+
+	# Restore last WIP commit
+	unwip = !git log -1 --pretty=%B | grep -q 'WIP:' && git reset HEAD~1
+
+# ============================================================================
+# Color Configuration
+# ============================================================================
+
+[color]
+	ui = auto
+	branch = auto
+	diff = auto
+	status = auto
+
+[color "branch"]
+	current = yellow reverse
+	local = yellow
+	remote = green
+
+[color "diff"]
+	meta = yellow bold
+	frag = magenta bold
+	old = red bold
+	new = green bold
+
+[color "status"]
+	added = green
+	changed = yellow
+	untracked = red
+[interactive]
+	diffFilter = delta --color-only
+[delta]
+	navigate = true
+	line-numbers = true
+	side-by-side = true
+	syntax-theme = Dracula
+[mergetool "p4merge"]
+	cmd = p4merge $BASE $LOCAL $REMOTE $MERGED
+	trustExitCode = false
