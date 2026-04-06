@@ -1,0 +1,6 @@
+# Shell files — always LF (CRLF breaks bash on Linux/WSL)
+shell/*.bashrc    text eol=lf
+shell/*.bash_profile text eol=lf
+shell/*.gitconfig text eol=lf
+shell/starship.toml text eol=lf
+*.sh              text eol=lf
