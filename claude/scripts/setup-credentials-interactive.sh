@@ -105,12 +105,15 @@ echo
 if [[ ! $REPLY =~ ^[Nn]$ ]]; then
     echo ""
     echo "Testing Jira access..."
-    if bash ~/.claude/scripts/jira-rest-api.sh mine 2>/dev/null; then
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -u "${email}:${api_token}" \
+        "${jira_url}/rest/api/2/myself")
+    if [[ "$http_code" =~ ^2 ]]; then
         echo ""
         echo "✅ Credentials work! Setup complete."
     else
         echo ""
-        echo "❌ Test failed. Please check:"
+        echo "❌ Test failed (HTTP $http_code). Please check:"
         echo "  1. Email is correct"
         echo "  2. API token is valid"
         echo "  3. You have Jira access"

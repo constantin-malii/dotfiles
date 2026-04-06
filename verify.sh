@@ -73,23 +73,38 @@ else
     echo "     See README.md → First-Time Setup → Configure SSH"
 fi
 
-# Test github-work
-result=$(ssh -T git@github-work 2>&1)
-if echo "$result" | grep -q "successfully authenticated"; then
-    account=$(echo "$result" | grep -o 'Hi [^!]*' | sed 's/Hi //')
-    ok "github-work → authenticated as: $account"
-else
-    fail "github-work SSH connection failed"
-    echo "     Run: ssh -T git@github-work"
+# Test github-work (optional)
+if grep -q "github-work" "$HOME/.ssh/config" 2>/dev/null; then
+    result=$(ssh -o ConnectTimeout=5 -T git@github-work 2>&1)
+    if echo "$result" | grep -q "successfully authenticated"; then
+        account=$(echo "$result" | grep -o 'Hi [^!]*' | sed 's/Hi //')
+        ok "github-work → authenticated as: $account"
+    else
+        fail "github-work SSH connection failed"
+        echo "     Run: ssh -T git@github-work"
+    fi
 fi
 
-# Test github-personal (optional — don't fail if not set up)
-result=$(ssh -T git@github-personal 2>&1)
-if echo "$result" | grep -q "successfully authenticated"; then
-    account=$(echo "$result" | grep -o 'Hi [^!]*' | sed 's/Hi //')
-    ok "github-personal → authenticated as: $account"
-else
-    warn "github-personal SSH not working (optional)"
+# Test Azure DevOps (optional)
+if grep -q "ssh.dev.azure.com" "$HOME/.ssh/config" 2>/dev/null; then
+    result=$(ssh -o ConnectTimeout=5 -T git@ssh.dev.azure.com 2>&1)
+    if echo "$result" | grep -q "shell request failed\|Shell access is not supported"; then
+        ok "azure-devops SSH → authenticated"
+    else
+        fail "azure-devops SSH connection failed"
+        echo "     Run: ssh -T git@ssh.dev.azure.com"
+    fi
+fi
+
+# Test github-personal (optional)
+if grep -q "github-personal" "$HOME/.ssh/config" 2>/dev/null; then
+    result=$(ssh -o ConnectTimeout=5 -T git@github-personal 2>&1)
+    if echo "$result" | grep -q "successfully authenticated"; then
+        account=$(echo "$result" | grep -o 'Hi [^!]*' | sed 's/Hi //')
+        ok "github-personal → authenticated as: $account"
+    else
+        warn "github-personal SSH not working (optional)"
+    fi
 fi
 
 # ============================================================================
