@@ -1,0 +1,32 @@
+gui:
+  theme:
+    lightTheme: false
+    activeBorderColor:
+      - '#bd93f9'
+      - bold
+    inactiveBorderColor:
+      - '#6272a4'
+    optionsTextColor:
+      - '#8be9fd'
+    selectedLineBgColor:
+      - '#44475a'
+    selectedRangeBgColor:
+      - '#44475a'
+    cherryPickedCommitBgColor:
+      - '#282a36'
+    cherryPickedCommitFgColor:
+      - '#50fa7b'
+  scrollHeight: 2
+  scrollPastBottom: true
+  mouseEvents: true
+  skipUnstageLineWarning: false
+  skipStashWarning: false
+  showFileTree: true
+  showListFooter: true
+  showRandomTip: true
+  showBranchCommitHash: false
+  showBottomLine: true
+  showPanelJumps: true
+  showCommandLog: true
+  showIcons: false
+  nerdFontsVersion: "3"

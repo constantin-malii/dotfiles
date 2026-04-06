@@ -1,0 +1,18 @@
+gui:
+  theme:
+    activeBorderColor:
+      - cyan
+      - bold
+    inactiveBorderColor:
+      - white
+    selectedLineBgColor:
+      - blue
+    selectedRangeBgColor:
+      - blue
+  returnImmediately: false
+  wrapMainPanel: true
+  scrollHeight: 2
+  scrollPastBottom: true
+  mouseEvents: true
+  ignoreMenuUpdateError: false
+  skipDiscardChangeWarning: false

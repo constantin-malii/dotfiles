@@ -142,6 +142,14 @@ else
     fi
 fi
 
+# Copy tool configs
+if [[ -d "$REPO_DIR/config" ]]; then
+    echo "→ Copying tool configs..."
+    mkdir -p "$HOME/.config/lazygit" "$HOME/.config/lazydocker"
+    [[ -f "$REPO_DIR/config/lazygit.yml" ]]    && cp "$REPO_DIR/config/lazygit.yml"    "$HOME/.config/lazygit/config.yml"
+    [[ -f "$REPO_DIR/config/lazydocker.yml" ]] && cp "$REPO_DIR/config/lazydocker.yml" "$HOME/.config/lazydocker/config.yml"
+fi
+
 # Copy Windows Terminal settings
 WT_DIR="$LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState"
 if [[ -f "$REPO_DIR/windows/terminal-settings.json" ]] && [[ -d "$WT_DIR" ]]; then

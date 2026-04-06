@@ -444,6 +444,10 @@ dotfiles/
 │   ├── .gitconfig                  # Full git config (identity via ~/.gitconfig.local)
 │   └── starship.toml               # Prompt config
 │
+├── config/
+│   ├── lazygit.yml                 # lazygit theme and key config
+│   └── lazydocker.yml              # lazydocker theme and display config
+│
 ├── windows/
 │   └── terminal-settings.json      # Windows Terminal: theme, font, keybindings, profiles
 │
@@ -469,11 +473,14 @@ dotfiles/
 ### Installed locations
 
 ```
-shell/           → $HOME  (~/.bashrc, ~/.bash_profile, ~/.gitconfig)
+shell/              → $HOME  (~/.bashrc, ~/.bash_profile, ~/.gitconfig)
 shell/starship.toml → ~/.config/starship.toml
-claude/scripts/  → ~/.claude/scripts/
-claude/skills/   → ~/.claude/skills/
-claude/atlassian/ → ~/.claude/atlassian/
+config/lazygit.yml    → ~/.config/lazygit/config.yml
+config/lazydocker.yml → ~/.config/lazydocker/config.yml
+windows/terminal-settings.json → %LOCALAPPDATA%\...\LocalState\settings.json
+claude/scripts/     → ~/.claude/scripts/
+claude/skills/      → ~/.claude/skills/
+claude/atlassian/   → ~/.claude/atlassian/
 ```
 
 ---

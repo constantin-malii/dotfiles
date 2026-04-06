@@ -39,6 +39,23 @@ alias code-sym='code .../symend.code-workspace'
 alias code-chrome='code .../chrome-extensions.code-workspace'
 ```
 
+## Tool Configs
+
+Tool-specific configs live in `config/` and are deployed by `install.sh`:
+
+| File | Deployed to |
+|------|-------------|
+| `config/lazygit.yml` | `~/.config/lazygit/config.yml` |
+| `config/lazydocker.yml` | `~/.config/lazydocker/config.yml` |
+
+When changing lazygit or lazydocker settings, edit the files in `config/` and run `bash install.sh`.
+
+To sync settings changed in the UI back to the repo:
+```bash
+cp ~/.config/lazygit/config.yml ~/repos/dotfiles/config/lazygit.yml
+cp ~/.config/lazydocker/config.yml ~/repos/dotfiles/config/lazydocker.yml
+```
+
 ## Tools (winget)
 
 When a new tool is installed on this machine and should be available on all machines:
@@ -57,7 +74,7 @@ Use this section when asked to perform common maintenance tasks in this repo.
 bash verify.sh
 ```
 
-Checks: local override files, shell files, SSH connections, Atlassian credentials, Claude scripts/skills, CLI tools. Returns exit code 0 on success, 1 if anything is missing.
+Checks: local override files, shell files, SSH connections, Atlassian credentials, Claude scripts/skills, tool configs (lazygit, lazydocker), Windows Terminal, CLI tools. Returns exit code 0 on success, 1 if anything is missing.
 
 ### Bootstrap a new machine
 

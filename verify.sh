@@ -148,6 +148,14 @@ for skill in jira confluence azure-devops; do
 done
 
 # ============================================================================
+# Tool configs
+# ============================================================================
+section "Tool configs"
+
+[[ -f "$HOME/.config/lazygit/config.yml" ]]    && ok "lazygit config"    || fail "lazygit config not found — run: bash install.sh"
+[[ -f "$HOME/.config/lazydocker/config.yml" ]] && ok "lazydocker config" || fail "lazydocker config not found — run: bash install.sh"
+
+# ============================================================================
 # Windows Terminal
 # ============================================================================
 section "Windows Terminal"
