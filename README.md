@@ -11,18 +11,43 @@ Personal configuration files and scripts for Claude Code, shell, and development
 
 ### First Time Setup
 
-**Note:** If cloning on a machine with a different GitHub account, see [MULTI_MACHINE_SETUP.md](MULTI_MACHINE_SETUP.md) first.
-
 ```bash
-# 1. Clone this repo
+# 1. Clone
 git clone https://github.com/constantin-malii/dotfiles.git ~/repos/dotfiles
+cd ~/repos/dotfiles && bash install.sh
 
-# 2. Run install script
-cd ~/repos/dotfiles
-bash install.sh
+# 2. Set git identity (required — never committed to git)
+printf '[user]\n\tname = Your Name\n\temail = you@example.com\n' > ~/.gitconfig.local
 
-# 3. Setup Atlassian credentials (interactive)
+# 3. Create local overrides file (add machine-specific aliases here)
+touch ~/.bashrc.local
+
+# 4. Install tools
+winget import winget-packages.json --ignore-unavailable
+
+# 5. Setup Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
+
+# 6. Reload shell
+source ~/.bash_profile
+```
+
+### Machine-specific config
+
+Two files are **never committed** — create them per machine:
+
+**`~/.gitconfig.local`** — your git identity:
+```ini
+[user]
+    name = Your Name
+    email = you@example.com
+```
+
+**`~/.bashrc.local`** — machine-specific aliases and paths:
+```bash
+# Example work machine overrides
+export REPOS_DIR=/c/Users/YourName/source/repos
+alias prj='cd $REPOS_DIR'
 ```
 
 ### Updating
@@ -49,24 +74,19 @@ bash install.sh
 ```
 dotfiles/
 ├── install.sh                      # Install/update script
+├── winget-packages.json            # Tool manifest for new machines
 ├── README.md                       # This file
 │
-├── claude/
-│   ├── scripts/
-│   │   ├── atlassian-common.sh    # Shared validation
-│   │   ├── jira-rest-api.sh       # Jira operations
-│   │   ├── confluence-rest-api.sh # Confluence operations
-│   │   └── ATLASSIAN_SETUP.md     # Setup guide
-│   │
-│   ├── skills/
-│   │   ├── jira/                  # Jira with git workflow integration
-│   │   └── confluence/            # Confluence with doc templates
-│   │
-│   └── atlassian/
-│       └── credentials.template   # Credentials template
+├── shell/
+│   ├── .bashrc                     # SSH agent, shell opts, history, PATH
+│   ├── .bash_profile               # Aliases, functions, tool config (portable)
+│   ├── .gitconfig                  # Git config (identity via ~/.gitconfig.local)
+│   └── starship.toml               # Prompt config
 │
-└── shell/
-    └── (future: bashrc, aliases, etc.)
+└── claude/
+    ├── scripts/                    # Atlassian scripts
+    ├── skills/                     # Claude Code skills
+    └── atlassian/                  # Credential templates
 ```
 
 ## Installed Location
@@ -74,10 +94,67 @@ dotfiles/
 Files are copied to:
 ```
 ~/.claude/
-├── scripts/       # From claude/scripts/
+├── scripts/       # From claude/scripts/ (*.sh, *.py, *.md)
 ├── skills/        # From claude/skills/
 └── atlassian/     # From claude/atlassian/
 ```
+
+## Python Scripts
+
+Some operations require Python scripts for advanced functionality:
+
+### Dependencies
+
+Install required Python packages:
+```bash
+# For large Confluence file uploads
+pip install md2cf mistune requests
+
+# For Jira template system
+pip install requests pyyaml
+```
+
+### confluence-upload-large.py
+
+**Purpose:** Upload large markdown files to Confluence (handles files > 20KB that exceed bash command-line argument limits).
+
+**Usage:**
+```bash
+export CONFLUENCE_EMAIL="your-email@example.com"
+export CONFLUENCE_API_TOKEN="your-api-token"
+export CONFLUENCE_URL="https://your-company.atlassian.net/wiki"
+
+python3 ~/.claude/scripts/confluence-upload-large.py "SPACE" "Page Title" "docs/large-file.md"
+```
+
+**When to use:**
+- Markdown files larger than ~20KB
+- Complex documentation with many images/code blocks
+- Automatic markdown → Confluence HTML conversion
+
+### jira-create-from-template.py
+
+**Purpose:** Create/update Jira issues from YAML templates with proper ADF (Atlassian Document Format) formatting.
+
+**Usage:**
+```bash
+export ATLASSIAN_EMAIL="your-email@example.com"
+export ATLASSIAN_API_TOKEN="your-api-token"
+export JIRA_URL="https://your-company.atlassian.net"
+
+python3 ~/.claude/scripts/jira-create-from-template.py PROJ-123 ~/.claude/jira-templates/stories/my-story.yaml
+```
+
+**Features:**
+- Supports Epic, Story, and Bug templates
+- Rich formatting with emojis, tables, code blocks
+- Automatic parent linking
+- Custom field support (e.g., Value Stream)
+
+**Template locations:**
+- `~/.claude/jira-templates/epics/` - Epic templates
+- `~/.claude/jira-templates/stories/` - Story templates
+- `~/.claude/jira-templates/bugs/` - Bug templates
 
 ## Workflow
 
