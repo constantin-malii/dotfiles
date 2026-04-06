@@ -1,269 +1,518 @@
 # Personal Dotfiles
 
-Personal configuration files and scripts for Claude Code, shell, and development tools.
+A portable terminal setup for Windows/Git Bash — shell config, git config, prompt, CLI tools, and Claude Code skills for Jira, Confluence, and Azure DevOps. Clone once, run one script, and any machine is fully configured.
 
-## Quick Links
+---
 
-- 🚀 **[Multi-Machine Setup Guide](MULTI_MACHINE_SETUP.md)** - Installing on machines with different GitHub accounts
-- 📝 **[Push to Personal GitHub](PUSH_TO_PERSONAL_GITHUB.md)** - Initial setup guide
+## What You Get
 
-## Installation
+| Layer | What it sets up |
+|---|---|
+| **Shell** | Aliases, functions, prompt (Starship), SSH agent, history |
+| **Git** | Aliases, delta diffs, rerere, merge tools |
+| **Tools** | bat, eza, fzf, ripgrep, lazygit, atuin, zoxide, and more |
+| **Claude Skills** | `/jira`, `/confluence`, `/azure-devops` slash commands |
+| **Atlassian Scripts** | Jira + Confluence REST API wrappers usable from Claude or terminal |
 
-### First Time Setup
+---
+
+## Prerequisites
+
+- Windows with Git Bash
+- [winget](https://learn.microsoft.com/en-us/windows/package-manager/winget/) (built into Windows 11)
+- Python 3 (for Confluence large upload and Jira template scripts)
+- Claude Code CLI (for skills)
+
+---
+
+## First-Time Setup on a New Machine
+
+### 1. Configure SSH for multiple GitHub accounts
+
+This repo uses SSH with named host aliases to keep work and personal accounts separate.
+
+**Generate keys** (if not already done):
+```bash
+ssh-keygen -t ed25519 -C "work@company.com" -f ~/.ssh/id_work
+ssh-keygen -t ed25519 -C "personal@email.com" -f ~/.ssh/id_personal
+```
+
+**Create `~/.ssh/config`:**
+```
+# Work GitHub account (constantin-malii)
+Host github-work
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_work
+
+# Personal GitHub account (constantinmalii)
+Host github-personal
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_personal
+```
+
+**Add public keys to GitHub:**
+- `~/.ssh/id_work.pub` → add to your work GitHub account SSH keys
+- `~/.ssh/id_personal.pub` → add to your personal GitHub account SSH keys
+
+**Test connections:**
+```bash
+ssh -T git@github-work      # Should say: Hi constantin-malii!
+ssh -T git@github-personal  # Should say: Hi constantinmalii!
+```
+
+### 2. Clone and install
 
 ```bash
-# 1. Clone
-git clone https://github.com/constantin-malii/dotfiles.git ~/repos/dotfiles
-cd ~/repos/dotfiles && bash install.sh
+git clone git@github-work:constantin-malii/dotfiles.git ~/repos/dotfiles
+cd ~/repos/dotfiles
+bash install.sh
+```
 
-# 2. Set git identity (required — never committed to git)
-printf '[user]\n\tname = Your Name\n\temail = you@example.com\n' > ~/.gitconfig.local
+### 3. Set git identity (per machine — never committed)
 
-# 3. Create local overrides file (add machine-specific aliases here)
-touch ~/.bashrc.local
+```bash
+printf '[user]\n\tname = Your Name\n\temail = you@company.com\n' > ~/.gitconfig.local
+```
 
-# 4. Install tools
+### 4. Set machine-specific shell config (per machine — never committed)
+
+```bash
+cat > ~/.bashrc.local << 'EOF'
+# Repos root (used by ff() and fcd() functions)
+export REPOS_DIR=/d/repos
+
+# Work navigation aliases
+alias prj='cd /c/Users/YourName/source/repos'
+alias sym='cd /c/Users/YourName/source/repos/company'
+EOF
+```
+
+### 5. Install tools
+
+```bash
 winget import winget-packages.json --ignore-unavailable
+```
 
-# 5. Setup Atlassian credentials
+### 6. Set up Atlassian credentials
+
+```bash
 bash ~/.claude/scripts/setup-credentials-interactive.sh
+# Prompts for: email, API token, Jira URL, Confluence URL
+```
 
-# 6. Reload shell
+### 7. Reload shell
+
+```bash
 source ~/.bash_profile
 ```
 
-### Machine-specific config
+---
 
-Two files are **never committed** — create them per machine:
+## Updating an Existing Machine
 
-**`~/.gitconfig.local`** — your git identity:
+```bash
+cd ~/repos/dotfiles
+git pull
+bash install.sh  # backs up existing files before overwriting
+```
+
+Backups are saved to `~/.claude/.backup-TIMESTAMP/`. To roll back:
+```bash
+ls ~/.claude/.backup-*         # find the backup
+cp -r ~/.claude/.backup-TIMESTAMP/* ~/.claude/
+cp ~/.claude/.backup-TIMESTAMP/.bashrc ~/.bashrc
+cp ~/.claude/.backup-TIMESTAMP/.bash_profile ~/.bash_profile
+```
+
+---
+
+## Selective Install (single skill)
+
+Install only one skill and its required scripts, without touching everything else:
+
+```bash
+bash install.sh --list            # see available skills
+bash install.sh --only jira       # install only jira skill + scripts
+bash install.sh --only confluence # install only confluence skill + scripts
+bash install.sh --only azure-devops
+```
+
+---
+
+## Shell Layer
+
+### Prompt
+
+[Starship](https://starship.rs/) — shows username, directory, git branch/status, battery, memory, language versions, command duration.
+
+Config: `shell/starship.toml` → installed to `~/.config/starship.toml`
+
+### Key Aliases
+
+**Navigation:**
+```bash
+z <dir>        # smart cd (zoxide — learns your frequent dirs)
+br             # interactive directory browser (broot)
+fcd [pattern]  # fuzzy cd into any dir under $REPOS_DIR
+ff [pattern]   # fuzzy find file, cd to its directory
+```
+
+**File listing:**
+```bash
+ls             # eza with icons
+ll             # eza long format with git status
+lt             # eza tree (2 levels)
+tree2/tree3    # eza tree at depth 2 or 3
+treeg          # eza tree respecting .gitignore
+```
+
+**File viewing:**
+```bash
+cat <file>     # bat with syntax highlighting
+catn <file>    # bat with line numbers
+md <file>      # glow — render markdown in terminal
+readme         # glow README.md in current dir
+```
+
+**Search:**
+```bash
+rg <pattern>   # ripgrep (respects .gitignore)
+rgi <pattern>  # ripgrep case-insensitive
+rgf <name>     # find files by name via ripgrep
+fif <pattern>  # fuzzy search file contents with preview
+```
+
+**Git:**
+```bash
+gs             # git status
+gd / gdc       # git diff / diff --cached
+gf / gfp       # git fetch / fetch + pull
+glog           # git log graph all branches
+gls            # git log oneline last 20
+gundo          # git reset --soft HEAD~1
+gc <branch>    # checkout branch
+gcb <branch>   # checkout new branch
+gcm "msg"      # git add . && commit
+gcp "msg"      # git add . && commit && push
+gtrack         # show all branch tracking info
+gclean         # delete merged local branches
+fgb            # fuzzy interactive branch checkout
+lg             # lazygit TUI
+```
+
+**Docker:**
+```bash
+dps / dpsa     # docker ps (running / all)
+dcup / dcdown  # docker compose up -d / down
+dlogs <name>   # docker logs -f --tail 100
+dsh <name>     # shell into container
+dins <name>    # inspect container as JSON
+dstats         # container resource usage
+dfullclean     # full docker prune (containers/images/volumes/networks)
+lzd            # lazydocker TUI
+```
+
+**Utilities:**
+```bash
+mkcd <dir>     # mkdir + cd in one
+extract <file> # extract any archive format
+weather [city] # weather in terminal
+serve [port]   # quick HTTP server (default: 8000)
+dsize [dir]    # directory sizes sorted
+loc            # count lines of code
+mdprint <file> # convert markdown to HTML and open in browser
+```
+
+**FZF key bindings:**
+```
+Ctrl+R         # fuzzy search command history (also uses atuin)
+Ctrl+T         # fuzzy find file, paste path
+Alt+C          # fuzzy cd
+Ctrl+G         # navi interactive cheatsheets
+```
+
+**JSON/YAML:**
+```bash
+jqp / jqk      # jq pretty print / show keys
+jqf [file]     # jq pretty print with color pager
+j2y / y2j      # convert JSON↔YAML
+get <url>      # HTTP GET with pretty output (curlie)
+post <url>     # HTTP POST with JSON
+```
+
+### Shell Features
+
+- **atuin** — shell history synced across machines, searchable with context
+- **direnv** — auto-load `.envrc` per directory (activate venvs, set env vars)
+- **zoxide** — smart `cd` that learns your most-used directories
+- **Auto ls after cd** — every `cd` shows directory contents automatically
+
+---
+
+## Git Config
+
+`shell/.gitconfig` → installed to `~/.gitconfig`
+
+Notable settings:
+- **Delta** — syntax-highlighted side-by-side diffs as default pager
+- **rerere** — remembers conflict resolutions
+- **histogram diff** algorithm
+- **Auto prune** on fetch
+- **Auto setup remote** on push
+
+Key git aliases (in addition to shell aliases above):
+```bash
+git lg          # graph log with colors
+git lga         # graph log all branches
+git wip         # quick "WIP: timestamp" commit
+git unwip       # undo last WIP commit
+git cleanup     # delete merged branches
+git find "msg"  # search commits by message
+git stash-show  # show stash diff
+git undo        # soft reset last commit
+git amend       # amend without editing message
+```
+
+Identity is loaded from `~/.gitconfig.local` (never committed):
 ```ini
 [user]
     name = Your Name
-    email = you@example.com
+    email = you@company.com
 ```
 
-**`~/.bashrc.local`** — machine-specific aliases and paths:
-```bash
-# Example work machine overrides
-export REPOS_DIR=/c/Users/YourName/source/repos
-alias prj='cd $REPOS_DIR'
-```
+---
 
-### Updating
+## Claude Code Skills
 
-When you pull new changes from this repo:
+Skills are slash commands in Claude Code that give Claude context and tools for specific workflows.
 
-```bash
-# 1. Pull latest changes
-cd ~/repos/dotfiles
-git pull
+### /jira — Jira Issue Management
 
-# 2. Run install script again (creates backup automatically)
-bash install.sh
-```
-
-**Safe updates:**
-- ✅ Automatically backs up existing files
-- ✅ Never overwrites your credentials file
-- ✅ Preserves executable permissions
-- ✅ Shows backup location for rollback
-
-## Structure
-
-```
-dotfiles/
-├── install.sh                      # Install/update script
-├── winget-packages.json            # Tool manifest for new machines
-├── README.md                       # This file
-│
-├── shell/
-│   ├── .bashrc                     # SSH agent, shell opts, history, PATH
-│   ├── .bash_profile               # Aliases, functions, tool config (portable)
-│   ├── .gitconfig                  # Git config (identity via ~/.gitconfig.local)
-│   └── starship.toml               # Prompt config
-│
-└── claude/
-    ├── scripts/                    # Atlassian scripts
-    ├── skills/                     # Claude Code skills
-    └── atlassian/                  # Credential templates
-```
-
-## Installed Location
-
-Files are copied to:
-```
-~/.claude/
-├── scripts/       # From claude/scripts/ (*.sh, *.py, *.md)
-├── skills/        # From claude/skills/
-└── atlassian/     # From claude/atlassian/
-```
-
-## Python Scripts
-
-Some operations require Python scripts for advanced functionality:
-
-### Dependencies
-
-Install required Python packages:
-```bash
-# For large Confluence file uploads
-pip install md2cf mistune requests
-
-# For Jira template system
-pip install requests pyyaml
-```
-
-### confluence-upload-large.py
-
-**Purpose:** Upload large markdown files to Confluence (handles files > 20KB that exceed bash command-line argument limits).
-
-**Usage:**
-```bash
-export CONFLUENCE_EMAIL="your-email@example.com"
-export CONFLUENCE_API_TOKEN="your-api-token"
-export CONFLUENCE_URL="https://your-company.atlassian.net/wiki"
-
-python3 ~/.claude/scripts/confluence-upload-large.py "SPACE" "Page Title" "docs/large-file.md"
-```
-
-**When to use:**
-- Markdown files larger than ~20KB
-- Complex documentation with many images/code blocks
-- Automatic markdown → Confluence HTML conversion
-
-### jira-create-from-template.py
-
-**Purpose:** Create/update Jira issues from YAML templates with proper ADF (Atlassian Document Format) formatting.
-
-**Usage:**
-```bash
-export ATLASSIAN_EMAIL="your-email@example.com"
-export ATLASSIAN_API_TOKEN="your-api-token"
-export JIRA_URL="https://your-company.atlassian.net"
-
-python3 ~/.claude/scripts/jira-create-from-template.py PROJ-123 ~/.claude/jira-templates/stories/my-story.yaml
-```
-
-**Features:**
-- Supports Epic, Story, and Bug templates
-- Rich formatting with emojis, tables, code blocks
-- Automatic parent linking
-- Custom field support (e.g., Value Stream)
-
-**Template locations:**
-- `~/.claude/jira-templates/epics/` - Epic templates
-- `~/.claude/jira-templates/stories/` - Story templates
-- `~/.claude/jira-templates/bugs/` - Bug templates
-
-## Workflow
-
-### Making Changes
-
-**Option 1: Edit in repo (recommended)**
-```bash
-# Edit files in the repo
-vim ~/repos/dotfiles/claude/scripts/jira-rest-api.sh
-
-# Test locally
-bash ~/repos/dotfiles/claude/scripts/jira-rest-api.sh mine
-
-# Commit and push
-git add -A
-git commit -m "Update jira script"
-git push
-
-# Install to ~/.claude/
-bash ~/repos/dotfiles/install.sh
-```
-
-**Option 2: Edit installed files**
-```bash
-# Edit installed file
-vim ~/.claude/scripts/jira-rest-api.sh
-
-# Copy back to repo
-cp ~/.claude/scripts/jira-rest-api.sh ~/repos/dotfiles/claude/scripts/
-
-# Commit
-cd ~/repos/dotfiles
-git add -A
-git commit -m "Update jira script"
-git push
-```
-
-### New Machine Setup
+Full CRUD for Jira issues with git workflow integration.
 
 ```bash
-# 1. Clone dotfiles
-git clone git@github.com:YOUR_USERNAME/dotfiles.git ~/repos/dotfiles
+/jira mine                                    # your open issues
+/jira get PROJ-123                            # issue details
+/jira search "project=PL AND status=Open"     # JQL search
+/jira create PL "Fix login bug" "Description" Bug
+/jira update PROJ-123 summary "New title"
+/jira update PROJ-123 description "New desc"
+/jira transition PROJ-123 "In Progress"       # change status
+/jira transition PROJ-123                     # list available transitions
+/jira assign PROJ-123 me
+/jira assign PROJ-123 user@company.com
+/jira comment PROJ-123 "Comment text"
+/jira comments PROJ-123                       # list comments
+/jira labels PROJ-123 add "bug,urgent"
+/jira labels PROJ-123 remove "urgent"
+/jira link PROJ-123 "blocks" PROJ-456
+/jira link PROJ-123 "relates to" PROJ-789
+```
 
-# 2. Install
-cd ~/repos/dotfiles
-bash install.sh
+The skill also integrates git workflow — Claude will suggest branch names and commit formats based on the ticket.
 
-# 3. Setup credentials (interactive - will prompt for email/token)
+### /confluence — Confluence Page Management
+
+```bash
+/confluence search "deployment guide"
+/confluence search "runbook" DEV              # search in specific space
+/confluence get 12345678                      # get page by ID
+/confluence create DEV "Page Title" "Content"
+/confluence create DEV "Child Page" "Content" 12345678  # with parent
+/confluence update 12345678 "New content" 3   # update (must provide version)
+/confluence my-pages                          # your recently edited pages
+/confluence spaces                            # list all spaces
+/confluence create-from-md DEV "Title" docs/file.md          # from markdown file
+/confluence create-from-md DEV "Title" docs/file.md 12345678 # with parent
+```
+
+**Large markdown files (>20KB):** Use the Python script directly:
+```bash
+python3 ~/.claude/scripts/confluence-upload-large.py "DEV" "Page Title" "docs/large-file.md"
+```
+
+### /azure-devops — Azure DevOps Pull Requests
+
+Auto-detects org/project/repo from your current git remote. Uses git credential manager — no stored credentials needed.
+
+```bash
+/azure-devops create-pr feature/my-branch main "PR Title" "Description"
+/azure-devops list-prs                        # active PRs
+/azure-devops list-prs completed              # completed PRs
+/azure-devops my-prs                          # your open PRs
+/azure-devops get-pr 42
+/azure-devops update-pr 42 "New Title" "New Description"
+/azure-devops add-reviewers 42 user@company.com user2@company.com
+/azure-devops complete-pr 42 squash           # merge strategies: squash, merge, rebase
+/azure-devops abandon-pr 42
+```
+
+---
+
+## Atlassian Scripts (Terminal)
+
+Scripts can also be called directly from the terminal without Claude:
+
+```bash
+bash ~/.claude/scripts/jira-rest-api.sh mine
+bash ~/.claude/scripts/jira-rest-api.sh get PROJ-123
+bash ~/.claude/scripts/confluence-rest-api.sh search "runbook"
+bash ~/.claude/scripts/azure-devops-rest-api.sh my-prs
+```
+
+### Credentials
+
+Stored in `~/.atlassian/credentials` (gitignored). Set up interactively:
+```bash
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 ```
 
-**Alternative: Manual setup**
+Or manually:
 ```bash
-cp ~/.atlassian/credentials.template ~/.atlassian/credentials
-nano ~/.atlassian/credentials  # Edit with your actual credentials
+cp ~/.claude/atlassian/credentials.template ~/.atlassian/credentials
+nano ~/.atlassian/credentials
 chmod 600 ~/.atlassian/credentials
 ```
+
+The credentials file sets:
+```bash
+ATLASSIAN_EMAIL="you@company.com"
+ATLASSIAN_API_TOKEN="your-token"
+JIRA_URL="https://yourcompany.atlassian.net"
+CONFLUENCE_URL="https://yourcompany.atlassian.net/wiki"
+```
+
+Get an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+
+---
+
+## Repo Structure
+
+```
+dotfiles/
+├── install.sh                      # Install/update script (supports --only, --list)
+├── winget-packages.json            # Tool manifest for new machines
+├── .gitattributes                  # Enforces LF line endings for shell files
+├── CLAUDE.md                       # Claude Code behavior instructions
+│
+├── shell/
+│   ├── .bashrc                     # SSH agent, shell options, history, PATH
+│   ├── .bash_profile               # All aliases, functions, tool config (portable)
+│   ├── .gitconfig                  # Full git config (identity via ~/.gitconfig.local)
+│   └── starship.toml               # Prompt config
+│
+└── claude/
+    ├── scripts/
+    │   ├── jira-rest-api.sh            # Jira CRUD operations
+    │   ├── confluence-rest-api.sh      # Confluence page operations
+    │   ├── azure-devops-rest-api.sh    # Azure DevOps PR operations
+    │   ├── atlassian-common.sh         # Shared credential loading
+    │   ├── confluence-upload-large.py  # Large markdown → Confluence upload
+    │   ├── jira-create-from-template.py # Jira issues from YAML templates
+    │   ├── create-issue-link.sh        # Jira issue linking
+    │   ├── setup-credentials-interactive.sh
+    │   └── ATLASSIAN_SETUP.md
+    ├── skills/
+    │   ├── jira/                   # /jira Claude skill
+    │   ├── confluence/             # /confluence Claude skill
+    │   └── azure-devops/           # /azure-devops Claude skill
+    └── atlassian/
+        └── credentials.template    # Template for ~/.atlassian/credentials
+```
+
+### Installed locations
+
+```
+shell/           → $HOME  (~/.bashrc, ~/.bash_profile, ~/.gitconfig)
+shell/starship.toml → ~/.config/starship.toml
+claude/scripts/  → ~/.claude/scripts/
+claude/skills/   → ~/.claude/skills/
+claude/atlassian/ → ~/.claude/atlassian/
+```
+
+---
+
+## Machine-specific Files (never committed)
+
+| File | Purpose |
+|---|---|
+| `~/.gitconfig.local` | Git identity: name and email |
+| `~/.bashrc.local` | Machine-specific aliases, paths, env vars |
+| `~/.atlassian/credentials` | Jira/Confluence API credentials |
+| `~/.ssh/config` | SSH multi-account routing |
+
+---
+
+## Making Changes
+
+**Shell aliases/functions** — edit in the repo, then install:
+```bash
+vim ~/repos/dotfiles/shell/.bash_profile
+bash ~/repos/dotfiles/install.sh
+source ~/.bash_profile
+```
+
+**Claude scripts** — edit in the repo, then install:
+```bash
+vim ~/repos/dotfiles/claude/scripts/jira-rest-api.sh
+bash ~/repos/dotfiles/install.sh --only jira
+```
+
+**Adding a new tool** — install it, then update the manifest:
+```bash
+winget install SomePublisher.SomeTool
+winget export -o ~/repos/dotfiles/winget-packages.json
+cd ~/repos/dotfiles && git add winget-packages.json && git commit -m "feat: add SomeTool"
+git push
+```
+
+---
 
 ## Security
 
 **Never commit:**
-- ❌ Actual credentials (`~/.atlassian/credentials`)
-- ❌ API tokens
-- ❌ Any secrets
+- `~/.atlassian/credentials` (API tokens)
+- `~/.gitconfig.local` (personal email)
+- `~/.bashrc.local` (work paths)
+- `~/.ssh/` (private keys)
 
 **Safe to commit:**
-- ✅ Scripts (no hardcoded secrets)
-- ✅ Skills
-- ✅ Templates
-- ✅ Documentation
+- Scripts (no hardcoded secrets — credentials loaded from env)
+- Skills and templates
+- Shell config (company-specific aliases excluded)
+
+---
 
 ## Troubleshooting
 
-### Rollback After Update
-
-If an update breaks something:
+**Shell changes not visible after install:**
 ```bash
-# Find backup directory
-ls -lt ~/.claude/.backup-*
+source ~/.bash_profile
+```
 
-# Restore from backup
+**Wrong git identity on commits:**
+```bash
+cat ~/.gitconfig.local    # verify file exists with correct email
+git config user.email     # verify git picks it up
+```
+
+**Atlassian scripts fail with auth error:**
+```bash
+cat ~/.atlassian/credentials    # verify file exists
+bash ~/.claude/scripts/setup-credentials-interactive.sh  # re-run setup
+```
+
+**SSH authenticates as wrong GitHub account:**
+```bash
+ssh -T git@github-work      # test which account is used
+ssh -T git@github-personal
+cat ~/.ssh/config            # verify IdentityFile mapping
+```
+
+**Rollback after bad install:**
+```bash
+ls ~/.claude/.backup-*      # find latest backup
 cp -r ~/.claude/.backup-TIMESTAMP/* ~/.claude/
 ```
-
-### Credentials Not Working
-
-```bash
-# Check if file exists
-cat ~/.atlassian/credentials
-
-# Re-run setup
-bash ~/.claude/scripts/setup-atlassian-config.sh
-```
-
-### Permissions Issue
-
-```bash
-# Fix script permissions
-chmod +x ~/.claude/scripts/*.sh
-```
-
-## Contributing
-
-This is a personal repo, but improvements are welcome:
-1. Fork it
-2. Make changes
-3. Test thoroughly
-4. Submit PR (if you want to share improvements)
-
-## License
-
-Personal use only.
