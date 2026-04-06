@@ -8,6 +8,9 @@
 **/*key*
 **/*password*
 **/.*rc
+!shell/.bashrc
+!shell/.bash_profile
+!shell/.gitconfig
 !**/*.template
 
 # OS files
