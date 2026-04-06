@@ -100,11 +100,25 @@ section "Atlassian credentials"
 CREDS="$HOME/.atlassian/credentials"
 if [[ -f "$CREDS" ]]; then
     ok "~/.atlassian/credentials exists"
-    source "$CREDS" 2>/dev/null
-    [[ -n "$ATLASSIAN_EMAIL" ]]    && ok "  ATLASSIAN_EMAIL set"    || fail "  ATLASSIAN_EMAIL missing"
-    [[ -n "$ATLASSIAN_API_TOKEN" ]] && ok "  ATLASSIAN_API_TOKEN set" || fail "  ATLASSIAN_API_TOKEN missing"
-    [[ -n "$JIRA_URL" ]]            && ok "  JIRA_URL: $JIRA_URL"    || fail "  JIRA_URL missing"
-    [[ -n "$CONFLUENCE_URL" ]]      && ok "  CONFLUENCE_URL set"     || warn "  CONFLUENCE_URL not set (optional)"
+    # Parse INI-style format (same as atlassian-common.sh)
+    local_email="" local_token="" local_jira="" local_conf="" section=""
+    while IFS='=' read -r key value; do
+        key=$(echo "$key" | xargs); value=$(echo "$value" | xargs)
+        [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+        [[ "$key" =~ ^\[.*\]$ ]] && section="$key" && continue
+        if [[ "$section" == "[default]" ]]; then
+            case "$key" in
+                email)          local_email="$value" ;;
+                api_token)      local_token="$value" ;;
+                jira_url)       local_jira="$value"  ;;
+                confluence_url) local_conf="$value"  ;;
+            esac
+        fi
+    done < "$CREDS"
+    [[ -n "$local_email" ]] && ok "  email: $local_email"    || fail "  email missing from credentials"
+    [[ -n "$local_token" ]] && ok "  api_token set"          || fail "  api_token missing from credentials"
+    [[ -n "$local_jira"  ]] && ok "  jira_url: $local_jira" || warn "  jira_url not set (required for Jira skill)"
+    [[ -n "$local_conf"  ]] && ok "  confluence_url set"    || warn "  confluence_url not set (required for Confluence skill)"
 else
     fail "~/.atlassian/credentials not found"
     echo "     Fix: bash ~/.claude/scripts/setup-credentials-interactive.sh"
