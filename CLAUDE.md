@@ -6,6 +6,8 @@
 - No `Co-Authored-By: Claude` lines in commits
 - Write commit messages as if authored by a human developer
 
+---
+
 ## Shell Config
 
 **Always edit `shell/` — never `~/`**
@@ -42,3 +44,127 @@ alias code-chrome='code .../chrome-extensions.code-workspace'
 When a new tool is installed on this machine and should be available on all machines:
 1. Run: `winget export -o winget-packages.json`
 2. Commit the updated `winget-packages.json`
+
+---
+
+## Agent Task Guide
+
+Use this section when asked to perform common maintenance tasks in this repo.
+
+### Verify install is complete
+
+```bash
+bash verify.sh
+```
+
+Checks: local override files, shell files, SSH connections, Atlassian credentials, Claude scripts/skills, CLI tools. Returns exit code 0 on success, 1 if anything is missing.
+
+### Bootstrap a new machine
+
+Follow this exact sequence — do not skip steps:
+
+```bash
+# 1. Generate SSH keys (if ~/.ssh/id_work and ~/.ssh/id_personal don't exist)
+ssh-keygen -t ed25519 -C "work@company.com" -f ~/.ssh/id_work -N ""
+ssh-keygen -t ed25519 -C "personal@email.com" -f ~/.ssh/id_personal -N ""
+
+# 2. Create ~/.ssh/config (if it doesn't exist)
+cat > ~/.ssh/config << 'EOF'
+Host github-work
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_work
+
+Host github-personal
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_personal
+EOF
+
+# 3. Show public keys for the user to add to GitHub
+cat ~/.ssh/id_work.pub
+cat ~/.ssh/id_personal.pub
+# STOP — tell the user to add these to the correct GitHub accounts before continuing
+
+# 4. Test SSH (after user confirms keys are added)
+ssh -T git@github-work      # must say: Hi constantin-malii!
+ssh -T git@github-personal  # must say: Hi constantinmalii!
+
+# 5. Clone
+git clone git@github-work:constantin-malii/dotfiles.git ~/repos/dotfiles
+cd ~/repos/dotfiles && bash install.sh
+
+# 6. Create local identity
+printf '[user]\n\tname = Your Name\n\temail = you@email.com\n' > ~/.gitconfig.local
+
+# 7. Create local overrides
+touch ~/.bashrc.local
+# Ask the user what REPOS_DIR should be and what work aliases to add
+
+# 8. Install tools
+winget import winget-packages.json --ignore-unavailable
+
+# 9. Set up Atlassian credentials
+bash ~/.claude/scripts/setup-credentials-interactive.sh
+
+# 10. Verify
+bash verify.sh
+```
+
+### Add a new shell alias or function
+
+1. Edit `shell/.bash_profile` in the repo (not `~/.bash_profile`)
+2. Place in the appropriate section (aliases by category, functions near similar functions)
+3. Run `bash install.sh` to deploy
+4. Run `source ~/.bash_profile` to activate in current session
+5. Commit
+
+### Add a new CLI tool
+
+1. Install the tool: `winget install Publisher.ToolName`
+2. Update the manifest: `winget export -o winget-packages.json`
+3. Add any aliases or config to `shell/.bash_profile` if needed
+4. Run `bash install.sh` if shell changes were made
+5. Commit both `winget-packages.json` and any shell changes
+
+### Add a new Claude script
+
+1. Create the script in `claude/scripts/`
+2. If it belongs to a skill, add it to the `SKILL_SCRIPTS` mapping in `install.sh`
+3. Run `bash install.sh --only <skill>` to deploy
+4. Test: `bash ~/.claude/scripts/<script-name>.sh`
+5. Commit
+
+### Update Atlassian credentials
+
+```bash
+bash ~/.claude/scripts/setup-credentials-interactive.sh
+```
+
+Credentials are stored in `~/.atlassian/credentials` (gitignored — never committed).
+
+### Troubleshoot SSH wrong account
+
+```bash
+ssh -T git@github-work      # check which account is returned
+ssh -T git@github-personal
+cat ~/.ssh/config            # verify IdentityFile mapping
+ssh-add -l                  # check if agent is overriding config
+```
+
+If SSH agent is overriding config, force the key:
+```bash
+ssh -i ~/.ssh/id_work -T git@github.com
+```
+
+### Roll back a bad install
+
+```bash
+ls ~/.claude/.backup-*      # find latest backup timestamp
+cp -r ~/.claude/.backup-TIMESTAMP/* ~/.claude/
+# Also restore shell files if they were changed:
+cp ~/.claude/.backup-TIMESTAMP/.bashrc ~/.bashrc
+cp ~/.claude/.backup-TIMESTAMP/.bash_profile ~/.bash_profile
+cp ~/.claude/.backup-TIMESTAMP/.gitconfig ~/.gitconfig
+source ~/.bash_profile
+```
