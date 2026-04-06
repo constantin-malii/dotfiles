@@ -184,6 +184,13 @@ else
     warn "Windows Terminal settings.json not found (not installed?)"
 fi
 
+# Check Nerd Font installed (required for starship icons)
+if powershell -Command "Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts' | Out-String" 2>/dev/null | grep -qi "JetBrainsMono NF"; then
+    ok "JetBrainsMono Nerd Font installed"
+else
+    fail "JetBrainsMono Nerd Font not found — run: winget install DEVCOM.JetBrainsMonoNerdFont"
+fi
+
 # ============================================================================
 # Tools
 # ============================================================================
