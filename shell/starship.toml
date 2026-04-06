@@ -1,0 +1,211 @@
+# ~/.config/starship.toml
+
+# Wait for starship to check files under the current directory.
+scan_timeout = 30
+
+# Wait for commands executed by starship
+command_timeout = 700
+
+# Disable the newline at the start of the prompt
+add_newline = true
+
+# A continuation prompt for multi-line input
+continuation_prompt = " "
+
+# format string
+format = """
+[](#1b1e23)\
+$username\
+[](fg:#1b1e23 bg:#96e6c2)\
+$directory\
+[](fg:#96e6c2 bg:#50a9cf)\
+$git_branch\
+$git_status\
+$git_metrics\
+$git_commit\
+$git_state\
+[](fg:#50a9cf bg:#40265c)\
+$battery\
+$memory_usage\
+[](fg:#40265c bg:#9e2281)\
+$nodejs\
+$rust\
+$dotnet\
+[](fg:#9e2281 bg:#bd4b64)\
+$time\
+$cmd_duration\
+[](fg:#bd4b64)\
+$character\
+"""
+
+## Section 1: User and host info
+
+[username]
+show_always = true
+style_user = "bg:#1b1e23"
+style_root = "bg:#1b1e23"
+format = '[ ]($style)'
+disabled = false
+## Section 2: Directories
+
+[directory]
+style = "bg:#96e6c2 fg:#1b1e23"
+format = "[ $path ]($style)"
+truncation_length = 3
+truncation_symbol = "…/"
+truncate_to_repo = true
+read_only = " "
+disabled = false
+# Here is how you can shorten some long paths by text replacement 
+# similar to mapped_locations in Oh My Posh.
+#
+# Keep in mind that the order matters. For example:
+# 	- "Important Documents" = "  "
+#
+# will not be replaced, because "Documents" was already substituted before.
+# So either put "Important Documents" before "Documents" or use the substituted version:
+# 	- "Important  " = "  "
+
+[directory.substitutions]
+"Documents" = " "
+"Downloads" = " "
+"Music" = " "
+"Pictures" = " "
+
+## Section 3: Git
+
+[git_branch]
+symbol = ""
+truncation_length = 48
+truncation_symbol = "…"
+format = '[[ $symbol $branch ](bg:#50a9cf fg:#1b1e23)]($style)'
+disabled = false
+
+[git_status]
+format = '[[($all_status$ahead_behind )](bg:#50a9cf fg:#1b1e23)]($style)'
+ahead = "⇡${count}"
+behind = "⇣${count}"
+diverged = "⇕⇡${ahead_count}⇣${behind_count}"
+conflicted = "="
+stashed = "\\$"
+modified = "!"
+staged = "+"
+renamed = "»"
+deleted = "✘"
+untracked = "?"
+disabled = false
+
+[git_commit]
+format = '[[\\($hash$tag\\) ](bg:#50a9cf fg:#1b1e23)]($style) '
+commit_hash_length = 7
+tag_symbol = " "
+tag_disabled = false
+only_detached = true
+disabled = false
+
+[git_metrics]
+added_style = "bold green"
+deleted_style = "bold red"
+format = '[+$added](bg:#50a9cf $added_style)[-$deleted](bg:#50a9cf $deleted_style)'
+disabled = true
+
+[git_state]
+format = '[\($state( $progress_current of $progress_total)\)]($style) '
+rebase = " REBASING"
+merge = " MERGING"
+revert = " REVERTING"
+cherry_pick = " PICKING"
+bisect = " BISECTING"
+am = " AM"
+am_or_rebase = " AM/REBASE"
+disabled = false
+
+## Section 4: Stats
+
+[battery]
+format = "[[ $symbol $percentage ](bg:#40265c fg:#f6eddb)]($style)"
+full_symbol	= ""	
+charging_symbol	= ""
+discharging_symbol = ""
+unknown_symbol	= ""
+empty_symbol = ""
+disabled = false
+
+[[battery.display]]
+threshold = 99
+
+[memory_usage]
+format = "[[  ${ram} ${ram_pct} ](bg:#40265c fg:#f6eddb)]($style)"
+threshold = 70
+disabled = false
+
+## Section 5: Language
+
+[dotnet]
+symbol = ""
+version_format = "${major}.${minor}"
+format = '[[ $symbol ($version) ](bg:#9e2281 fg:#f6eddb)]($style)'
+
+[nodejs]
+symbol = ""
+format = '[[ $symbol ($version) ](bg:#9e2281 fg:#f6eddb)]($style)'
+
+[rust]
+symbol = ""
+format = '[[ $symbol ($version) ](bg:#9e2281 fg:#f6eddb)]($style)'
+
+## Section 6: Timing
+
+[cmd_duration]
+format = '[[  $duration ](bg:#bd4b64 fg:#f6eddb)]($style)'
+min_time = 2_000
+disabled = false
+
+[time]
+format = '[[  $time ](bg:#bd4b64 fg:#f6eddb)]($style)'
+time_format = "%R" # Hour:Minute Format
+disabled = true
+
+[character]
+success_symbol = "[](bold green)"
+error_symbol = "[ ✗](bold red)"
+
+
+
+## Disabled stuff
+
+[docker_context]
+disabled = true
+
+[erlang]
+disabled = true
+
+[elixir]
+disabled = true
+
+[elm]
+disabled = true
+
+[zig]
+disabled = true
+
+[swift] 
+disabled = true
+
+[aws]
+disabled = true
+
+[java]
+disabled = true
+
+[crystal]
+disabled = true
+
+[gcloud]
+disabled = true
+
+[kotlin]
+disabled = true
+
+[package]
+disabled = true
