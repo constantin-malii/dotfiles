@@ -26,15 +26,22 @@ echo ""
 
 # Create directory structure
 mkdir -p "$CLAUDE_DIR"/{skills,scripts,atlassian}
+mkdir -p "$HOME/.config"
 
 # Backup existing files on update
 if [[ "$MODE" == "update" ]]; then
     echo "Creating backup: $BACKUP_DIR"
     mkdir -p "$BACKUP_DIR"
 
-    # Backup only if files exist
+    # Backup claude files
     [[ -d "$CLAUDE_DIR/scripts" ]] && cp -r "$CLAUDE_DIR/scripts" "$BACKUP_DIR/"
     [[ -d "$CLAUDE_DIR/skills" ]] && cp -r "$CLAUDE_DIR/skills" "$BACKUP_DIR/"
+
+    # Backup shell configs
+    for f in .bashrc .bash_profile .gitconfig; do
+        [[ -f "$HOME/$f" ]] && cp "$HOME/$f" "$BACKUP_DIR/$f"
+    done
+    [[ -f "$HOME/.config/starship.toml" ]] && cp "$HOME/.config/starship.toml" "$BACKUP_DIR/starship.toml"
 
     echo "✅ Backup created"
     echo ""
@@ -43,8 +50,10 @@ fi
 # Copy scripts (preserves executable bit)
 echo "→ Copying scripts..."
 cp -r "$REPO_DIR/claude/scripts/"*.sh "$CLAUDE_DIR/scripts/" 2>/dev/null || true
+cp -r "$REPO_DIR/claude/scripts/"*.py "$CLAUDE_DIR/scripts/" 2>/dev/null || true
 cp -r "$REPO_DIR/claude/scripts/"*.md "$CLAUDE_DIR/scripts/" 2>/dev/null || true
 chmod +x "$CLAUDE_DIR/scripts/"*.sh 2>/dev/null || true
+chmod +x "$CLAUDE_DIR/scripts/"*.py 2>/dev/null || true
 
 # Copy skills
 echo "→ Copying skills..."
@@ -60,6 +69,27 @@ fi
 # Never overwrite actual credentials
 if [[ -f "$CLAUDE_DIR/atlassian/credentials" ]]; then
     echo "⚠️  Preserved existing credentials file (not overwritten)"
+fi
+
+# Copy shell configs
+if [[ -d "$REPO_DIR/shell" ]]; then
+    echo "→ Copying shell configs..."
+    [[ -f "$REPO_DIR/shell/.bashrc" ]]       && cp "$REPO_DIR/shell/.bashrc"       "$HOME/.bashrc"
+    [[ -f "$REPO_DIR/shell/.bash_profile" ]] && cp "$REPO_DIR/shell/.bash_profile" "$HOME/.bash_profile"
+    [[ -f "$REPO_DIR/shell/.gitconfig" ]]    && cp "$REPO_DIR/shell/.gitconfig"    "$HOME/.gitconfig"
+    [[ -f "$REPO_DIR/shell/starship.toml" ]] && cp "$REPO_DIR/shell/starship.toml" "$HOME/.config/starship.toml"
+fi
+
+# Warn about missing local overrides (never fail — they're optional)
+echo ""
+echo "→ Checking local overrides..."
+if [[ ! -f "$HOME/.bashrc.local" ]]; then
+    echo "⚠️  ~/.bashrc.local not found — create it for machine-specific aliases/paths"
+fi
+if [[ ! -f "$HOME/.gitconfig.local" ]]; then
+    echo "⚠️  ~/.gitconfig.local not found — git commits will have no author identity"
+    echo "   Create it with:"
+    echo "   printf '[user]\n\tname = Your Name\n\temail = you@example.com\n' > ~/.gitconfig.local"
 fi
 
 echo ""
