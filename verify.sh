@@ -148,6 +148,20 @@ for skill in jira confluence azure-devops; do
 done
 
 # ============================================================================
+# Windows Terminal
+# ============================================================================
+section "Windows Terminal"
+
+WT_SETTINGS_FILE="$LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"
+if [[ -f "$WT_SETTINGS_FILE" ]]; then
+    scheme=$(python -m json.tool "$WT_SETTINGS_FILE" 2>/dev/null | grep '"colorScheme"' | head -1 | tr -d ' ",' | cut -d: -f2)
+    font=$(python -m json.tool "$WT_SETTINGS_FILE" 2>/dev/null | grep '"face"' | head -1 | tr -d ' ",' | cut -d: -f2)
+    ok "settings.json found (scheme: $scheme, font: $font)"
+else
+    warn "Windows Terminal settings.json not found (not installed?)"
+fi
+
+# ============================================================================
 # Tools
 # ============================================================================
 section "CLI tools"

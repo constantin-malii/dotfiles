@@ -142,6 +142,13 @@ else
     fi
 fi
 
+# Copy Windows Terminal settings
+WT_DIR="$LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState"
+if [[ -f "$REPO_DIR/windows/terminal-settings.json" ]] && [[ -d "$WT_DIR" ]]; then
+    echo "→ Copying Windows Terminal settings..."
+    cp "$REPO_DIR/windows/terminal-settings.json" "$WT_DIR/settings.json"
+fi
+
 # Copy shell configs
 if [[ -d "$REPO_DIR/shell" ]]; then
     echo "→ Copying shell configs..."

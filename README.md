@@ -284,6 +284,47 @@ Identity is loaded from `~/.gitconfig.local` (never committed):
 
 ---
 
+## Windows Terminal
+
+`windows/terminal-settings.json` → installed to `%LOCALAPPDATA%\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json`
+
+**What's configured:**
+
+| Setting | Value |
+|---|---|
+| Theme | Dracula (full color scheme embedded) |
+| Font | Cascadia Code, size 11 |
+| Default profile | Git Bash |
+| Opacity | 90–95% with acrylic blur |
+| Initial size | 120×30, launches maximized |
+| Cursor | Bar style |
+
+**Custom keybindings:**
+
+| Key | Action |
+|---|---|
+| `Ctrl+Shift+T` | New tab |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next/prev tab |
+| `Alt+Shift++` | Split pane right |
+| `Alt+Shift+-` | Split pane down |
+| `Alt+Shift+D` | Auto split |
+| `Alt+←↑→↓` | Move focus between panes |
+| `Ctrl+Shift+W` | Close pane |
+| `Ctrl+,` | Open settings |
+
+**Updating terminal settings:**
+
+Make changes in Windows Terminal UI, then sync back to the repo:
+```bash
+cp "$LOCALAPPDATA/Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json" \
+   ~/repos/dotfiles/windows/terminal-settings.json
+cd ~/repos/dotfiles && git add windows/terminal-settings.json
+git commit -m "chore: update Windows Terminal settings"
+git push
+```
+
+---
+
 ## Claude Code Skills
 
 Skills are slash commands in Claude Code that give Claude context and tools for specific workflows.
@@ -402,6 +443,9 @@ dotfiles/
 │   ├── .bash_profile               # All aliases, functions, tool config (portable)
 │   ├── .gitconfig                  # Full git config (identity via ~/.gitconfig.local)
 │   └── starship.toml               # Prompt config
+│
+├── windows/
+│   └── terminal-settings.json      # Windows Terminal: theme, font, keybindings, profiles
 │
 └── claude/
     ├── scripts/
