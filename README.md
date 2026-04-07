@@ -450,6 +450,8 @@ Run once when setting up Claude Code in a new project. Scans the codebase for te
 
 Plugins extend Claude Code with additional skills and workflows. Managed by Claude Code's plugin system — versioned and auto-updated independently of dotfiles.
 
+For a full guide on what each plugin does, when to use it, and how they fit together as a workflow: **[docs/claude-code-workflow.md](docs/claude-code-workflow.md)**
+
 **Marketplaces:**
 - [claude-plugins-official](https://github.com/anthropics/claude-plugins-official) — Anthropic's official marketplace (built-in)
 - [claude-code-skills](https://github.com/alirezarezvani/claude-skills) — Community marketplace (220+ skills)
