@@ -131,7 +131,10 @@ choco install navi curlie ctop -y
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 
-# 11. Install Claude Code plugins
+# 11. Add community marketplace and install Claude Code plugins
+# Community marketplace (alirezarezvani/claude-skills → registers as "claude-code-skills")
+claude plugin marketplace add alirezarezvani/claude-skills
+
 # Superpowers suite
 claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills

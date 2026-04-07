@@ -450,8 +450,15 @@ Run once when setting up Claude Code in a new project. Scans the codebase for te
 
 Plugins extend Claude Code with additional skills and workflows. Managed by Claude Code's plugin system — versioned and auto-updated independently of dotfiles.
 
+**Marketplaces:**
+- [claude-plugins-official](https://github.com/anthropics/claude-plugins-official) — Anthropic's official marketplace (built-in)
+- [claude-code-skills](https://github.com/alirezarezvani/claude-skills) — Community marketplace (220+ skills)
+
 Install on a new machine:
 ```bash
+# Add community marketplace (registers as "claude-code-skills")
+claude plugin marketplace add alirezarezvani/claude-skills
+
 # Superpowers suite
 claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills
@@ -485,19 +492,19 @@ claude plugin update claude-code-setup@claude-plugins-official
 claude plugin update security-guidance@claude-plugins-official
 ```
 
-| Plugin | What it adds |
-|---|---|
-| `superpowers` | Brainstorming, planning, subagent-driven development, TDD, code review workflows |
-| `engineering-skills` | Architecture analysis, dependency analysis, architecture diagrams |
-| `finance-skills` | Financial analysis and modelling skills |
-| `c-level-skills` | Executive-level reporting and strategy skills |
-| `commit-commands` | `/commit`, `/commit-push-pr` — auto-generates commit messages, pushes, opens PRs |
-| `code-review` | `/code-review` — 4 parallel agents review PRs with confidence-scored findings |
-| `pr-review-toolkit` | 6 specialized agents: comment accuracy, test coverage, silent failures, type design, general review, simplification |
-| `skill-creator` | Create, improve, and benchmark skills; foundation for custom skill development |
-| `claude-md-management` | `claude-md-improver` keeps CLAUDE.md accurate; `/revise-claude-md` captures session learnings |
-| `claude-code-setup` | Scans a codebase and recommends hooks, skills, MCP servers tailored to it |
-| `security-guidance` | Always-on PreToolUse hook — warns about security issues on every file edit |
+| Plugin | Source | What it adds |
+|---|---|---|
+| `superpowers` | official | Brainstorming, planning, subagent-driven development, TDD, code review workflows |
+| `engineering-skills` | community | Architecture analysis, dependency analysis, architecture diagrams |
+| `finance-skills` | community | Financial analysis and modelling skills |
+| `c-level-skills` | community | Executive-level reporting and strategy skills |
+| `commit-commands` | official | `/commit`, `/commit-push-pr` — auto-generates commit messages, pushes, opens PRs |
+| `code-review` | official | `/code-review` — 4 parallel agents review PRs with confidence-scored findings |
+| `pr-review-toolkit` | official | 6 specialized agents: comment accuracy, test coverage, silent failures, type design, general review, simplification |
+| `skill-creator` | official | Create, improve, and benchmark skills; foundation for custom skill development |
+| `claude-md-management` | official | `claude-md-improver` keeps CLAUDE.md accurate; `/revise-claude-md` captures session learnings |
+| `claude-code-setup` | official | Scans a codebase and recommends hooks, skills, MCP servers tailored to it |
+| `security-guidance` | official | Always-on PreToolUse hook — warns about security issues on every file edit |
 
 ---
 
