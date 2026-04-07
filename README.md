@@ -11,7 +11,7 @@ A portable terminal setup for Windows/Git Bash — shell config, git config, pro
 | **Shell** | Aliases, functions, prompt (Starship), SSH agent, history |
 | **Git** | Aliases, delta diffs, rerere, merge tools |
 | **Tools** | bat, eza, fzf, ripgrep, lazygit, atuin, zoxide, broot, duf, procs, dust, and more |
-| **Claude Skills** | `/jira`, `/confluence`, `/azure-devops` slash commands |
+| **Claude Skills** | `/jira`, `/confluence`, `/azure-devops`, `/skillify`, `/tech-debt`, `/ddup`, `/verify-template` |
 | **Atlassian Scripts** | Jira + Confluence REST API wrappers usable from Claude or terminal |
 
 ---
