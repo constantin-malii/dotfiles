@@ -107,9 +107,13 @@ cat ~/.ssh/id_personal.pub
 ssh -T git@github-work      # must say: Hi constantin-malii!
 ssh -T git@github-personal  # must say: Hi constantinmalii!
 
-# 5. Clone
+# 5. Clone and install
 git clone git@github-work:constantin-malii/dotfiles.git ~/repos/dotfiles
-cd ~/repos/dotfiles && bash install.sh
+cd ~/repos/dotfiles && bash install.sh        # installs everything
+# Or selectively:
+#   bash install.sh --claude   # only Claude Code files (skills, commands, agents)
+#   bash install.sh --shell    # only shell configs (.bash_profile, .gitconfig, starship)
+#   bash install.sh --config   # only tool configs (lazygit, lazydocker, terminal)
 
 # 6. Create local identity
 printf '[user]\n\tname = Your Name\n\temail = you@email.com\n' > ~/.gitconfig.local

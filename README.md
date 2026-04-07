@@ -143,12 +143,15 @@ cp ~/.claude/.backup-TIMESTAMP/.bash_profile ~/.bash_profile
 
 ## Selective Install (single skill)
 
-Install only one skill and its required scripts, without touching everything else:
+Install selectively:
 
 ```bash
+bash install.sh --claude          # only Claude Code files (skills, commands, agents)
+bash install.sh --shell           # only shell configs (.bash_profile, .gitconfig, starship)
+bash install.sh --config          # only tool configs (lazygit, lazydocker, terminal)
 bash install.sh --list            # see available skills
-bash install.sh --only jira       # install only jira skill + scripts
-bash install.sh --only confluence # install only confluence skill + scripts
+bash install.sh --only jira       # only the jira skill + its scripts
+bash install.sh --only confluence
 bash install.sh --only azure-devops
 ```
 
@@ -403,6 +406,38 @@ Auto-detects org/project/repo from your current git remote. Uses git credential 
 /azure-devops abandon-pr 42
 ```
 
+### /skillify — Session to Skill Converter
+
+Run at the end of any session where a repeatable workflow was discovered. Analyzes the conversation, asks 4 clarifying questions, generates a `SKILL.md`, and saves it to dotfiles (global) or the current project.
+
+```bash
+/skillify
+```
+
+### /tech-debt — End-of-Session Cleanup
+
+Spawns 3 parallel agents to find duplication, dead code, and redundancy. Presents a report, fixes approved items one at a time with test verification after each, and commits if clean.
+
+```bash
+/tech-debt
+```
+
+### /ddup — Duplicate Issue Detector
+
+Fetches a GitHub issue and all open issues via `gh` CLI. Claude scores each for semantic similarity (0–100). Reports all candidates ≥ 40, drafts a comment for the top match ≥ 70, and requires explicit confirmation before posting.
+
+```bash
+/ddup 123
+```
+
+### /verify-template — Project Verify Skill Generator
+
+Run once when setting up Claude Code in a new project. Scans the codebase for test, lint, and run commands, confirms with you, then generates `.claude/skills/verify/SKILL.md` pre-filled with the discovered commands. Commit that file to the project repo.
+
+```bash
+/verify-template
+```
+
 ## Claude Code Plugins
 
 Plugins extend Claude Code with additional skills and workflows. Managed by Claude Code's plugin system — versioned and auto-updated independently of dotfiles.
@@ -499,7 +534,7 @@ Get an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
 ```
 dotfiles/
-├── install.sh                      # Install/update script (supports --only, --list)
+├── install.sh                      # Install/update script (--claude, --shell, --config, --only, --list)
 ├── winget-packages.json            # Tool manifest for new machines
 ├── .gitattributes                  # Enforces LF line endings for shell files
 ├── CLAUDE.md                       # Claude Code behavior instructions
