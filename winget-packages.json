@@ -50,13 +50,13 @@
 					"PackageIdentifier": "GitHub.cli"
 				},
 				{
-					"PackageIdentifier": "Canop.broot"
+					"PackageIdentifier": "Dystroy.broot"
 				},
 				{
-					"PackageIdentifier": "denisidoro.navi"
+					"PackageIdentifier": "direnv.direnv"
 				},
 				{
-					"PackageIdentifier": "rs.curlie"
+					"PackageIdentifier": "muesli.duf"
 				},
 				{
 					"PackageIdentifier": "dalance.procs"
@@ -65,19 +65,16 @@
 					"PackageIdentifier": "bootandy.dust"
 				},
 				{
+					"PackageIdentifier": "dbrgn.tealdeer"
+				},
+				{
 					"PackageIdentifier": "koalaman.shellcheck"
 				},
 				{
-					"PackageIdentifier": "dbrgn.tldr"
+					"PackageIdentifier": "JohnMacFarlane.Pandoc"
 				},
 				{
-					"PackageIdentifier": "muesli.duf"
-				},
-				{
-					"PackageIdentifier": "direnv.direnv"
-				},
-				{
-					"PackageIdentifier": "bcicen.ctop"
+					"PackageIdentifier": "wagoodman.dive"
 				},
 				{
 					"PackageIdentifier": "DEVCOM.JetBrainsMonoNerdFont"

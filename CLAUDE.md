@@ -122,14 +122,11 @@ printf '[user]\n\tname = Your Name\n\temail = you@email.com\n' > ~/.gitconfig.lo
 touch ~/.bashrc.local
 # Ask the user what REPOS_DIR should be and what work aliases to add
 
-# 8. Install CLI tools
-winget install Starship.Starship sharkdp.bat eza-community.eza junegunn.fzf \
-  BurntSushi.ripgrep.MSVC sharkdp.fd ajeetdsouza.zoxide atuinsh.atuin \
-  JesseDuffield.lazygit charmbracelet.glow dandavison.delta jqlang.jq \
-  MikeFarah.yq GitHub.cli --accept-package-agreements --accept-source-agreements
+# 8. Install CLI tools (all listed in winget-packages.json)
+winget import winget-packages.json --ignore-unavailable
 
-# 9. Install Nerd Font (required for starship icons)
-winget install DEVCOM.JetBrainsMonoNerdFont --accept-package-agreements --accept-source-agreements
+# 9. Install tools not on winget (requires chocolatey)
+choco install navi curlie ctop -y
 
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
