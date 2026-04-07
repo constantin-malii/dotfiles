@@ -27,39 +27,50 @@ A portable terminal setup for Windows/Git Bash — shell config, git config, pro
 
 ## First-Time Setup on a New Machine
 
-### 1. Configure SSH for multiple GitHub accounts
+### 1. Configure SSH
 
-This repo uses SSH with named host aliases to keep work and personal accounts separate.
+This repo uses SSH with named host aliases to keep accounts separate. Configure whichever hosts you need:
 
-**Generate keys** (if not already done):
+**Generate keys:**
 ```bash
-ssh-keygen -t ed25519 -C "work@company.com" -f ~/.ssh/id_work
+# GitHub (ed25519)
 ssh-keygen -t ed25519 -C "personal@email.com" -f ~/.ssh/id_personal
+ssh-keygen -t ed25519 -C "work@company.com" -f ~/.ssh/id_work
+
+# Azure DevOps (requires RSA — ed25519 not supported)
+ssh-keygen -t rsa -b 4096 -m PEM -C "work@company.com" -f ~/.ssh/id_work_rsa
 ```
 
-**Create `~/.ssh/config`:**
+**Create `~/.ssh/config`** (include only the hosts you need):
 ```
-# Work GitHub account (constantin-malii)
+# Personal GitHub
+Host github-personal
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/id_personal
+
+# Work GitHub
 Host github-work
     HostName github.com
     User git
     IdentityFile ~/.ssh/id_work
 
-# Personal GitHub account (constantinmalii)
-Host github-personal
-    HostName github.com
+# Azure DevOps (requires RSA key)
+Host ssh.dev.azure.com
+    HostName ssh.dev.azure.com
     User git
-    IdentityFile ~/.ssh/id_personal
+    IdentityFile ~/.ssh/id_work_rsa
 ```
 
-**Add public keys to GitHub:**
-- `~/.ssh/id_work.pub` → add to your work GitHub account SSH keys
-- `~/.ssh/id_personal.pub` → add to your personal GitHub account SSH keys
+**Add public keys to the relevant services:**
+- GitHub → Settings → SSH and GPG keys → New SSH key
+- Azure DevOps → User Settings → SSH Public Keys → Add
 
 **Test connections:**
 ```bash
-ssh -T git@github-work      # Should say: Hi constantin-malii!
-ssh -T git@github-personal  # Should say: Hi constantinmalii!
+ssh -T git@github-personal  # Should say: Hi <username>!
+ssh -T git@github-work      # Should say: Hi <username>!
+ssh -T git@ssh.dev.azure.com # Should say: shell request failed (= success)
 ```
 
 ### 2. Clone and install
@@ -94,6 +105,8 @@ EOF
 ```bash
 winget import winget-packages.json --ignore-unavailable
 ```
+
+This installs CLI tools (starship, bat, fzf, ripgrep, etc.), the Nerd Font for starship icons, and Windows Terminal. See `winget-packages.json` for the full list.
 
 ### 6. Set up Atlassian credentials
 
@@ -293,7 +306,7 @@ Identity is loaded from `~/.gitconfig.local` (never committed):
 | Setting | Value |
 |---|---|
 | Theme | Dracula (full color scheme embedded) |
-| Font | Cascadia Code, size 11 |
+| Font | JetBrainsMono Nerd Font, size 11 |
 | Default profile | Git Bash |
 | Opacity | 90–95% with acrylic blur |
 | Initial size | 120×30, launches maximized |
