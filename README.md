@@ -405,30 +405,56 @@ Auto-detects org/project/repo from your current git remote. Uses git credential 
 
 ## Claude Code Plugins
 
-Plugins extend Claude Code with additional skills and workflows. These are managed by Claude Code's plugin system (versioned and auto-updated independently of dotfiles).
+Plugins extend Claude Code with additional skills and workflows. Managed by Claude Code's plugin system — versioned and auto-updated independently of dotfiles.
 
 Install on a new machine:
 ```bash
-claude plugin install superpowers
+# Superpowers suite
+claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills
 claude plugin install finance-skills@claude-code-skills
 claude plugin install c-level-skills@claude-code-skills
+
+# Development workflow
+claude plugin install commit-commands@claude-plugins-official
+claude plugin install code-review@claude-plugins-official
+claude plugin install pr-review-toolkit@claude-plugins-official
+claude plugin install skill-creator@claude-plugins-official
+
+# Project maintenance
+claude plugin install claude-md-management@claude-plugins-official
+claude plugin install claude-code-setup@claude-plugins-official
+claude plugin install security-guidance@claude-plugins-official
 ```
 
 Update all plugins:
 ```bash
-claude plugin update superpowers
+claude plugin update superpowers@claude-plugins-official
 claude plugin update engineering-skills@claude-code-skills
 claude plugin update finance-skills@claude-code-skills
 claude plugin update c-level-skills@claude-code-skills
+claude plugin update commit-commands@claude-plugins-official
+claude plugin update code-review@claude-plugins-official
+claude plugin update pr-review-toolkit@claude-plugins-official
+claude plugin update skill-creator@claude-plugins-official
+claude plugin update claude-md-management@claude-plugins-official
+claude plugin update claude-code-setup@claude-plugins-official
+claude plugin update security-guidance@claude-plugins-official
 ```
 
 | Plugin | What it adds |
 |---|---|
 | `superpowers` | Brainstorming, planning, subagent-driven development, TDD, code review workflows |
-| `engineering-skills` | Senior architect analysis, dependency analysis, architecture diagrams |
+| `engineering-skills` | Architecture analysis, dependency analysis, architecture diagrams |
 | `finance-skills` | Financial analysis and modelling skills |
 | `c-level-skills` | Executive-level reporting and strategy skills |
+| `commit-commands` | `/commit`, `/commit-push-pr` — auto-generates commit messages, pushes, opens PRs |
+| `code-review` | `/code-review` — 4 parallel agents review PRs with confidence-scored findings |
+| `pr-review-toolkit` | 6 specialized agents: comment accuracy, test coverage, silent failures, type design, general review, simplification |
+| `skill-creator` | Create, improve, and benchmark skills; foundation for custom skill development |
+| `claude-md-management` | `claude-md-improver` keeps CLAUDE.md accurate; `/revise-claude-md` captures session learnings |
+| `claude-code-setup` | Scans a codebase and recommends hooks, skills, MCP servers tailored to it |
+| `security-guidance` | Always-on PreToolUse hook — warns about security issues on every file edit |
 
 ---
 
