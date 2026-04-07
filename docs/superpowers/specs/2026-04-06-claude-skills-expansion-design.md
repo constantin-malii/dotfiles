@@ -1,7 +1,7 @@
 # Claude Skills Expansion Design
 
 **Date:** 2026-04-06  
-**Status:** Approved
+**Status:** Approved (rev 2 — post code review fixes)
 
 ## Goal
 
@@ -13,6 +13,21 @@ Current state:
 - Plugins: superpowers, engineering-skills, finance-skills, c-level-skills
 - Custom skills: /jira, /confluence, /azure-devops
 - Infrastructure: `claude/agents/`, `claude/commands/`, `claude/skills/` wired into `install.sh`
+
+## Invocation Model (Resolved)
+
+In Claude Code, both `~/.claude/skills/` and `~/.claude/commands/` are user-invocable via slash commands. The distinction:
+
+- **`~/.claude/skills/<name>/SKILL.md`** — structured skill with metadata frontmatter; can be invoked by Claude internally (via the Skill tool) OR by the user via `/name`. Use for complex multi-step workflows.
+- **`~/.claude/commands/<name>.md`** — simple command invoked by the user via `/name`. Use for single-purpose, user-triggered actions.
+
+Applied to this project:
+- Skillify → `claude/skills/skillify/` — complex workflow, Claude may invoke internally during sessions
+- Tech Debt → `claude/skills/tech-debt/` — complex multi-agent workflow
+- Verify Template → `claude/skills/verify-template/` — complex, generates output files
+- DDUP → `claude/commands/ddup.md` — single-purpose, always user-triggered
+
+All four are user-invocable via slash commands.
 
 ## What We Are Building
 
@@ -40,17 +55,17 @@ Install 7 plugins. No code written. Update `CLAUDE.md` bootstrap and `README.md`
 
 **How it works:**
 1. User invokes `/skillify` at end of a session
-2. Skill analyzes conversation: identifies repeatable steps, tools used, agents involved, permissions needed
+2. Skill analyzes the session: identifies repeatable steps, tools used, agents involved, permissions needed
 3. Asks clarifying questions to confirm understanding
 4. Generates a `SKILL.md` file and presents it for review
-5. On approval, saves to the appropriate location
+5. On approval, saves to the appropriate location (`claude/skills/<name>/` in dotfiles, or `.claude/skills/<name>/` in the current project)
 
 **Where it lives:** `claude/skills/skillify/SKILL.md` → deploys to `~/.claude/skills/skillify/`
 
-**Reference:** Anthropic's internal Skillify source code (system prompt is in leaked source). Build from that as reference, not verbatim copy.
+**Reference:** Built from first principles based on the described behavior of Anthropic's internal Skillify (the system prompt structure has been discussed publicly in the community — this is a clean-room implementation inspired by that description, not a copy of any source).
 
 **Inputs:** Current session context  
-**Outputs:** A complete `SKILL.md` file ready to commit to dotfiles
+**Outputs:** A complete `SKILL.md` file ready to commit
 
 ### Phase 3 — Tech Debt Skill (Custom Skill)
 
@@ -65,6 +80,15 @@ Install 7 plugins. No code written. Update `CLAUDE.md` bootstrap and `README.md`
 4. Creates a shared library/utility if appropriate, updates consumers
 5. Runs linter and tests to verify nothing broke
 
+**Toolchain discovery:** The skill scans for toolchain indicators in this order before running any verification:
+- `package.json` → `npm test`, `npm run lint` (or scripts.lint/test fields)
+- `pyproject.toml` / `setup.py` → `pytest`, `ruff check`
+- `*.csproj` / `*.sln` → `dotnet test`, `dotnet format`
+- `Cargo.toml` → `cargo test`, `cargo clippy`
+- `go.mod` → `go test ./...`, `go vet`
+- Falls back to CLAUDE.md `## Testing` section if present
+- If none found: reports findings only, skips verification step with a note
+
 **Where it lives:** `claude/skills/tech-debt/SKILL.md` → deploys to `~/.claude/skills/tech-debt/`
 
 **Design constraint:** Generic enough to work across any project. Project-specific rules go in that project's CLAUDE.md, not in the skill itself.
@@ -75,17 +99,24 @@ Install 7 plugins. No code written. Update `CLAUDE.md` bootstrap and `README.md`
 
 **Why:** Useful for any project using GitHub Issues. Uses `gh` CLI already installed. Prevents duplicate issue noise.
 
+**Similarity algorithm:** Claude itself performs the comparison — no external embeddings or string matching libraries. The process:
+1. Fetch target issue via `gh issue view <number> --json title,body`
+2. Fetch all open issues via `gh issue list --json number,title,body --limit 200`
+3. Claude reads both and judges semantic similarity on a 0–100 scale, considering: same root cause, same feature request, same bug symptom (even if described differently)
+4. "70% threshold" means Claude's confidence score ≥ 70 that the issues describe the same underlying problem
+5. Claude explains its reasoning for any match found
+
 **How it works:**
-1. User invokes `/ddup <issue-number>` or `/ddup` (operates on current issue context)
-2. Command fetches the issue title and body via `gh issue view`
-3. Searches open issues for semantic similarity using `gh issue list` + analysis
-4. If similarity ≥ 70%, comments on the issue explaining the match and linking the original
-5. Always requires human confirmation before posting the comment
-6. Reports findings even if below threshold (for human judgment)
+1. User invokes `/ddup <issue-number>`
+2. Fetches target issue and all open issues via `gh`
+3. Claude compares semantically and scores matches
+4. Presents findings (matches and near-matches) with reasoning
+5. If match found ≥ 70: drafts a comment explaining the duplicate and linking the original
+6. Requires explicit user confirmation before posting via `gh issue comment`
 
 **Where it lives:** `claude/commands/ddup.md` → deploys to `~/.claude/commands/ddup.md`
 
-**Dependencies:** `gh` CLI (already installed and in verify.sh)
+**Dependencies:** `gh` CLI (already installed and verified in verify.sh)
 
 ### Phase 5 — Verify Template (Custom Skill)
 
@@ -95,12 +126,47 @@ Install 7 plugins. No code written. Update `CLAUDE.md` bootstrap and `README.md`
 
 **How it works:**
 1. Template lives in dotfiles as `claude/skills/verify-template/SKILL.md`
-2. When setting up a new project, run `/verify-template` to generate a project-specific verify skill
-3. The generated skill scans the codebase (package.json, test commands, lint commands, run commands) and pre-fills the verification steps
-4. Output is saved to `.claude/skills/verify/SKILL.md` in that project
+2. When setting up a new project, user runs `/verify-template`
+3. Skill scans the codebase using the same toolchain discovery as Phase 3 (package.json, pyproject.toml, *.csproj, etc.)
+4. Pre-fills a verify skill with discovered test commands, lint commands, and run commands
+5. Saves the generated skill to `.claude/skills/verify/SKILL.md` in the current project (not in dotfiles)
 
-**Where it lives:** `claude/skills/verify-template/SKILL.md` in dotfiles (template)  
-Per-project output: `.claude/skills/verify/SKILL.md` (not committed to dotfiles)
+**Where it lives:** `claude/skills/verify-template/SKILL.md` in dotfiles (the generator)
+Per-project output: `.claude/skills/verify/SKILL.md` (committed to that project, not to dotfiles)
+
+## What Changes in Each Supporting File
+
+### verify.sh
+
+**Fix required:** The skill verification loop at line 157 is hardcoded:
+```bash
+for skill in jira confluence azure-devops; do
+```
+
+This must be generalized to dynamically scan the deployed skills directory so new skills (skillify, tech-debt, verify-template) are verified automatically:
+```bash
+# Verify all skills present in repo are deployed
+for skill_dir in "$REPO_DIR/claude/skills"/*/; do
+    skill_name=$(basename "$skill_dir")
+    if [[ -d "$CLAUDE_DIR/skills/$skill_name" ]]; then
+        ok "$skill_name skill"
+    else
+        fail "$skill_name skill not found in ~/.claude/skills/"
+    fi
+done
+```
+
+This change happens in **Phase 1** (before any new skills exist) so the fix is in place before it's needed.
+
+### install.sh
+
+No changes needed. Lines 132–133 already use `rsync -a --delete` on the full `claude/skills/` directory — new skill subdirectories deploy automatically.
+
+### README.md and CLAUDE.md
+
+Updated in each phase:
+- Phase 1: Plugin table updated with all 7 new plugins + bootstrap install commands
+- Phases 2–5: New skills/commands documented with usage examples
 
 ## Architecture
 
@@ -108,41 +174,29 @@ Per-project output: `.claude/skills/verify/SKILL.md` (not committed to dotfiles)
 dotfiles/
 └── claude/
     ├── skills/
-    │   ├── jira/           (existing)
-    │   ├── confluence/     (existing)
-    │   ├── azure-devops/   (existing)
-    │   ├── skillify/       (Phase 2 — NEW)
-    │   ├── tech-debt/      (Phase 3 — NEW)
-    │   └── verify-template/ (Phase 5 — NEW)
+    │   ├── jira/              (existing)
+    │   ├── confluence/        (existing)
+    │   ├── azure-devops/      (existing)
+    │   ├── skillify/          (Phase 2 — NEW)
+    │   ├── tech-debt/         (Phase 3 — NEW)
+    │   └── verify-template/   (Phase 5 — NEW)
     └── commands/
-        └── ddup.md         (Phase 4 — NEW)
+        └── ddup.md            (Phase 4 — NEW)
 
 ~/.claude/
-├── skills/           (deployed by install.sh)
-└── commands/         (deployed by install.sh)
+├── skills/     (deployed by install.sh rsync)
+└── commands/   (deployed by install.sh rsync)
 
-Plugins (managed by Claude Code, not dotfiles):
+Plugins (managed by Claude Code plugin system, not dotfiles):
   commit-commands, code-review, pr-review-toolkit,
   skill-creator, claude-md-management, claude-code-setup,
   security-guidance
 ```
 
-## What Does NOT Change
-
-- `install.sh` — already wires `claude/skills/` and `claude/commands/` to `~/.claude/`; no changes needed for Phases 2–5
-- `verify.sh` — no new checks needed; skills/commands presence is implicitly verified by install
-- Plugin installs — managed by Claude Code plugin system, not by install.sh
-
-## Docs Updates (each phase)
-
-Each phase updates:
-- `README.md` — plugin table (Phase 1), new skills section (Phases 2–5)
-- `CLAUDE.md` — bootstrap plugin install commands (Phase 1), task guide entries for using each skill (Phases 2–5)
-
 ## Success Criteria
 
-- Phase 1: All 7 plugins installed and listed in `claude plugin list`; README and CLAUDE.md updated
-- Phase 2: `/skillify` generates a valid SKILL.md file from a test session
-- Phase 3: `/tech-debt` correctly identifies duplication in a test codebase
-- Phase 4: `/ddup` correctly identifies a duplicate GitHub issue and drafts a comment
-- Phase 5: `/verify-template` generates a project-specific verify skill with correct test/lint commands
+- **Phase 1:** All 7 plugins installed; `claude plugin list` confirms; README and CLAUDE.md updated; verify.sh skill loop generalized
+- **Phase 2:** `/skillify` generates a valid SKILL.md from a test session description; file is committable
+- **Phase 3:** `/tech-debt` detects duplication in a test codebase; correctly discovers toolchain; runs verification
+- **Phase 4:** `/ddup` fetches issues via `gh`, identifies a seeded duplicate with correct reasoning, drafts comment, requires confirmation before posting
+- **Phase 5:** `/verify-template` scans a project, discovers test/lint commands, writes `.claude/skills/verify/SKILL.md` with correct content
