@@ -131,10 +131,22 @@ winget install DEVCOM.JetBrainsMonoNerdFont --accept-package-agreements --accept
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 
 # 11. Install Claude Code plugins
-claude plugin install superpowers
+# Superpowers suite
+claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills
 claude plugin install finance-skills@claude-code-skills
 claude plugin install c-level-skills@claude-code-skills
+
+# Development workflow
+claude plugin install commit-commands@claude-plugins-official
+claude plugin install code-review@claude-plugins-official
+claude plugin install pr-review-toolkit@claude-plugins-official
+claude plugin install skill-creator@claude-plugins-official
+
+# Project maintenance
+claude plugin install claude-md-management@claude-plugins-official
+claude plugin install claude-code-setup@claude-plugins-official
+claude plugin install security-guidance@claude-plugins-official
 
 # 12. Verify
 bash verify.sh
