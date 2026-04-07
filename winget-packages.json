@@ -1,44 +1,41 @@
 {
-	"$schema" : "https://aka.ms/winget-packages.schema.2.0.json",
-	"CreationDate" : "2026-04-06T00:00:00.000-00:00",
-	"Sources" :
-	[
+	"$schema": "https://aka.ms/winget-packages.schema.2.0.json",
+	"CreationDate": "2026-04-06T00:00:00.000-00:00",
+	"Sources": [
 		{
-			"Packages" :
-			[
-				{ "PackageIdentifier" : "Starship.Starship" },
-				{ "PackageIdentifier" : "sharkdp.bat" },
-				{ "PackageIdentifier" : "eza-community.eza" },
-				{ "PackageIdentifier" : "junegunn.fzf" },
-				{ "PackageIdentifier" : "BurntSushi.ripgrep.MSVC" },
-				{ "PackageIdentifier" : "sharkdp.fd" },
-				{ "PackageIdentifier" : "ajeetdsouza.zoxide" },
-				{ "PackageIdentifier" : "atuinsh.atuin" },
-				{ "PackageIdentifier" : "JesseDuffield.lazygit" },
-				{ "PackageIdentifier" : "JesseDuffield.lazydocker" },
-				{ "PackageIdentifier" : "charmbracelet.glow" },
-				{ "PackageIdentifier" : "dandavison.delta" },
-				{ "PackageIdentifier" : "jqlang.jq" },
-				{ "PackageIdentifier" : "MikeFarah.yq" },
-				{ "PackageIdentifier" : "GitHub.cli" },
-				{ "PackageIdentifier" : "direnv.direnv" },
-				{ "PackageIdentifier" : "Dystroy.broot" },
-				{ "PackageIdentifier" : "muesli.duf" },
-				{ "PackageIdentifier" : "dalance.procs" },
-				{ "PackageIdentifier" : "bootandy.dust" },
-				{ "PackageIdentifier" : "dbrgn.tealdeer" },
-				{ "PackageIdentifier" : "koalaman.shellcheck" },
-				{ "PackageIdentifier" : "JohnMacFarlane.Pandoc" },
-				{ "PackageIdentifier" : "wagoodman.dive" },
-				{ "PackageIdentifier" : "DEVCOM.JetBrainsMonoNerdFont" },
-				{ "PackageIdentifier" : "Microsoft.WindowsTerminal" }
+			"Packages": [
+				{ "PackageIdentifier": "Starship.Starship" },
+				{ "PackageIdentifier": "sharkdp.bat" },
+				{ "PackageIdentifier": "eza-community.eza" },
+				{ "PackageIdentifier": "junegunn.fzf" },
+				{ "PackageIdentifier": "BurntSushi.ripgrep.MSVC" },
+				{ "PackageIdentifier": "sharkdp.fd" },
+				{ "PackageIdentifier": "ajeetdsouza.zoxide" },
+				{ "PackageIdentifier": "atuinsh.atuin" },
+				{ "PackageIdentifier": "JesseDuffield.lazygit" },
+				{ "PackageIdentifier": "JesseDuffield.lazydocker" },
+				{ "PackageIdentifier": "charmbracelet.glow" },
+				{ "PackageIdentifier": "dandavison.delta" },
+				{ "PackageIdentifier": "jqlang.jq" },
+				{ "PackageIdentifier": "MikeFarah.yq" },
+				{ "PackageIdentifier": "GitHub.cli" },
+				{ "PackageIdentifier": "Dystroy.broot" },
+				{ "PackageIdentifier": "direnv.direnv" },
+				{ "PackageIdentifier": "muesli.duf" },
+				{ "PackageIdentifier": "dalance.procs" },
+				{ "PackageIdentifier": "bootandy.dust" },
+				{ "PackageIdentifier": "dbrgn.tealdeer" },
+				{ "PackageIdentifier": "koalaman.shellcheck" },
+				{ "PackageIdentifier": "JohnMacFarlane.Pandoc" },
+				{ "PackageIdentifier": "wagoodman.dive" },
+				{ "PackageIdentifier": "DEVCOM.JetBrainsMonoNerdFont" },
+				{ "PackageIdentifier": "Microsoft.WindowsTerminal" }
 			],
-			"SourceDetails" :
-			{
-				"Argument" : "https://cdn.winget.microsoft.com/cache",
-				"Identifier" : "Microsoft.Winget.Source_8wekyb3d8bbwe",
-				"Name" : "winget",
-				"Type" : "Microsoft.PreIndexed.Package"
+			"SourceDetails": {
+				"Argument": "https://cdn.winget.microsoft.com/cache",
+				"Identifier": "Microsoft.Winget.Source_8wekyb3d8bbwe",
+				"Name": "winget",
+				"Type": "Microsoft.PreIndexed.Package"
 			}
 		}
 	]

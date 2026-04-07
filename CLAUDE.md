@@ -107,9 +107,13 @@ cat ~/.ssh/id_personal.pub
 ssh -T git@github-work      # must say: Hi constantin-malii!
 ssh -T git@github-personal  # must say: Hi constantinmalii!
 
-# 5. Clone
+# 5. Clone and install
 git clone git@github-work:constantin-malii/dotfiles.git ~/repos/dotfiles
-cd ~/repos/dotfiles && bash install.sh
+cd ~/repos/dotfiles && bash install.sh        # installs everything
+# Or selectively:
+#   bash install.sh --claude   # only Claude Code files (skills, commands, agents)
+#   bash install.sh --shell    # only shell configs (.bash_profile, .gitconfig, starship)
+#   bash install.sh --config   # only tool configs (lazygit, lazydocker, terminal)
 
 # 6. Create local identity
 printf '[user]\n\tname = Your Name\n\temail = you@email.com\n' > ~/.gitconfig.local
@@ -128,7 +132,25 @@ choco install navi curlie -y   # navi: interactive cheatsheets, curlie: better c
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 
-# 11. Verify
+# 11. Install Claude Code plugins
+# Superpowers suite
+claude plugin install superpowers@claude-plugins-official
+claude plugin install engineering-skills@claude-code-skills
+claude plugin install finance-skills@claude-code-skills
+claude plugin install c-level-skills@claude-code-skills
+
+# Development workflow
+claude plugin install commit-commands@claude-plugins-official
+claude plugin install code-review@claude-plugins-official
+claude plugin install pr-review-toolkit@claude-plugins-official
+claude plugin install skill-creator@claude-plugins-official
+
+# Project maintenance
+claude plugin install claude-md-management@claude-plugins-official
+claude plugin install claude-code-setup@claude-plugins-official
+claude plugin install security-guidance@claude-plugins-official
+
+# 12. Verify
 bash verify.sh
 ```
 
@@ -155,6 +177,26 @@ bash verify.sh
 3. Run `bash install.sh --only <skill>` to deploy
 4. Test: `bash ~/.claude/scripts/<script-name>.sh`
 5. Commit
+
+### Add a new agent
+
+Agents are reusable subagent definitions available in every project.
+
+1. Create `claude/agents/<name>.md` in the repo
+2. Run `bash install.sh` to deploy to `~/.claude/agents/`
+3. Commit
+
+Format: standard Claude Code agent markdown with `name`, `description`, and instructions.
+
+### Add a new command
+
+Commands are custom slash commands available in every project.
+
+1. Create `claude/commands/<name>.md` in the repo
+2. Run `bash install.sh` to deploy to `~/.claude/commands/`
+3. Commit
+
+Format: standard Claude Code command markdown.
 
 ### Update Atlassian credentials
 

@@ -151,12 +151,15 @@ cp ~/.claude/.backup-TIMESTAMP/.bash_profile ~/.bash_profile
 
 ## Selective Install (single skill)
 
-Install only one skill and its required scripts, without touching everything else:
+Install selectively:
 
 ```bash
+bash install.sh --claude          # only Claude Code files (skills, commands, agents)
+bash install.sh --shell           # only shell configs (.bash_profile, .gitconfig, starship)
+bash install.sh --config          # only tool configs (lazygit, lazydocker, terminal)
 bash install.sh --list            # see available skills
-bash install.sh --only jira       # install only jira skill + scripts
-bash install.sh --only confluence # install only confluence skill + scripts
+bash install.sh --only jira       # only the jira skill + its scripts
+bash install.sh --only confluence
 bash install.sh --only azure-devops
 ```
 
@@ -411,6 +414,91 @@ Auto-detects org/project/repo from your current git remote. Uses git credential 
 /azure-devops abandon-pr 42
 ```
 
+### /skillify — Session to Skill Converter
+
+Run at the end of any session where a repeatable workflow was discovered. Analyzes the conversation, asks 4 clarifying questions, generates a `SKILL.md`, and saves it to dotfiles (global) or the current project.
+
+```bash
+/skillify
+```
+
+### /tech-debt — End-of-Session Cleanup
+
+Spawns 3 parallel agents to find duplication, dead code, and redundancy. Presents a report, fixes approved items one at a time with test verification after each, and commits if clean.
+
+```bash
+/tech-debt
+```
+
+### /ddup — Duplicate Issue Detector
+
+Fetches a GitHub issue and all open issues via `gh` CLI. Claude scores each for semantic similarity (0–100). Reports all candidates ≥ 40, drafts a comment for the top match ≥ 70, and requires explicit confirmation before posting.
+
+```bash
+/ddup 123
+```
+
+### /verify-template — Project Verify Skill Generator
+
+Run once when setting up Claude Code in a new project. Scans the codebase for test, lint, and run commands, confirms with you, then generates `.claude/skills/verify/SKILL.md` pre-filled with the discovered commands. Commit that file to the project repo.
+
+```bash
+/verify-template
+```
+
+## Claude Code Plugins
+
+Plugins extend Claude Code with additional skills and workflows. Managed by Claude Code's plugin system — versioned and auto-updated independently of dotfiles.
+
+Install on a new machine:
+```bash
+# Superpowers suite
+claude plugin install superpowers@claude-plugins-official
+claude plugin install engineering-skills@claude-code-skills
+claude plugin install finance-skills@claude-code-skills
+claude plugin install c-level-skills@claude-code-skills
+
+# Development workflow
+claude plugin install commit-commands@claude-plugins-official
+claude plugin install code-review@claude-plugins-official
+claude plugin install pr-review-toolkit@claude-plugins-official
+claude plugin install skill-creator@claude-plugins-official
+
+# Project maintenance
+claude plugin install claude-md-management@claude-plugins-official
+claude plugin install claude-code-setup@claude-plugins-official
+claude plugin install security-guidance@claude-plugins-official
+```
+
+Update all plugins:
+```bash
+claude plugin update superpowers@claude-plugins-official
+claude plugin update engineering-skills@claude-code-skills
+claude plugin update finance-skills@claude-code-skills
+claude plugin update c-level-skills@claude-code-skills
+claude plugin update commit-commands@claude-plugins-official
+claude plugin update code-review@claude-plugins-official
+claude plugin update pr-review-toolkit@claude-plugins-official
+claude plugin update skill-creator@claude-plugins-official
+claude plugin update claude-md-management@claude-plugins-official
+claude plugin update claude-code-setup@claude-plugins-official
+claude plugin update security-guidance@claude-plugins-official
+```
+
+| Plugin | What it adds |
+|---|---|
+| `superpowers` | Brainstorming, planning, subagent-driven development, TDD, code review workflows |
+| `engineering-skills` | Architecture analysis, dependency analysis, architecture diagrams |
+| `finance-skills` | Financial analysis and modelling skills |
+| `c-level-skills` | Executive-level reporting and strategy skills |
+| `commit-commands` | `/commit`, `/commit-push-pr` — auto-generates commit messages, pushes, opens PRs |
+| `code-review` | `/code-review` — 4 parallel agents review PRs with confidence-scored findings |
+| `pr-review-toolkit` | 6 specialized agents: comment accuracy, test coverage, silent failures, type design, general review, simplification |
+| `skill-creator` | Create, improve, and benchmark skills; foundation for custom skill development |
+| `claude-md-management` | `claude-md-improver` keeps CLAUDE.md accurate; `/revise-claude-md` captures session learnings |
+| `claude-code-setup` | Scans a codebase and recommends hooks, skills, MCP servers tailored to it |
+| `security-guidance` | Always-on PreToolUse hook — warns about security issues on every file edit |
+
 ---
 
 ## Atlassian Scripts (Terminal)
@@ -454,7 +542,7 @@ Get an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
 
 ```
 dotfiles/
-├── install.sh                      # Install/update script (supports --only, --list)
+├── install.sh                      # Install/update script (--claude, --shell, --config, --only, --list)
 ├── winget-packages.json            # Tool manifest for new machines
 ├── .gitattributes                  # Enforces LF line endings for shell files
 ├── CLAUDE.md                       # Claude Code behavior instructions
@@ -487,6 +575,8 @@ dotfiles/
     │   ├── jira/                   # /jira Claude skill
     │   ├── confluence/             # /confluence Claude skill
     │   └── azure-devops/           # /azure-devops Claude skill
+    ├── agents/                     # User-level agents (available in all projects)
+    ├── commands/                   # Custom slash commands (available in all projects)
     └── atlassian/
         └── credentials.template    # Template for ~/.atlassian/credentials
 ```
@@ -501,6 +591,8 @@ config/lazydocker.yml → ~/.config/lazydocker/config.yml
 windows/terminal-settings.json → %LOCALAPPDATA%\...\LocalState\settings.json
 claude/scripts/     → ~/.claude/scripts/
 claude/skills/      → ~/.claude/skills/
+claude/agents/      → ~/.claude/agents/
+claude/commands/    → ~/.claude/commands/
 claude/atlassian/   → ~/.claude/atlassian/
 ```
 
