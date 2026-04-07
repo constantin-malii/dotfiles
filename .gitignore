@@ -38,6 +38,9 @@ tmp/
 temp/
 *.tmp
 
+# Claude Code local settings (machine-specific)
+.claude/settings.local.json
+
 # Personal notes (add your own patterns)
 NOTES.md
 TODO.md
