@@ -145,6 +145,7 @@ fi
 section "Claude scripts"
 
 CLAUDE_DIR="$HOME/.claude"
+REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 for script in jira-rest-api.sh confluence-rest-api.sh azure-devops-rest-api.sh atlassian-common.sh setup-credentials-interactive.sh; do
     if [[ -f "$CLAUDE_DIR/scripts/$script" ]]; then
         ok "$script"
@@ -154,11 +155,12 @@ for script in jira-rest-api.sh confluence-rest-api.sh azure-devops-rest-api.sh a
 done
 
 section "Claude skills"
-for skill in jira confluence azure-devops; do
-    if [[ -d "$CLAUDE_DIR/skills/$skill" ]]; then
-        ok "$skill skill"
+for skill_dir in "$REPO_DIR/claude/skills"/*/; do
+    skill_name=$(basename "$skill_dir")
+    if [[ -d "$CLAUDE_DIR/skills/$skill_name" ]]; then
+        ok "$skill_name skill"
     else
-        fail "$skill skill not found in ~/.claude/skills/"
+        fail "$skill_name skill not found in ~/.claude/skills/ — run: bash install.sh"
     fi
 done
 
