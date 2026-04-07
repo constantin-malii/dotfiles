@@ -108,13 +108,13 @@ winget import winget-packages.json --ignore-unavailable
 
 This installs CLI tools (starship, bat, fzf, ripgrep, etc.), the Nerd Font for starship icons, and Windows Terminal. See `winget-packages.json` for the full list.
 
-**Optional tools not on winget** (require admin shell or chocolatey):
+**Tools not on winget** (require chocolatey):
 ```bash
-choco install navi curlie -y
+choco install navi curlie ctop -y
 ```
 - **navi** — interactive cheatsheets (`Ctrl+G`)
 - **curlie** — HTTPie-style curl (`get`, `post`, `http` aliases)
-- **ctop** — container monitoring ([manual install](https://github.com/bcicen/ctop/releases))
+- **ctop** — container monitoring
 
 ### 6. Set up Atlassian credentials
 

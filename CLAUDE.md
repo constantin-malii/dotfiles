@@ -125,9 +125,8 @@ touch ~/.bashrc.local
 # 8. Install CLI tools (all listed in winget-packages.json)
 winget import winget-packages.json --ignore-unavailable
 
-# 9. Install tools not on winget (optional — requires admin shell or chocolatey)
-choco install navi curlie -y   # navi: interactive cheatsheets, curlie: better curl
-# ctop: install manually from https://github.com/bcicen/ctop/releases
+# 9. Install tools not on winget (requires chocolatey)
+choco install navi curlie ctop -y
 
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
