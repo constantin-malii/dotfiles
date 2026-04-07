@@ -196,7 +196,7 @@ fi
 # ============================================================================
 section "CLI tools"
 
-tools=(starship bat eza fzf rg fd zoxide atuin lazygit glow delta jq yq gh)
+tools=(starship bat eza fzf rg fd zoxide atuin lazygit glow delta jq yq gh direnv broot duf procs dust tldr shellcheck pandoc dive)
 for tool in "${tools[@]}"; do
     if command -v "$tool" &>/dev/null; then
         ok "$tool"

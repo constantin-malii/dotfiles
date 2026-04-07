@@ -10,7 +10,7 @@ A portable terminal setup for Windows/Git Bash — shell config, git config, pro
 |---|---|
 | **Shell** | Aliases, functions, prompt (Starship), SSH agent, history |
 | **Git** | Aliases, delta diffs, rerere, merge tools |
-| **Tools** | bat, eza, fzf, ripgrep, lazygit, atuin, zoxide, and more |
+| **Tools** | bat, eza, fzf, ripgrep, lazygit, atuin, zoxide, broot, duf, procs, dust, and more |
 | **Claude Skills** | `/jira`, `/confluence`, `/azure-devops` slash commands |
 | **Atlassian Scripts** | Jira + Confluence REST API wrappers usable from Claude or terminal |
 
@@ -107,6 +107,14 @@ winget import winget-packages.json --ignore-unavailable
 ```
 
 This installs CLI tools (starship, bat, fzf, ripgrep, etc.), the Nerd Font for starship icons, and Windows Terminal. See `winget-packages.json` for the full list.
+
+**Optional tools not on winget** (require admin shell or chocolatey):
+```bash
+choco install navi curlie -y
+```
+- **navi** — interactive cheatsheets (`Ctrl+G`)
+- **curlie** — HTTPie-style curl (`get`, `post`, `http` aliases)
+- **ctop** — container monitoring ([manual install](https://github.com/bcicen/ctop/releases))
 
 ### 6. Set up Atlassian credentials
 
