@@ -130,7 +130,13 @@ winget install DEVCOM.JetBrainsMonoNerdFont --accept-package-agreements --accept
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 
-# 11. Verify
+# 11. Install Claude Code plugins
+claude plugin install superpowers
+claude plugin install engineering-skills@claude-code-skills
+claude plugin install finance-skills@claude-code-skills
+claude plugin install c-level-skills@claude-code-skills
+
+# 12. Verify
 bash verify.sh
 ```
 

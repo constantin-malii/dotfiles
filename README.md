@@ -403,6 +403,33 @@ Auto-detects org/project/repo from your current git remote. Uses git credential 
 /azure-devops abandon-pr 42
 ```
 
+## Claude Code Plugins
+
+Plugins extend Claude Code with additional skills and workflows. These are managed by Claude Code's plugin system (versioned and auto-updated independently of dotfiles).
+
+Install on a new machine:
+```bash
+claude plugin install superpowers
+claude plugin install engineering-skills@claude-code-skills
+claude plugin install finance-skills@claude-code-skills
+claude plugin install c-level-skills@claude-code-skills
+```
+
+Update all plugins:
+```bash
+claude plugin update superpowers
+claude plugin update engineering-skills@claude-code-skills
+claude plugin update finance-skills@claude-code-skills
+claude plugin update c-level-skills@claude-code-skills
+```
+
+| Plugin | What it adds |
+|---|---|
+| `superpowers` | Brainstorming, planning, subagent-driven development, TDD, code review workflows |
+| `engineering-skills` | Senior architect analysis, dependency analysis, architecture diagrams |
+| `finance-skills` | Financial analysis and modelling skills |
+| `c-level-skills` | Executive-level reporting and strategy skills |
+
 ---
 
 ## Atlassian Scripts (Terminal)
