@@ -158,6 +158,26 @@ bash verify.sh
 4. Test: `bash ~/.claude/scripts/<script-name>.sh`
 5. Commit
 
+### Add a new agent
+
+Agents are reusable subagent definitions available in every project.
+
+1. Create `claude/agents/<name>.md` in the repo
+2. Run `bash install.sh` to deploy to `~/.claude/agents/`
+3. Commit
+
+Format: standard Claude Code agent markdown with `name`, `description`, and instructions.
+
+### Add a new command
+
+Commands are custom slash commands available in every project.
+
+1. Create `claude/commands/<name>.md` in the repo
+2. Run `bash install.sh` to deploy to `~/.claude/commands/`
+3. Commit
+
+Format: standard Claude Code command markdown.
+
 ### Update Atlassian credentials
 
 ```bash

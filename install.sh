@@ -132,6 +132,16 @@ else
     rsync -a --delete "$REPO_DIR/claude/skills/" "$CLAUDE_DIR/skills/" 2>/dev/null || \
         cp -r "$REPO_DIR/claude/skills/"* "$CLAUDE_DIR/skills/" 2>/dev/null || true
 
+    echo "→ Copying agents..."
+    mkdir -p "$CLAUDE_DIR/agents"
+    rsync -a --delete --exclude='.gitkeep' "$REPO_DIR/claude/agents/" "$CLAUDE_DIR/agents/" 2>/dev/null || \
+        cp -r "$REPO_DIR/claude/agents/"* "$CLAUDE_DIR/agents/" 2>/dev/null || true
+
+    echo "→ Copying commands..."
+    mkdir -p "$CLAUDE_DIR/commands"
+    rsync -a --delete --exclude='.gitkeep' "$REPO_DIR/claude/commands/" "$CLAUDE_DIR/commands/" 2>/dev/null || \
+        cp -r "$REPO_DIR/claude/commands/"* "$CLAUDE_DIR/commands/" 2>/dev/null || true
+
     echo "→ Copying templates..."
     mkdir -p "$CLAUDE_DIR/atlassian"
     if [[ -f "$REPO_DIR/claude/atlassian/credentials.template" ]]; then

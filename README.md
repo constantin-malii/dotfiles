@@ -466,6 +466,8 @@ dotfiles/
     │   ├── jira/                   # /jira Claude skill
     │   ├── confluence/             # /confluence Claude skill
     │   └── azure-devops/           # /azure-devops Claude skill
+    ├── agents/                     # User-level agents (available in all projects)
+    ├── commands/                   # Custom slash commands (available in all projects)
     └── atlassian/
         └── credentials.template    # Template for ~/.atlassian/credentials
 ```
@@ -480,6 +482,8 @@ config/lazydocker.yml → ~/.config/lazydocker/config.yml
 windows/terminal-settings.json → %LOCALAPPDATA%\...\LocalState\settings.json
 claude/scripts/     → ~/.claude/scripts/
 claude/skills/      → ~/.claude/skills/
+claude/agents/      → ~/.claude/agents/
+claude/commands/    → ~/.claude/commands/
 claude/atlassian/   → ~/.claude/atlassian/
 ```
 
