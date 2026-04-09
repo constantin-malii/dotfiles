@@ -68,7 +68,11 @@ eval "$(zoxide init bash)"
 mdprint() {
     local out="${1%.md}.html"
     pandoc "$1" -o "$out" --standalone --metadata title="${1%.md}" \
-        -c "https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.css"
+        -c "https://cdn.jsdelivr.net/npm/github-markdown-css/github-markdown.css" \
+        -V "header-includes=<style>body{background:#0d1117;padding:2rem}.markdown-body{box-sizing:border-box;min-width:200px;max-width:980px;margin:0 auto;padding:45px}</style>" \
+        --metadata "pagetitle=${1%.md}" \
+        -V 'include-before=<article class="markdown-body" data-color-mode="dark" data-dark-theme="dark">' \
+        -V 'include-after=</article>'
     start "$out"
 }
 
