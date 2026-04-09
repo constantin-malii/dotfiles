@@ -131,15 +131,21 @@ choco install navi curlie ctop -y
 # 10. Set up Atlassian credentials
 bash ~/.claude/scripts/setup-credentials-interactive.sh
 
-# 11. Add community marketplace and install Claude Code plugins
-# Community marketplace (alirezarezvani/claude-skills → registers as "claude-code-skills")
-claude plugin marketplace add alirezarezvani/claude-skills
+# 11. Add community marketplaces and install Claude Code plugins
+# Community marketplaces
+claude plugin marketplace add alirezarezvani/claude-skills        # → "claude-code-skills"
+claude plugin marketplace add OthmanAdi/planning-with-files       # → "planning-with-files"
+claude plugin marketplace add daymade/claude-code-skills          # → "daymade-skills"
 
 # Superpowers suite
 claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills
 claude plugin install finance-skills@claude-code-skills
 claude plugin install c-level-skills@claude-code-skills
+
+# Product & project management
+claude plugin install product-skills@claude-code-skills
+claude plugin install pm-skills@claude-code-skills
 
 # Development workflow
 claude plugin install commit-commands@claude-plugins-official
@@ -151,6 +157,14 @@ claude plugin install skill-creator@claude-plugins-official
 claude plugin install claude-md-management@claude-plugins-official
 claude plugin install claude-code-setup@claude-plugins-official
 claude plugin install security-guidance@claude-plugins-official
+
+# Planning & research
+claude plugin install planning-with-files@planning-with-files
+claude plugin install deep-research@daymade-skills
+
+# Spec-driven development commands (manual — not a plugin)
+# Clone: git clone https://github.com/Pimzino/claude-code-spec-workflow.git /tmp/spec-workflow
+# Copy commands: cp /tmp/spec-workflow/.claude/commands/spec-*.md ~/.claude/commands/
 
 # 12. Verify
 bash verify.sh

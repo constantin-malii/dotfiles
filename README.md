@@ -455,17 +455,25 @@ For a full guide on what each plugin does, when to use it, and how they fit toge
 **Marketplaces:**
 - [claude-plugins-official](https://github.com/anthropics/claude-plugins-official) — Anthropic's official marketplace (built-in)
 - [claude-code-skills](https://github.com/alirezarezvani/claude-skills) — Community marketplace (220+ skills)
+- [planning-with-files](https://github.com/OthmanAdi/planning-with-files) — Persistent markdown planning
+- [daymade-skills](https://github.com/daymade/claude-code-skills) — Professional skills (research, diagrams, etc.)
 
 Install on a new machine:
 ```bash
-# Add community marketplace (registers as "claude-code-skills")
-claude plugin marketplace add alirezarezvani/claude-skills
+# Add community marketplaces
+claude plugin marketplace add alirezarezvani/claude-skills        # → "claude-code-skills"
+claude plugin marketplace add OthmanAdi/planning-with-files       # → "planning-with-files"
+claude plugin marketplace add daymade/claude-code-skills          # → "daymade-skills"
 
 # Superpowers suite
 claude plugin install superpowers@claude-plugins-official
 claude plugin install engineering-skills@claude-code-skills
 claude plugin install finance-skills@claude-code-skills
 claude plugin install c-level-skills@claude-code-skills
+
+# Product & project management
+claude plugin install product-skills@claude-code-skills
+claude plugin install pm-skills@claude-code-skills
 
 # Development workflow
 claude plugin install commit-commands@claude-plugins-official
@@ -477,6 +485,16 @@ claude plugin install skill-creator@claude-plugins-official
 claude plugin install claude-md-management@claude-plugins-official
 claude plugin install claude-code-setup@claude-plugins-official
 claude plugin install security-guidance@claude-plugins-official
+
+# Planning & research
+claude plugin install planning-with-files@planning-with-files
+claude plugin install deep-research@daymade-skills
+```
+
+Spec-driven development commands (not a plugin — manual install):
+```bash
+git clone https://github.com/Pimzino/claude-code-spec-workflow.git /tmp/spec-workflow
+cp /tmp/spec-workflow/.claude/commands/spec-*.md ~/.claude/commands/
 ```
 
 Update all plugins:
@@ -485,6 +503,8 @@ claude plugin update superpowers@claude-plugins-official
 claude plugin update engineering-skills@claude-code-skills
 claude plugin update finance-skills@claude-code-skills
 claude plugin update c-level-skills@claude-code-skills
+claude plugin update product-skills@claude-code-skills
+claude plugin update pm-skills@claude-code-skills
 claude plugin update commit-commands@claude-plugins-official
 claude plugin update code-review@claude-plugins-official
 claude plugin update pr-review-toolkit@claude-plugins-official
@@ -492,6 +512,8 @@ claude plugin update skill-creator@claude-plugins-official
 claude plugin update claude-md-management@claude-plugins-official
 claude plugin update claude-code-setup@claude-plugins-official
 claude plugin update security-guidance@claude-plugins-official
+claude plugin update planning-with-files@planning-with-files
+claude plugin update deep-research@daymade-skills
 ```
 
 | Plugin | Source | What it adds |
@@ -500,6 +522,8 @@ claude plugin update security-guidance@claude-plugins-official
 | `engineering-skills` | community | Architecture analysis, dependency analysis, architecture diagrams |
 | `finance-skills` | community | Financial analysis and modelling skills |
 | `c-level-skills` | community | Executive-level reporting and strategy skills |
+| `product-skills` | community | 14 product-team skills: PRDs, user stories, competitive analysis, UX research, spec-to-repo |
+| `pm-skills` | community | Project management: WBS, sprint planning, resource allocation |
 | `commit-commands` | official | `/commit`, `/commit-push-pr` — auto-generates commit messages, pushes, opens PRs |
 | `code-review` | official | `/code-review` — 4 parallel agents review PRs with confidence-scored findings |
 | `pr-review-toolkit` | official | 6 specialized agents: comment accuracy, test coverage, silent failures, type design, general review, simplification |
@@ -507,6 +531,8 @@ claude plugin update security-guidance@claude-plugins-official
 | `claude-md-management` | official | `claude-md-improver` keeps CLAUDE.md accurate; `/revise-claude-md` captures session learnings |
 | `claude-code-setup` | official | Scans a codebase and recommends hooks, skills, MCP servers tailored to it |
 | `security-guidance` | official | Always-on PreToolUse hook — warns about security issues on every file edit |
+| `planning-with-files` | community | Persistent markdown planning — task_plan.md, progress.md, findings.md survive context loss |
+| `deep-research` | community | Research reports with citations, source governance, multi-pass synthesis |
 
 ---
 
