@@ -215,6 +215,15 @@ HA **Music Assistant integration** added via Settings → Devices & Services (au
 
 **Operational status.** ✅ Running and verified.
 
+### Voice control (Phase 1 — text Assist, no mic yet)
+**Diagnosis:** native Assist could not control the player — `conversation.process("set ceiling speakers to 20 percent")` returned *"Sorry, I am not aware of any device called ceiling speakers"*, i.e. the `media_player.ceiling_speakers` entity was **not effectively exposed** to Assist (info intents like "what time is it" need no entity, which is why those worked). Entity is fully service-controllable (`supported_features=8320567`; `volume_set`/`media_*`/`play_media` all return 200).
+
+**Solution (smallest possible, no infra):** one **conversation-trigger automation** — `automation.voice_ceiling_speakers` ("Voice — Ceiling Speakers"), created via the automation API (stored in `automations.yaml`). It matches the command sentences and calls services on `media_player.ceiling_speakers` directly, so it needs **no exposure** and adds **no GPT/Whisper/Piper/ESPHome/Wyoming**. One automation, 6 conversation triggers, `choose` by `trigger.id`, `set_conversation_response` for spoken feedback. `play radio` uses `music_assistant.play_media` with `media_id: "Radio Paradise"` (editable).
+
+**Verified 2026-06-22 (via `/api/conversation/process`):** `volume 25 percent`→0.25 ✅, `volume 50 percent`→0.50 ✅, `pause`/`resume`/`stop` ✅ (<0.3 s), `play radio` → state `playing` (Radio Paradise) ✅. Test from the **Assist text box** (no mic needed). (Note: actual *playback start* can occasionally lag a few seconds due to MA playback latency — control commands are instant.)
+
+**Rollback:** delete `automation.voice_ceiling_speakers` (UI: Settings → Automations → ⋮ → Delete; API: `DELETE /api/config/automation/config/voice_ceiling_speakers`). Nothing else touched.
+
 ---
 
 ## 8. Lessons Learned
@@ -383,3 +392,4 @@ ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstal
 | 2026-06-22 | **Squeezelite deployment**: installed on host; `squeezelite-ceiling.service` → `hw:1,0`, server `.10`; MA SlimProto provider enabled; **stream publish IP set to `.10`**. |
 | 2026-06-22 | **Resource bump**: VM 2→**4 GiB RAM**, 2→**3 vCPU** (resolved 30 s playback-lock timeouts). |
 | 2026-06-22 | **Ceiling speaker validation**: internet radio played through the ceiling speakers — zone confirmed working. |
+| 2026-06-22 | **Voice control Phase 1**: diagnosed entity not exposed to Assist; created `automation.voice_ceiling_speakers` (conversation-trigger, no infra); verified all 6 commands (play radio / pause / resume / stop / volume 25 / volume 50) via the conversation API. |
