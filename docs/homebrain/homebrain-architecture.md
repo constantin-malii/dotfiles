@@ -5,6 +5,8 @@
 **Author:** Setup performed via Claude Code, driven by Constantin (constantin@symend.com)
 **Scope:** Standing up a modern Home Assistant OS (HAOS) VM under KVM/libvirt while preserving the existing Plex server and legacy Home Assistant Core install. No host OS upgrade, no destructive changes.
 
+> **Related docs (this folder):** `haos-vm-deployment.md` (VM/KVM operations + XML), `migration-inventory.md` (legacy HA Core 0.57.2), and **`music-assistant-audio-architecture.md`** — the master reference for the Music Assistant deployment, the **second NAT NIC** (`192.168.122.10`) added for host↔VM audio, the **ceiling-speaker zone** (Squeezelite), and the **current VM resources (3 vCPU / 4 GiB)**. Note: VM facts in *this* doc describe the original 2026-06-21 deployment (2 vCPU / 2 GiB, single macvtap NIC); the audio-architecture doc is the current source of truth.
+
 ---
 
 ## 1. Executive summary

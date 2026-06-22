@@ -2,8 +2,10 @@
 
 **Host:** `homebrain` (`costea@192.168.1.68`, Ubuntu 16.04.7, QEMU 2.5 / libvirt 1.3.1)
 **VM:** `haos` — Home Assistant OS 18.0
-**Last updated:** 2026-06-21
-**Companion doc:** `homebrain-architecture.md` (host inventory, networking, SSH access quirk, full setup chronology)
+**Last updated:** 2026-06-22
+**Companion docs:** `homebrain-architecture.md` (host inventory, SSH quirk), `music-assistant-audio-architecture.md` (master MA/audio reference — **current source of truth for VM resources & NICs**).
+
+> ⚠️ **Updated 2026-06-22:** the VM now has **3 vCPU / 4 GiB RAM** (raised from 2/2) and a **second NAT NIC** (`192.168.122.10`, MAC `52:54:00:ab:cd:20`) added for the Music Assistant ceiling-speaker zone. The XML in §7 below reflects the *original* deployment (2 vCPU / 2 GiB, single macvtap NIC); see the audio-architecture doc for the current definition.
 
 > **Access note:** SSH to this host needs the key loaded in ssh-agent (a client quirk — see the architecture doc).
 > Prefix any session with: `ssh-add ~/.ssh/id_homebrain`  then `ssh costea@192.168.1.68 '<cmd>'`.
@@ -20,10 +22,11 @@
 | Guest OS | Home Assistant OS 18.0 (x86-64 OVA qcow2) |
 | Machine type | `pc-q35-2.5` (q35) |
 | Firmware | UEFI (OVMF pflash) |
-| vCPU | 2 (`host-passthrough`) |
-| RAM | 2048 MiB (2 GiB) |
+| vCPU | **3** (`host-passthrough`) — *was 2; raised 2026-06-22* |
+| RAM | **4 GiB** (4194304 KiB) — *was 2 GiB; raised 2026-06-22* |
 | Disk | `/var/lib/libvirt/images/haos.qcow2` — qcow2, 32 GiB virtual |
-| NIC | macvtap (direct/bridge) on `eno1`, virtio, MAC `52:54:00:ab:cd:10` |
+| NIC 1 | macvtap (direct/bridge) on `eno1`, virtio, MAC `52:54:00:ab:cd:10` → LAN `192.168.1.104` |
+| NIC 2 | **NAT** (libvirt `default`), virtio, MAC `52:54:00:ab:cd:20` → `192.168.122.10` (host↔VM; added 2026-06-22) |
 | LAN IP (DHCP) | `192.168.1.104` (guest iface `emp2s1`) |
 | Graphics | VNC on `127.0.0.1:5900` (localhost-only) |
 | Console | serial pty |
@@ -33,9 +36,9 @@
 
 ## 2. CPU and memory allocation
 
-- **vCPU:** 2, `placement='static'`, `<cpu mode='host-passthrough'/>` (exposes the i7-4770 features directly to the guest — best performance under KVM).
-- **RAM:** 2048 MiB fixed (`<memory>` = `<currentMemory>` = 2097152 KiB). A virtio memballoon is present.
-- Host has 7.7 GiB total with ample headroom; RAM can be raised (e.g. 3–4 GiB) via `virsh edit haos` → update `<memory>`/`<currentMemory>` → restart the VM.
+- **vCPU:** **3** (raised from 2 on 2026-06-22), `placement='static'`, `<cpu mode='host-passthrough'/>` (exposes the i7-4770 features directly to the guest — best performance under KVM).
+- **RAM:** **4 GiB** (4194304 KiB; raised from 2 GiB on 2026-06-22 to meet MA's ≥4 GB recommendation and stop 30 s playback-lock timeouts). A virtio memballoon is present.
+- Host has 7.7 GiB total; ~4 GiB was free for the VM. Changed via `virsh setmaxmem/setmem/setvcpus … --config` + VM reboot (the VM was off for the change). Rollback to 2 GiB/2 vCPU is documented in the audio-architecture doc §14.
 
 ```bash
 # Change memory to 4 GiB at next boot (example):
