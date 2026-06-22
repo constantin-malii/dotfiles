@@ -215,14 +215,38 @@ HA **Music Assistant integration** added via Settings → Devices & Services (au
 
 **Operational status.** ✅ Running and verified.
 
-### Voice control (Phase 1 — text Assist, no mic yet)
-**Diagnosis:** native Assist could not control the player — `conversation.process("set ceiling speakers to 20 percent")` returned *"Sorry, I am not aware of any device called ceiling speakers"*, i.e. the `media_player.ceiling_speakers` entity was **not effectively exposed** to Assist (info intents like "what time is it" need no entity, which is why those worked). Entity is fully service-controllable (`supported_features=8320567`; `volume_set`/`media_*`/`play_media` all return 200).
+### Voice control (Phase 2 — phone microphone)
 
-**Solution (smallest possible, no infra):** one **conversation-trigger automation** — `automation.voice_ceiling_speakers` ("Voice — Ceiling Speakers"), created via the automation API (stored in `automations.yaml`). It matches the command sentences and calls services on `media_player.ceiling_speakers` directly, so it needs **no exposure** and adds **no GPT/Whisper/Piper/ESPHome/Wyoming**. One automation, 6 conversation triggers, `choose` by `trigger.id`, `set_conversation_response` for spoken feedback. `play radio` uses `music_assistant.play_media` with `media_id: "Radio Paradise"` (editable).
+**Status (2026-06-22): ✅ operational by voice** from the Android Companion App. Full path verified end-to-end: phone mic → **Whisper STT** → Home Assistant **conversation agent** → **conversation-trigger automation** → service action on the Ceiling Speakers. Confirmations are returned as **text** (see limitation).
 
-**Verified 2026-06-22 (via `/api/conversation/process`):** `volume 25 percent`→0.25 ✅, `volume 50 percent`→0.50 ✅, `pause`/`resume`/`stop` ✅ (<0.3 s), `play radio` → state `playing` (Radio Paradise) ✅. Test from the **Assist text box** (no mic needed). (Note: actual *playback start* can occasionally lag a few seconds due to MA playback latency — control commands are instant.)
+**How it works / architecture:**
+- The three `media_player.*` entities are **un-exposed** from the Assist conversation agent. (When exposed, HA's *built-in* intents intercepted spoken phrases and called services the MA player doesn't support — e.g. `media_player.turn_off` → `ServiceNotSupported` → "Oops, an error has occurred." Un-exposing removes that interception.)
+- A single **conversation-trigger automation, `automation.voice_ceiling_speakers`**, is the **sole handler** — it matches the sentences and calls only supported services on `media_player.ceiling_speakers`. Created/maintained via the automation API (`POST /api/config/automation/config/voice_ceiling_speakers`).
+- Pipeline ("Home Assistant", preferred): **STT = `stt.faster_whisper`**, **Conversation = `conversation.home_assistant`**, **TTS = off** (see limitation).
+- Spoken numbers are converted **generically** (digits *or* English words, 0–100) via a `{percent}` wildcard + a word→number template — no per-value hardcoding.
 
-**Rollback:** delete `automation.voice_ceiling_speakers` (UI: Settings → Automations → ⋮ → Delete; API: `DELETE /api/config/automation/config/voice_ceiling_speakers`). Nothing else touched.
+**Supported voice command set** (all target the Ceiling Speakers by default; verified via `conversation.process`):
+
+| Intent | Phrases |
+|---|---|
+| Set volume (absolute) | `volume {N} percent` · `set [the] volume to {N} [percent]` · `set [the] ceiling speakers to {N} [percent]` — `{N}` = digits or words (`5`/`five`, `30`/`thirty`, `75`/`seventy five`, `100`/`one hundred`), clamped 0–100 |
+| Volume up | `turn the music/volume/it up` · `make it louder` · `volume up` · `louder` |
+| Volume down | `turn the music/volume/it down` · `make it quieter` · `volume down` · `quieter` |
+| Play radio | `play [the] radio` · `play radio on [the] ceiling speakers` (station `Radio Paradise`, editable in the automation) |
+| Resume / play | `play music` · `resume [the music]` · `continue [playing\|music]` · `start playing again` · `unpause` |
+| Pause | `pause [the music]` |
+| Stop | `stop [the music]` |
+
+**Known limitations:**
+- **TTS spoken replies are intentionally disabled because Piper currently causes errors.** Voice commands execute successfully, but confirmations are shown as text only. (Re-enabling Piper TTS is a separate future task.)
+- **Whisper model is `auto`** (= sherpa-onnx Parakeet on amd64); it could **not** be pinned to `tiny-int8` because add-on options can't be written on this instance — no `ha apps options` subcommand, the Supervisor `/hassio` panel is missing, and the Supervisor-API options write is blocked (`401`) through the Core proxy. STT works regardless.
+- The **HA↔MA integration connection** occasionally drops (`ws://d5369777-music-assistant:8094` DNS timeout); recover by reloading the Music Assistant config entry.
+
+**Rollback:**
+- Automation: `DELETE /api/config/automation/config/voice_ceiling_speakers` (or Settings → Automations → ⋮ → Delete / edit).
+- Re-expose players (if you want built-in intents back): Settings → Voice assistants → Expose, or WS `homeassistant/expose_entity … should_expose: true`.
+- Re-enable spoken replies (after Piper is fixed): set the "Home Assistant" pipeline `tts_engine` back to `tts.piper`.
+- Nothing in Whisper/Piper/Wyoming/MA/Squeezelite/networking/VM was modified for any of this.
 
 ---
 
@@ -393,3 +417,4 @@ ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstal
 | 2026-06-22 | **Resource bump**: VM 2→**4 GiB RAM**, 2→**3 vCPU** (resolved 30 s playback-lock timeouts). |
 | 2026-06-22 | **Ceiling speaker validation**: internet radio played through the ceiling speakers — zone confirmed working. |
 | 2026-06-22 | **Voice control Phase 1**: diagnosed entity not exposed to Assist; created `automation.voice_ceiling_speakers` (conversation-trigger, no infra); verified all 6 commands (play radio / pause / resume / stop / volume 25 / volume 50) via the conversation API. |
+| 2026-06-22 | **Voice control Phase 2 (phone mic)**: installed Whisper + Piper add-ons; created Wyoming integrations (faster-whisper, piper) via config-flow API; set pipeline STT=Whisper. Diagnosed "Oops": built-in intents intercepting the *exposed* player (called unsupported `media_player.turn_off`) **and** Piper TTS crashing the pipeline. Fix: un-exposed the media players (automation = sole handler), disabled TTS, and expanded the automation to natural-language phrasings with **generic digit/spoken-number volume capture** (0–100) + relative volume. Voice confirmed working end-to-end (text replies; Piper TTS parked). |
