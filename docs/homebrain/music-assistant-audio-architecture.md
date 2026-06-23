@@ -287,6 +287,22 @@ HA **Music Assistant integration** added via Settings → Devices & Services (au
 
 **Rollback:** see §14.
 
+### Spoken announcements (ceiling TTS via Piper)
+
+**Status (2026-06-22): ✅ working.** Spoken audio is delivered to the ceiling speakers by **explicit `tts.speak` calls** (Piper → `media_player.ceiling_speakers`), **not** by the Assist pipeline. HA generates the audio with `tts.piper`; **Music Assistant performs playback** (it owns the Squeezelite player) — the host Squeezelite fetches the TTS proxy URL on the reachable NAT IP `192.168.122.10`, the same path radio uses.
+
+**Why this path (root cause of the earlier "Piper crash"):** Piper itself was never broken — it generates valid audio (verified: 31 KB MP3, 22.05 kHz mono, fetched successfully from the host). The earlier pipeline "Oops" was the now-fixed exposed-media_player built-in intents plus a likely first-run voice-download race, not a Piper defect. The one real constraint is that HA auto-derives the TTS proxy URL as `192.168.122.10` (because `internal_url`/`external_url` are unset) — reachable by the **host/ceiling speakers** but **not** by the phone, which is why phone-pipeline TTS stays off.
+
+**Scripts (see §13):**
+- **`script.ceiling_announce`** (field `message`) — reusable announcement primitive; speaks arbitrary text on the ceiling speakers. **Intended for future automations** (doorbell, timers, reminders, weather, alerts). **Not exposed to the LLM** (`expose_new_entities` is off, so it was not auto-exposed) — the ChatGPT agent cannot make the speakers talk arbitrarily.
+- **`script.ceiling_play_radio`** — plays radio **with a spoken confirmation** ("Playing {station}."), announced over the stream (MA ducks, speaks, resumes — exactly the desired behavior).
+- **`script.ceiling_stop`** — **no spoken confirmation.** MA announcements **always resume the prior stream afterward** (confirmed: even after `media_stop` + `clear_playlist`, announcing re-started the radio), so a "stopped" confirmation is self-defeating; stop is kept clean/instant.
+- volume / pause / resume scripts — intentionally **no** spoken confirmations (avoids per-volume-change chatter).
+
+**Not changed by this:** the Assist pipeline TTS remains **off** for the phone (text replies only); **no `internal_url`/`external_url`** change; no networking, Whisper, Music Assistant, Squeezelite, or LLM-exposure changes.
+
+**Rollback:** delete `script.ceiling_announce` and revert `script.ceiling_play_radio` to its no-confirmation form (`DELETE`/`POST /api/config/script/config/<id>`); nothing else is affected.
+
 ---
 
 ## 8. Lessons Learned
@@ -402,7 +418,17 @@ WantedBy=multi-user.target
 - libvirt `default` network: `ip-dhcp-host` reservation MAC `52:54:00:ab:cd:20` → `192.168.122.10`.
 - VM domain: 2nd NIC (NAT), RAM 4 GiB, 3 vCPU (in `/home/costea/haos.xml` / live config).
 
-**Helper scripts staged in `/home/costea/`** (diagnostic/setup, removable): `setup-squeezelite.sh`, `test-ceiling-audio.sh`, `haos-console-diag.sh`. **Secrets:** none stored in any doc/script; the YTMusic login cookie lives only in MA; the diagnostic long-lived HA token used during setup was revoked.
+**Helper scripts staged in `/home/costea/`** (diagnostic/setup, removable): `setup-squeezelite.sh`, `test-ceiling-audio.sh`, `haos-console-diag.sh`. **Secrets:** none stored in any doc/script; the YTMusic login cookie lives only in MA; the diagnostic long-lived HA token used during setup is **still active** (kept for ongoing admin) and is to be **revoked at session end** — it is never written to any doc/repo/log.
+
+**Home Assistant scripts** (stored in HA `.storage`, created via `POST /api/config/script/config/<id>`; all target `media_player.ceiling_speakers`):
+
+| Script | Purpose | LLM-exposed |
+|---|---|---|
+| `ceiling_play_radio` (`station?`) | play radio + spoken confirmation | yes |
+| `ceiling_pause` / `ceiling_resume` / `ceiling_stop` | pause / resume / stop (stop is silent) | yes |
+| `ceiling_set_volume` (`volume` 0–100) | set volume (clamped) | yes |
+| `ceiling_volume_up` / `ceiling_volume_down` | step volume | yes |
+| `ceiling_announce` (`message`) | speak arbitrary text via Piper (reusable announcement primitive) | **no** |
 
 ---
 
@@ -471,3 +497,4 @@ ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstal
 | 2026-06-22 | **Voice control Phase 1**: diagnosed entity not exposed to Assist; created `automation.voice_ceiling_speakers` (conversation-trigger, no infra); verified all 6 commands (play radio / pause / resume / stop / volume 25 / volume 50) via the conversation API. |
 | 2026-06-22 | **Voice control Phase 2 (phone mic)**: installed Whisper + Piper add-ons; created Wyoming integrations (faster-whisper, piper) via config-flow API; set pipeline STT=Whisper. Diagnosed "Oops": built-in intents intercepting the *exposed* player (called unsupported `media_player.turn_off`) **and** Piper TTS crashing the pipeline. Fix: un-exposed the media players (automation = sole handler), disabled TTS, and expanded the automation to natural-language phrasings with **generic digit/spoken-number volume capture** (0–100) + relative volume. Voice confirmed working end-to-end (text replies; Piper TTS parked). |
 | 2026-06-22 | **LLM assistant Phase 3 (OpenAI/ChatGPT)**: added a **separate** `conversation.openai_conversation` agent (gpt-4o-mini, Control-HA=Assist) + a "ChatGPT" pipeline (local Whisper STT, TTS off) **alongside** the unchanged deterministic assistant (still preferred). Created 7 `script.ceiling_*` helper scripts as the LLM's sole action surface; **tightened exposure** to exactly those 7 + `weather.forecast_home`, turned `expose_new_entities` off, and un-exposed the TV/todo/MA-update (before/after snapshots saved). Disabled web-search/code-interpreter/response-storage/location; removed auto-created stt/tts/ai_task subentries. Verified from Assist text: ceiling control + weather work; TV/soundbar/thermostat refused with zero state change. |
+| 2026-06-22 | **Ceiling TTS announcements**: investigated the parked Piper "crash" — Piper generates valid audio (31 KB MP3 fetched from host); root cause was the fixed exposed-intent issue + first-run voice race, not Piper. Added spoken output via explicit `tts.speak` (Piper → `media_player.ceiling_speakers`, played by MA/Squeezelite over NAT `.122.10`). New `script.ceiling_announce` (reusable, **not LLM-exposed**); `script.ceiling_play_radio` now gives a spoken confirmation; `script.ceiling_stop` stays silent (MA announcements resume prior playback, so a stop confirmation un-stops the music). Phone pipeline TTS still off; no `internal_url`/networking changes. |
