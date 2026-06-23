@@ -248,6 +248,45 @@ HA **Music Assistant integration** added via Settings → Devices & Services (au
 - Re-enable spoken replies (after Piper is fixed): set the "Home Assistant" pipeline `tts_engine` back to `tts.piper`.
 - Nothing in Whisper/Piper/Wyoming/MA/Squeezelite/networking/VM was modified for any of this.
 
+### LLM conversation assistant (Phase 3 — OpenAI/ChatGPT)
+
+**Status (2026-06-22): ✅ operational from Assist text.** A second, **separate** conversation agent (`conversation.openai_conversation`, OpenAI **gpt-4o-mini**) was added **alongside** the deterministic assistant — it does **not** replace it. The deterministic "Home Assistant" pipeline + `automation.voice_ceiling_speakers` are unchanged and remain the **preferred/default**. The LLM is opt-in via the assistant dropdown ("ChatGPT" pipeline).
+
+**Design principle — the LLM acts only through a small allow-list, never on raw devices.** Entity exposure in HA is shared by all conversation agents, so instead of exposing `media_player.ceiling_speakers` (which would also re-enable the broken built-in intents on the deterministic side), the LLM is given **purpose-built helper scripts** as its sole action surface.
+
+**Helper scripts created** (`POST /api/config/script/config/<id>`; see §13), all targeting `media_player.ceiling_speakers` only:
+
+| Script | Action | LLM args |
+|---|---|---|
+| `script.ceiling_play_radio` | `music_assistant.play_media` (radio) | `station` (optional, default Radio Paradise) |
+| `script.ceiling_pause` / `_resume` / `_stop` | `media_player.media_pause` / `media_play` / `media_stop` | — |
+| `script.ceiling_set_volume` | `media_player.volume_set` (clamped 0–100) | `volume` (0–100) |
+| `script.ceiling_volume_up` / `_down` | `media_player.volume_up` / `_down` | — |
+
+**Exposure (tightened for this phase).** Effective Assist exposure is now **exactly 8 entities**: the 7 `script.ceiling_*` above + `weather.forecast_home` (read-only). `expose_new_entities` was turned **off** (was on), and the previously default/explicitly-exposed entities — incl. `media_player.samsung_q82ca_75` (TV), `todo.shopping_list`, `update.music_assistant_update` — were **un-exposed**. Before/after exposure snapshots were captured for exact rollback. No raw media_player, TV, phone, update, button, notify, person, or device_tracker is exposed.
+
+**OpenAI agent configuration** (subentry of the `openai_conversation` config entry):
+- Model **gpt-4o-mini**, temperature 0.3, max tokens 200, `recommended=off`.
+- **Control Home Assistant = Assist** (`llm_hass_api: ["assist"]`) — this is what lets it call the exposed scripts; it is hard-limited to the 8 exposed entities.
+- Scoped system prompt: "control ONLY the ceiling speakers via the provided scripts; can read weather; no access to any other device; refuse other device control."
+- **web search / code interpreter / response-storage / user-location all OFF**.
+- The auto-created **stt / tts / ai_task** subentries were **deleted** (we use local Whisper STT and no TTS) to keep the cloud surface minimal.
+- "ChatGPT" Assist pipeline: conversation = `conversation.openai_conversation`, **STT = local `stt.faster_whisper`**, **TTS = off**.
+
+**Test results (Assist text, gpt-4o-mini):**
+- ✅ "Set the ceiling speakers volume to 18 percent" → volume → 0.18.
+- ✅ "What's the weather right now?" → answered from `weather.forecast_home` (16.9 °C, 77%).
+- ✅ "Pause the ceiling music" → paused.
+- ✅ Negative — "Turn off the Samsung TV" / "Set the soundbar volume to 60" / "Turn on the upper thermostat speaker" → all refused with *"I can only control the ceiling speakers"* and **zero state change** on the TV/soundbar.
+
+**Privacy / what is sent to OpenAI:** the typed/transcribed text, the system prompt, the **state of the 8 exposed entities only**, and the 7 script tool-schemas; within one conversation session prior turns are resent. **Microphone audio is transcribed locally by Whisper first** — raw audio is never sent. Unexposed entities and broader HA history are not sent.
+
+**Cost:** gpt-4o-mini ≈ $0.0004–$0.0006 per command (~2–2.5k input + ~150 output tokens; only 8 entities/7 tools). ≈ **$1.50–$2/mo at 100 req/day**, ≈ **$7–$9/mo at 500 req/day**. Set a hard cap in the OpenAI billing dashboard. Account must be funded (gpt-4o-mini is not free-tier).
+
+**Security notes:** least-privilege via the allow-list (LLM cannot reach anything but the 7 scripts + weather); `expose_new` off prevents future entities from leaking in; the API key is stored only in HA's encrypted `.storage` (never in repo/docs/logs); the deterministic assistant stays the default so reliable local voice commands are unaffected by the cloud agent.
+
+**Rollback:** see §14.
+
 ---
 
 ## 8. Lessons Learned
@@ -387,6 +426,19 @@ ssh costea@192.168.1.68 "virsh -c qemu:///system setmaxmem haos 2097152 --config
 ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstall d5369777_music_assistant"   # via HAOS console
 # (also uninstall d5369777_ytm_po_token_generator if desired)
 
+# --- LLM assistant rollback (Phase 3 — OpenAI/ChatGPT), all via UI or WS/REST API ---
+# 1. Delete the "ChatGPT" Assist pipeline:  Settings → Voice assistants → ChatGPT → Delete
+#    (WS: assist_pipeline/pipeline/delete {pipeline_id: <chatgpt id>})
+# 2. Delete the OpenAI Conversation integration (removes the agent AND the stored API key):
+#    Settings → Devices & Services → OpenAI Conversation ("ChatGPT") → Delete
+# 3. (Optional) delete the 7 helper scripts: DELETE /api/config/script/config/ceiling_<...>
+#    (harmless if kept; they only control the ceiling speakers)
+# 4. Restore exposure from phase3_exposure_snapshot_before.json:
+#    - homeassistant/expose_new_entities/set {assistant: conversation, expose_new: true}
+#    - re-expose todo.shopping_list, update.music_assistant_update, media_player.samsung_q82ca_75
+#    - un-expose the 7 scripts + weather.forecast_home (or leave; harmless)
+# Note: automation.voice_ceiling_speakers and the preferred "Home Assistant" pipeline are NOT touched by any of this.
+
 # --- Recovery to previous state ---
 # Old HA Core 0.57.2 + Plex were never modified; they remain on the host independently.
 ```
@@ -418,3 +470,4 @@ ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstal
 | 2026-06-22 | **Ceiling speaker validation**: internet radio played through the ceiling speakers — zone confirmed working. |
 | 2026-06-22 | **Voice control Phase 1**: diagnosed entity not exposed to Assist; created `automation.voice_ceiling_speakers` (conversation-trigger, no infra); verified all 6 commands (play radio / pause / resume / stop / volume 25 / volume 50) via the conversation API. |
 | 2026-06-22 | **Voice control Phase 2 (phone mic)**: installed Whisper + Piper add-ons; created Wyoming integrations (faster-whisper, piper) via config-flow API; set pipeline STT=Whisper. Diagnosed "Oops": built-in intents intercepting the *exposed* player (called unsupported `media_player.turn_off`) **and** Piper TTS crashing the pipeline. Fix: un-exposed the media players (automation = sole handler), disabled TTS, and expanded the automation to natural-language phrasings with **generic digit/spoken-number volume capture** (0–100) + relative volume. Voice confirmed working end-to-end (text replies; Piper TTS parked). |
+| 2026-06-22 | **LLM assistant Phase 3 (OpenAI/ChatGPT)**: added a **separate** `conversation.openai_conversation` agent (gpt-4o-mini, Control-HA=Assist) + a "ChatGPT" pipeline (local Whisper STT, TTS off) **alongside** the unchanged deterministic assistant (still preferred). Created 7 `script.ceiling_*` helper scripts as the LLM's sole action surface; **tightened exposure** to exactly those 7 + `weather.forecast_home`, turned `expose_new_entities` off, and un-exposed the TV/todo/MA-update (before/after snapshots saved). Disabled web-search/code-interpreter/response-storage/location; removed auto-created stt/tts/ai_task subentries. Verified from Assist text: ceiling control + weather work; TV/soundbar/thermostat refused with zero state change. |
