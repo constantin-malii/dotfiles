@@ -457,6 +457,27 @@ A deep investigation into making YouTube Music playable via the assistant. **Con
 
 **Possible future fixes (unverified, deferred):** play to the Squeezelite **protocol** player rather than the Universal-player wrapper; check VM **CPU starvation** during deno stream resolution (add vCPU); MA upstream improvements. `flow_mode` is enabled on the Ceiling player (harmless; did not resolve the lock).
 
+### Stop-wedge FIXED — Squeezelite `http_profile = chunked` (2026-06-24)
+
+The playback-lock / stuck-stream wedge that blocked reliable playback was root-caused and fixed.
+
+**Trigger (identified via clean step-by-step trace):** `media_stop` of **any actively-playing stream** (radio *or* YTM — not YTM-specific). On stop, the Universal player went `idle` but the **Squeezelite protocol player stayed stuck `playing`** (it never detected end-of-stream). That stuck stream is the "previous holder appears stuck" that blocked every subsequent play with two 30 s lock timeouts.
+
+**Root cause:** the Squeezelite output setting **`http_profile = no_content_length`** — with no content-length and no clean end signal, Squeezelite can't tell the stream ended on stop.
+
+**Fix:** set the Ceiling Speakers protocol player **`http_profile` → `chunked`** (`f8:b1:56:c2:51:01||protocol||http_profile`), which signals end-of-stream via the terminating chunk (compatible with `flow_mode`'s open-ended queue stream).
+
+**Evidence (clean A/B, identical post-restart conditions):**
+
+| `http_profile` | radio play→stop | YTM play→stop |
+|---|---|---|
+| `no_content_length` (old default) | protocol **stuck playing** (WEDGE) | protocol **stuck playing** (WEDGE) |
+| **`chunked`** (now set) | **both → idle in 3.1 s** ✅ | **both → idle in 3.1 s** ✅ |
+
+**Still open (separate issue):** YTM **track start latency ~150 s** (per-track yt-dlp deno JS-challenge resolution). `chunked` fixes the *wedge*, not start latency. Radio starts instantly.
+
+**Rollback:** set `http_profile` back to `no_content_length` (MA UI → Settings → Players → Ceiling Speakers → HTTP profile → "Profile 2 - no content length"; or MA API `config/players/save` on `upf8b156c25101` with `{"f8:b1:56:c2:51:01||protocol||http_profile":"no_content_length"}`). Config snapshot before the change: `scratchpad/ma_cfg_before_chunked_retest.json`.
+
 ---
 
 ## 14. Rollback Procedures (copy-paste)
@@ -527,3 +548,4 @@ ssh costea@192.168.1.68 "ha apps stop d5369777_music_assistant; ha apps uninstal
 | 2026-06-22 | **Ceiling TTS announcements**: investigated the parked Piper "crash" — Piper generates valid audio (31 KB MP3 fetched from host); root cause was the fixed exposed-intent issue + first-run voice race, not Piper. Added spoken output via explicit `tts.speak` (Piper → `media_player.ceiling_speakers`, played by MA/Squeezelite over NAT `.122.10`). New `script.ceiling_announce` (reusable, **not LLM-exposed**); `script.ceiling_play_radio` now gives a spoken confirmation; `script.ceiling_stop` stays silent (MA announcements resume prior playback, so a stop confirmation un-stops the music). Phone pipeline TTS still off; no `internal_url`/networking changes. |
 | 2026-06-23 | **HA↔MA reconnect fix (A1)**: diagnosed YTM-via-assistant unreliability to the MA integration not auto-reconnecting after restart windows (ruled out DNS-config, OOM, version mismatch; connection is stable once established — 20/20 probes <30 ms/10 min). Added `automation.ma_auto_reload_integration_after_restart` (reload config entry on HA start + 120 s after MA returns from restart; 10-min cooldown) — **validated, keep it.** Enabled MA `flow_mode` on the Ceiling player (harmless). **Open:** YouTube Music **cookie rotation** keeps invalidating auth → YTM provider fails to load; assistant stays radio-only, YTM **not** exposed to the LLM. |
 | 2026-06-23 | **YTM investigation closed (option 1 — lock in wins).** Cookie fixed via incognito extraction; auth + search confirmed working. Added A2a `automation.ma_health_probe_auto_reload` (3-min health probe → reload on failure; no token; fault-injection validated) alongside A1 — HA↔MA connection now self-heals (restart + silent drops). **Playback via MA→Squeezelite remains unreliable** (stuck playback lock + slow per-track stream resolution), so **YTM stays unexposed to the LLM**; use the MA app for YTM. Assistant scope = radio + weather + ceiling control scripts. |
+| 2026-06-24 | **Stop-wedge FIXED.** Root-caused the playback-lock wedge: `media_stop` of any live stream (radio or YTM) left the Squeezelite protocol player stuck `playing` (no end-of-stream detection) due to `http_profile = no_content_length`. Changed Ceiling player `http_profile` → **`chunked`**; clean A/B confirms stop now returns both Universal + protocol to `idle` in ~3 s (was: stuck/WEDGE). Eliminates the "previous holder appears stuck" lock cascade. **Open:** YTM track start latency ~150 s (separate slow-resolution issue). YTM still not exposed to the LLM. |
