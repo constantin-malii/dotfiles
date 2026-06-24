@@ -1,7 +1,10 @@
 # Homebrain — Music Assistant & Audio Architecture (Master Reference)
 
+> ### ▶ Start Here
+> **New to this system (human or agent)? Read [`ONBOARDING.md`](./ONBOARDING.md) first** — it's the primary entry point: connectivity, tooling, what works, the full investigation timeline, ranked hypotheses, things already ruled out, recommended next steps, the architecture decision log, and the playback-lock research brief. This document is the deep technical reference behind it.
+
 > Written for an engineer with **no prior context** who must understand, operate, troubleshoot, upgrade, and rebuild this environment.
-> Companion docs in this folder: `homebrain-architecture.md` (host/VM inventory + SSH quirk), `haos-vm-deployment.md` (VM/KVM detail + full XML), `music-assistant-ceiling-zone.md` (focused ceiling-zone runbook), `migration-inventory.md` (legacy HA Core).
+> Companion docs in this folder: **`ONBOARDING.md` (START HERE — agent/operator entry point)**, `homebrain-architecture.md` (host/VM inventory + SSH quirk), `haos-vm-deployment.md` (VM/KVM detail + full XML), `music-assistant-ceiling-zone.md` (focused ceiling-zone runbook), `migration-inventory.md` (legacy HA Core).
 
 **Generated:** 2026-06-22 · **Maintainer context:** personal home media server.
 

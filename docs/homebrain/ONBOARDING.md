@@ -1,0 +1,242 @@
+# Homebrain / Home Assistant — Agent Onboarding
+
+> **START HERE.** This is the primary entry point for any agent working on the homebrain Home Assistant / Music Assistant / ceiling-speaker stack. Read §1–§7 to be productive in ~15 minutes; read §8–§13 before touching the Music-Assistant playback problem (it has a long investigation history — don't re-run dead ends). Authoritative deep doc: [`music-assistant-audio-architecture.md`](./music-assistant-audio-architecture.md). Latest running status lives in the agent memory log (see §14).
+
+---
+
+## 1. The system at a glance
+
+- **Host:** `homebrain`, Ubuntu 16.04.7, `costea@192.168.1.68`. Runs **Plex** + a legacy **HA Core 0.57.2** venv (both untouched — do not modify) and a **KVM/libvirt VM**.
+- **HAOS VM:** libvirt domain **`haos`** (qemu:///system), HAOS 18.0 / **HA Core 2026.6.4**, 4 GiB / 3 vCPU, autostart on. The **primary** Home Assistant.
+  - **macvtap NIC → `192.168.1.104`** (the LAN IP you reach HA on).
+  - **NAT NIC → `192.168.122.10`** (host↔VM only; see networking gotcha).
+- **Music Assistant:** add-on `d5369777_music_assistant` **v2.9.3**, UI/API at `http://192.168.1.104:8095`. Plays to **ceiling speakers** via a **Squeezelite** systemd service on the host (`squeezelite-ceiling.service`, ALSA `hw:1,0`).
+- **Audio path:** MA (VM) → SlimProto/HTTP stream over NAT `192.168.122.10` → Squeezelite (host) → ceiling speakers.
+
+---
+
+## 2. Connectivity (how to actually reach things)
+
+| Target | From your machine | Notes |
+|---|---|---|
+| **HA REST/WS** | `http://192.168.1.104:8123` ✅ | LAN-reachable. Needs an HA token (below). |
+| **MA API** | `http://192.168.1.104:8095` ✅ | `/info` open; `/ws` needs an **MA account token** (HA token is rejected). |
+| **SSH to host** | `ssh costea@192.168.1.68` ✅ | **Must use ssh-agent:** `ssh-add ~/.ssh/id_homebrain` first — direct `-i` fails ("we did not send a packet"). |
+| **NAT IP `192.168.122.10`** | ❌ from your machine/LAN | Reachable **only from the host**. TTS/stream URLs use this IP (host can fetch; phone/LAN cannot). |
+| **Into the HAOS VM shell / its Docker** | ❌ | No SSH into the VM. You only have the host shell + HA/MA APIs. |
+
+**Tokens (secrets — never commit):**
+- **HA long-lived token:** a temporary diagnostic token has been used throughout (kept active per the user). Not stored in any file/repo. Ask the user for it, or create a fresh one in HA → Profile → Long-Lived Access Tokens (revoke when done).
+- **MA token:** the MA API `/ws` needs the MA account token. Ask the user; they write it to `scratchpad/.ma_auth` as `token:<value>` for the session and delete after. HA tokens do **not** authenticate to MA.
+
+**sudo on host:** requires a password + TTY (not NOPASSWD). Can't run non-interactively — have the **user** run it via `! ssh -t costea@192.168.1.68 'sudo ...'`. Read-only host commands run fine over agent SSH.
+
+---
+
+## 3. Tooling / how to drive it
+
+- **No CLI helpers** — interact via APIs from Python (raw-socket WebSocket clients; no extra libs):
+  - **HA REST:** `/api/states`, `/api/services/<domain>/<svc>` (`?return_response=true` for response data), `/api/config`, `/api/conversation/process`, `/api/hassio/addons/<slug>/logs`.
+  - **HA WS:** `ws://192.168.1.104:8123/api/websocket`. **Large messages span multiple frames** — accumulate continuation frames (opcode 0) until FIN or JSON parse fails.
+  - **MA WS:** `ws://192.168.1.104:8095/ws`. `{"command":..., "message_id":"N", "args":{...}}`; first msg is server-info; **send `{"command":"auth","args":{"token":...}}` first**. Useful: `players/all`, `players/get`, `config/players/get`, `config/players/save`, `player_queues/get`, `players/cmd/stop`.
+- **Long ops:** Bash tool **times out at 2 min** and **foreground `sleep` is blocked**. Run multi-minute tests with `run_in_background: true`, write results to a scratchpad file, then read it. (MA plays take 90–150 s.)
+- **Windows console:** emit **ASCII only** — non-ASCII throws `UnicodeEncodeError`. Wrap with `.encode("ascii","replace")`.
+- **MA `/logs` proxy is inconsistent/stale** — sometimes a cached/short buffer; before/after diffs can return empty. Re-fetch fresh tail.
+- **Supervisor API mostly blocked** via Core proxy: `/api/hassio/<slug>/logs` works; `/info`, `/stats`, `/options`, `resolution`, `host`, `network` → **401**. `/hassio` frontend panel **404** (known, parked).
+- **Commits:** repo **`D:\repos\dotfiles`** (docs under `docs/homebrain/`). **Secret-scan before committing**; **omit Claude/AI attribution**; commit only when asked; keep doc commits separate from config/implementation changes.
+
+---
+
+## 4. Key IDs & entities
+
+- **Player:** `media_player.ceiling_speakers` = MA **Universal player** `upf8b156c25101`. Child **Squeezelite protocol player** `f8:b1:56:c2:51:01` (type=protocol, provider=squeezelite) — **no queue, not an HA entity**; you cannot play to it directly / bypass the Universal player.
+- **Config entries:** Music Assistant `01KVPNW1JFHJG30NANAPVARHY8`; OpenAI Conversation `01KVRQW1ERJGJDRPC4MEF7206A`.
+- **Assist pipelines:** default/preferred **"Home Assistant"** `01kvpdchwfeh0wa8p7d4bcywj4` (deterministic, STT=faster-whisper, TTS off); **"ChatGPT"** `01kvs55xvmsz0yy27hj7bkaygg` (OpenAI, opt-in).
+- **Conversation agents:** `conversation.home_assistant`, `conversation.openai_conversation` (gpt-4o-mini).
+- **Helper scripts** (`script.ceiling_*`): `play_radio`, `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS, **not** LLM-exposed), `play_music` (search-then-play).
+- **Automations:** `automation.voice_ceiling_speakers` (phone voice handler — don't modify casually); `automation.ma_auto_reload_integration_after_restart` (A1); `automation.ma_health_probe_auto_reload` (A2a).
+
+---
+
+## 5. What works (reliable)
+
+- ✅ **Ceiling speaker zone** — radio plays instantly and reliably.
+- ✅ **Phone voice control (Phase 2)** — Companion app → Whisper STT → `automation.voice_ceiling_speakers` → ceiling. **Text replies only** (Piper TTS disabled in pipeline). Generic spoken-number volume parsing.
+- ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; can run the 7 ceiling scripts + read `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
+- ✅ **Ceiling TTS announcements** — `tts.speak` (tts.piper) → `media_player.ceiling_speakers` (`script.ceiling_announce`). MA announcements **resume prior playback** afterward (so no "stop" confirmation).
+- ✅ **A1 + A2a self-healing** — HA↔MA connection drops intermittently (internal Docker DNS); these auto-reload the config entry to recover (validated).
+- ✅ **YTM auth + search** — after refreshing the cookie via the **incognito method** (extract from a private window, close it without logging out). Search resolves `ytmusic://` URIs for track/artist/album/playlist. Artist/album/playlist queries reliable; multi-word **track-name** queries often return 0 (use simpler terms or artist).
+
+---
+
+## 6. What's broken / limited (with status)
+
+- ⚠️ **YTM track *playback* is not LLM-grade and NOT exposed to the LLM.** See the full investigation in §8–§13. Summary: **stop-wedge** (Squeezelite stuck `playing` after stop; HTTP/1.0 root cause) + **cold-start latency ~95–150 s**.
+- ⚠️ **YTM cookie rotates** — re-extract via incognito when YTM returns nothing.
+- ⚠️ **Piper TTS** crashes the Assist pipeline → TTS **off** in pipelines; only explicit `tts.speak` to ceiling works. Whisper STT fine (model `auto`/sherpa-parakeet; couldn't pin tiny-int8).
+- ⚠️ **HA↔MA connection** drops after MA restarts / intermittently (internal DNS). Recover: `POST /api/config/config_entries/entry/01KVPNW1JFHJG30NANAPVARHY8/reload`. A1/A2a automate this.
+- ⚠️ **MA stuck playback lock** ("previous holder appears stuck") — consequence of the stop-wedge; clears on MA restart; `players/cmd/stop` does **not** reliably clear it.
+
+---
+
+## 7. Reliable recipes / cheatsheet
+
+- **Play YTM reliably:** `music_assistant.search` → top result's `uri` → `music_assistant.play_media(media_id=uri)` → nudge `media_player.media_play`. (Free-text `play_media` unreliable; cold-start latency still applies.)
+- **Recover HA↔MA:** reload the MA config entry (above), wait ~15 s.
+- **Clean MA state for a test:** `POST /api/services/hassio/addon_restart {"addon":"d5369777_music_assistant"}`, then **wait ~130–140 s** for providers (esp. YouTube Music) to load — early plays fail with "No playable items found."
+- **VM management from host:** `ssh-add ~/.ssh/id_homebrain` then `ssh costea@192.168.1.68 'virsh -c qemu:///system <dominfo|start|shutdown|reboot> haos'`.
+- **Host/VM CPU:** host `top -bn1 | grep %Cpu`; VM CPU% from `virsh -c qemu:///system domstats haos --cpu-total` (`cpu.time` ns delta ÷ wall ÷ 3 vCPUs). MA **container** CPU/mem **unavailable** (stats proxy 401, no VM shell).
+- **Testing discipline:** always test from a **clean state** (restart + wait); wait until a track is **genuinely `playing` with the right title** (not just `state==playing`, which can be stale); avoid rapid back-to-back plays (trigger the lock cascade).
+
+---
+
+## 8. Investigation Timeline
+
+Chronological summary of major investigations. Status: ✅ resolved · 🟡 partially resolved · 🔴 open.
+
+| Phase | Problem | Root cause found | Fix implemented | Status |
+|---|---|---|---|---|
+| **Voice "Oops" failures** | Assist returned "Oops, an error has occurred" on voice commands | (a) Built-in intents on **exposed** media_players called unsupported `media_player.turn_off` (`ServiceNotSupported`); (b) Piper TTS crashed the pipeline | Un-exposed the media_players (the conversation-trigger automation is the sole handler); set pipeline **TTS = off** | ✅ resolved |
+| **Whisper / Piper** | Suspected STT/TTS as the failure cause; Whisper model couldn't be pinned | Whisper was **not** the cause (exonerated by log correlation). Piper **does** crash the pipeline. Whisper model stuck on `auto` (sherpa-parakeet) — add-on options unwritable (no `ha apps options`, `/hassio` panel missing, Supervisor options API 401) | STT left on faster-whisper (works); Piper TTS disabled in pipeline; ceiling TTS done via explicit `tts.speak` instead | 🟡 partial (STT works; Piper-in-pipeline still broken, model not pinned) |
+| **HA ↔ MA connection instability** | `music_assistant.search`/`play_media` intermittently hang/time out; integration reports `loaded` but is silently dead | Integration's connection to `ws://d5369777-music-assistant:8094` drops (internal Docker DNS) and **does not auto-reconnect**. Two drop types: **restart drops** (player → `unavailable`) and **silent drops** (player stays `idle`). Connection is rock-solid once established (20/20 probes <30 ms / 10 min) | **A1** `ma_auto_reload_integration_after_restart` (reload on HA start + 120 s after MA returns from restart) + **A2a** `ma_health_probe_auto_reload` (3-min active search probe → reload on failure; no token). Both validated | ✅ resolved (self-heals) |
+| **OpenAI assistant integration** | Add a ChatGPT assistant without breaking the deterministic one or over-exposing entities | n/a (greenfield) | Separate **OpenAI Conversation** integration (gpt-4o-mini) + separate **"ChatGPT" pipeline**; deterministic "Home Assistant" stays default; exposure locked to 7 ceiling scripts + weather; `expose_new_entities` off; removed auto-created stt/tts/ai_task subentries | ✅ resolved (text-tested; phone-mic test pending) |
+| **YouTube Music authentication** | YTM provider failed to load / returned no results ("cookies no longer valid", "does not have Premium") | YouTube **rotates/invalidates** the login cookie; plain-browser cookies degrade fast | Re-extract the cookie from an **incognito/private window closed without logging out** (user does this in MA UI). PO token generator is healthy and not the issue | 🟡 partial (works after refresh; **cookie rotation recurs** — periodic re-extraction needed) |
+| **Playback lock investigation** | `play_media` hangs ~90 s+; "previous holder appears stuck"; track never starts | The **stop-wedge**: `media_stop` of any live stream (radio **or** YTM) leaves the **Squeezelite protocol player stuck `state=playing`** while the Universal player goes `idle`. The stuck stream holds the lock → 30 s lock timeouts → aborts. Trigger isolated to **stop on a live stream** (not YTM-specific, not switch/pause/next/announce). `players/cmd/stop` doesn't release it | None that fully works (see HTTP-profile row). Workarounds: avoid rapid plays; MA restart clears it | 🔴 open |
+| **HTTP profile experiments** | Can a Squeezelite `http_profile` value stop the wedge? | Squeezelite client speaks **HTTP/1.0**. `chunked` clears the wedge (terminating chunk = clean end-of-stream) **but breaks playback** — MA's `serve_queue_flow_stream` returns **HTTP 500** ("chunked encoding forbidden for HTTP/1.0"). `forced_content_length` avoids the 500 (plays) **but still wedges on stop**. `no_content_length` plays but wedges | **Reverted to `no_content_length`** (baseline). No single value fixes both | 🔴 open (root constraint = HTTP/1.0) |
+| **YTM latency breakdown** | Why ~150 s to start a track? | Resolution is **fast (~14 s)** and **not CPU-bound** (VM ~5 %, host idle). The ~80 s gap is **post-resolution lock/stream-setup wait** (not deno/CPU). **Cached replay ~2 s** | n/a (diagnostic) — start latency is dominated by the stop-wedge lock contention on cold plays | 🟡 understood (tied to the open stop-wedge) |
+
+---
+
+## 9. Current Hypotheses (ranked)
+
+For the **open** stop-wedge / playback-lock problem.
+
+### H1 — Squeezelite HTTP/1.0 stream-termination handling (HIGHEST confidence)
+- **Confidence:** High.
+- **Supporting:** Direct log evidence — Squeezelite (aioslimproto) connects HTTP/1.0; `chunked` → `RuntimeError: Using chunked encoding is forbidden for HTTP/1.0` → 500. With content-length/no-length, the protocol player never transitions out of `playing` on stop (no clean end-of-stream signal). Only `chunked` (explicit terminating chunk) produced a clean stop.
+- **Contradicting:** None found locally. (Open: is HTTP/1.0 a hard limit of this Squeezelite build, or configurable?)
+- **Next validation:** Determine the host Squeezelite version + whether it can speak HTTP/1.1 (build/flags). If HTTP/1.1 is possible, `chunked` becomes usable → likely fixes the wedge. (Upstream research, then a host-side Squeezelite check.)
+
+### H2 — Universal Player lock-release bug (Medium-High)
+- **Confidence:** Medium-High.
+- **Supporting:** The lock ("previous holder appears stuck") is on the Universal player `upf8b156c25101`; it sets/clears the output protocol and aborts. Even direct `players/cmd/stop` to the protocol player doesn't release the wedge — only an MA restart does. Universal=idle while protocol=playing is a state-tracking mismatch in the Universal layer.
+- **Contradicting:** The actual stuck *state* lives in the Squeezelite protocol player (H1) — the Universal lock may be a **symptom** of H1, not an independent bug.
+- **Next validation:** Inspect MA's Universal-player/SlimProto stop handling (source/upstream issues). Check whether the lock is released when the underlying stream is forcibly closed.
+
+### H3 — Music Assistant playback-lock defect generally (Medium)
+- **Confidence:** Medium.
+- **Supporting:** The "previous holder appears stuck" + 30 s timeout pattern looks like a lock not released on an error/abort path.
+- **Contradicting:** Likely downstream of H1/H2 rather than a separate defect.
+- **Next validation:** Search MA issues for "previous holder appears stuck" / playback lock; reproduce against a non-Squeezelite player to see if the lock wedges there too (would indicate a general MA defect vs Squeezelite-specific).
+
+### H4 — Already fixed upstream in a newer MA / Squeezelite (Medium, high value)
+- **Confidence:** Medium.
+- **Supporting:** MA is on **2.9.3** (latest in its current repo channel, but the project moves fast); SlimProto/HTTP handling and lock logic are actively maintained.
+- **Contradicting:** Unknown until release notes/issues are reviewed.
+- **Next validation:** Review MA release notes/changelog since 2.9.3 and Squeezelite changes for stop/lock/HTTP fixes. **This is the cheapest high-value step.**
+
+---
+
+## 10. Things Already Ruled Out (do not re-investigate without new evidence)
+
+| Ruled out | Evidence it's NOT the cause |
+|---|---|
+| **DNS as the root cause of the wedge** | CoreDNS responds fast (NXDOMAIN <1 ms, authoritative); Supervisor healthy. DNS *does* cause the separate HA↔MA connection drops (handled by A1/A2a), but **not** the playback stop-wedge. |
+| **CPU starvation / needs more vCPU** | During resolution & the cold-start gap, VM CPU is **~5–9 %** and host is **idle**. The latency is waiting, not computing. Adding vCPU won't help. |
+| **PO token issues** | PO-token generator is healthy, auto-refreshing (12 h TTL), and MA requests tokens for real video IDs. |
+| **YouTube Music search failures** | Search works and resolves `ytmusic://` URIs for track/artist/album/playlist (cookie valid). Some multi-word track-name queries return 0 — that's query specificity, not a provider failure. |
+| **Basic connectivity / OOM** | HA/MA reachable; MA `exit code 137` events are **restart SIGKILLs** (preceded by "Stopping addon"), not OOM. |
+| **`flow_mode` as the primary fix** | `flow_mode` enabled on the Ceiling player — harmless, did **not** resolve the wedge. |
+| **Direct protocol-player playback path** | The Squeezelite protocol player has **no queue** (`player_queues/get` empty) and is not an HA entity; MA routes all playback through the Universal player. You **cannot** bypass it. |
+| **Cookie / auth as the *playback* blocker** | Auth works after incognito-cookie refresh; search + resolution succeed. The stop-wedge happens with **radio** too (no YTM auth involved). |
+| **YTM-specific trigger** | The wedge reproduces on **radio** stop as well — it's a stop-of-any-live-stream problem, not YTM. |
+
+---
+
+## 11. Recommended Next Investigations (ranked by expected value)
+
+1. **Upstream GitHub issue/PR research** *(cheapest, highest value)* — MA + Squeezelite repos for "previous holder appears stuck", playback lock, Universal Player stop, HTTP/1.0, `no_content_length`/`chunked`, protocol player remaining in `playing`. Find existing fixes/workarounds before any local change. (See §13 Research Brief; partial results to be appended as research is done.)
+2. **Squeezelite version & HTTP capability analysis** — on the host: `squeezelite -?`/`--version`, package version, whether it negotiates HTTP/1.1. If HTTP/1.1 is achievable, `chunked` likely fixes the wedge. *(Read-only host check; the most promising concrete fix path.)*
+3. **Newer MA release-notes review** — changes since 2.9.3 touching SlimProto/Squeezelite stop handling, stream termination, or the lock. If a fix exists, an MA update may resolve it (but updating is gated by the add-on repo channel — check feasibility).
+4. **Universal Player lock internals** — read MA's player/queue controller stop path to understand why the lock isn't released on stop and why `players/cmd/stop` doesn't clear a wedged protocol player.
+5. **Alternate player backend evaluation** — would a different transport (e.g., a player that speaks HTTP/1.1, or DLNA/Cast on a LAN-reachable device) avoid the HTTP/1.0 limitation? Note the **macvtap/NAT constraint**: only the host can fetch the NAT-IP stream, so a LAN fetch-player would hit the publish-IP conflict.
+
+### Do Not Repeat Unless New Evidence Appears
+- Re-running local DNS / CPU / PO-token / search / basic-connectivity diagnostics (all ruled out — §10).
+- Re-testing `flow_mode` as a wedge fix.
+- Trying to bypass the Universal player by playing to the protocol player.
+- Re-testing `chunked` for streaming (it breaks playback on HTTP/1.0) **unless** Squeezelite gains HTTP/1.1.
+- Blaming the cookie/auth/YTM for the *stop-wedge* (it happens on radio too).
+
+---
+
+## 12. Architecture Decision Log
+
+| Decision | Rationale |
+|---|---|
+| **YTM not exposed to the LLM** | Playback isn't reliable (stop-wedge + cold-start latency). Exposing it would let the assistant hang the speakers. Gate: only expose once playback is proven reliable. |
+| **Radio is the only exposed playback capability** | Radio plays instantly and reliably (no YTM resolution / wedge sensitivity), so it's safe for assistant/voice use. |
+| **Phone-pipeline TTS disabled** | Piper crashes the pipeline, and TTS proxy URLs resolve to the NAT IP `192.168.122.10` which the **phone can't reach** (macvtap split). Spoken replies on the phone would fail; text replies are reliable. |
+| **LLM exposure restricted to helper scripts (+ weather)** | Entity exposure is shared by all conversation agents; exposing raw `media_player`/TV/etc. would re-enable broken built-in intents and widen the LLM's reach. Purpose-built `script.ceiling_*` are a safe, minimal, bounded action surface. `expose_new_entities` turned off. |
+| **Ceiling TTS via explicit `tts.speak`, not the pipeline** | The pipeline TTS is off (Piper); explicit `tts.speak` to `media_player.ceiling_speakers` works because the **host** can fetch the NAT-IP TTS URL. `script.ceiling_announce` is the reusable primitive (kept un-exposed to the LLM). |
+| **Auto-reload automations (A1 + A2a) exist** | The HA↔MA integration drops its connection (internal DNS) and doesn't auto-reconnect — it sits silently dead until a config-entry reload. A1 covers restart drops; A2a's active probe covers silent drops. Both reload the entry to self-heal, with debounce/cooldown to avoid loops. |
+| **`http_profile` left at `no_content_length`** | No value fixes both play and stop: `chunked` breaks streaming on HTTP/1.0; `forced_content_length` still wedges. `no_content_length` is the baseline that at least plays. |
+| **NAT NIC + host Squeezelite for the ceiling zone** | macvtap isolates host↔VM; a reversible second NAT NIC (`192.168.122.10`) lets the host reach MA's stream server. Host Squeezelite drives the analog `hw:1,0` ceiling speakers (no desktop/PulseAudio, exclusive ALSA). |
+
+---
+
+## 13. Research Brief: Playback Lock Investigation
+
+Hand this to a deep-research agent. **Read-only research; do not change config, restart services, or expose anything to the LLM.**
+
+### Environment
+- **HA Core:** 2026.6.4 · **HAOS:** 18.0 (VM under libvirt/QEMU 2.5 on Ubuntu 16.04 host).
+- **Music Assistant:** server/add-on **v2.9.3** (`d5369777_music_assistant`), schema 31.
+- **Squeezelite:** runs on the **host** (Ubuntu 16.04) as `squeezelite-ceiling.service`, output ALSA `hw:1,0`, server = MA stream on `192.168.122.10`. Client connects to MA's stream server over **HTTP/1.0** (per `aioslimproto` error). Exact Squeezelite version: **TBD — read-only host check pending** (`squeezelite --version` / package version).
+- **Player model:** MA **Universal player** `upf8b156c25101` wrapping a **Squeezelite protocol player** `f8:b1:56:c2:51:01` (the protocol player has no independent queue). Player config of note: `http_profile=no_content_length` (default), `output_codec=flac`, `flow_mode=true`, `output_channels=stereo`.
+
+### Proven facts (local, reproduced)
+- Search works; YTM auth works; cookie currently valid (after incognito refresh).
+- HA↔MA connection self-heals via auto-reload automations (drops are internal-DNS, not the wedge).
+- **Stop causes the wedge:** `media_stop` of any actively-playing stream (radio or YTM) → Universal player `idle` but **protocol player stays `playing`** (state mismatch). Confirmed clean A/B from a restarted baseline.
+- The wedged protocol stream holds the playback lock → next plays hit "Timed out (30s) acquiring playback lock for player … previous holder appears stuck".
+- **`chunked`** → MA stream server returns HTTP 500 `RuntimeError: Using chunked encoding is forbidden for HTTP/1.0`; clears the wedge but breaks playback.
+- **`no_content_length`** → plays fine; **wedges on stop**.
+- **`forced_content_length`** → plays fine (no 500); **still wedges on stop**.
+- Resolution is fast (~14 s) and not CPU-bound; cold-start "latency" is the post-resolution lock wait; cached replay ~2 s.
+
+### Open questions
+1. **Why does the Squeezelite protocol player never transition to `idle` after stop** (with content-length/no-length streams)? Is this a missing end-of-stream signal over HTTP/1.0, or an MA/SlimProto stop-handling gap?
+2. **Is this known upstream** (MA or Squeezelite issues/PRs)?
+3. **Do newer MA / Squeezelite versions contain a fix** for the stop/lock/HTTP behavior?
+4. **Would HTTP/1.1 support change behavior** (making `chunked` usable and the stop clean)?
+
+### Desired outcome
+Reliable playback of **track, artist, album, playlist, genre** from YouTube Music through Home Assistant, and eventually through the ChatGPT assistant — i.e., clean stop (protocol returns idle, no stuck lock) and acceptable start latency.
+
+### Search terms / focus
+`"previous holder appears stuck"` · playback lock · Universal Player · Squeezelite · SlimProto · HTTP/1.0 · `no_content_length` · `chunked` · `forced_content_length` · stream termination · stop behavior · "protocol player" remaining in `playing`. Sources: Music Assistant GitHub (issues/discussions/releases), Squeezelite GitHub, SlimProto docs.
+
+### Deliverables expected
+1. Root-cause tree. 2. Ranked hypotheses (reconcile with §9). 3. Relevant upstream issues/PRs (links). 4. Existing fixes/workarounds. 5. Recommended next experiment. *(Findings get appended below / committed separately.)*
+
+---
+
+## 14. Where things live
+
+- **Deep docs (authoritative):** `D:\repos\dotfiles\docs\homebrain\`
+  - `music-assistant-audio-architecture.md` — master (architecture, voice, LLM, TTS, YTM investigation, http_profile, A1/A2a, change log).
+  - `haos-vm-deployment.md`, `homebrain-architecture.md`, `migration-inventory.md`, **this `ONBOARDING.md`**.
+- **Agent memory (running project log, latest status):** `~/.claude/projects/C--Users-ConstantinMalii/memory/homebrain-ha-vm-project.md` — detailed chronology + every finding.
+- **Scratchpad (test outputs, config snapshots):** session scratchpad dir; e.g. `ma_cfg_before_*.json`, `phase3_exposure_snapshot_*.json`.
+
+---
+
+## 15. Working norms (user preferences)
+
+- **Ask before sudo / impactful changes.** Don't touch Plex, old HA Core, host LAN networking (eno1), or macvtap. Don't upgrade the host OS.
+- **Diagnostics before fixes** — correlate exact log timestamps; provide evidence for the failing stage before proposing a change. Rigor over speed.
+- **Scope discipline** — change only what's asked; snapshot before changing settings; roll back if a change doesn't deliver.
+- **Don't expose YTM (or broad entities) to the LLM** until playback is proven reliable. Keep exposure minimal.
+- **Git:** secret-scan first; **no Claude attribution** in commits/PRs; commit only when asked; keep documentation commits separate from implementation.
+- **Secrets:** never write tokens/cookies to repo, docs, memory, logs, or artifacts.
