@@ -22,7 +22,7 @@ When a track with **slow stream resolution** (YouTube Music: ~14–150 s for yt-
 4. Observe the second command does not take effect for ~30 s; the log shows the lock timeout / "previous holder appears stuck".
 
 ### Expected behavior
-A control command issued while a track is still resolving should take effect promptly (cancel/replace the in-progress start), not block ~30 s on the playback lock.
+A control command issued while a track is still resolving should respond promptly — **fail fast, cancel/replace the in-progress start, queue, or wait only briefly** — not block ~30 s on the playback lock and log a "stuck holder" timeout.
 
 ### Actual behavior
 The second command blocks ~30 s, logs `Timed out (30s) acquiring … lock … previous holder appears stuck; proceeding without lock`, then proceeds unsynchronized. Multiple overlapping commands → multiple stacked 30 s timeouts.
@@ -58,6 +58,6 @@ The 30 s timeout/message itself was introduced in PR #4024 ("Drop redundant per-
 ### Suggested fix direction
 Don't hold the playback lock across slow network I/O. Either:
 1. **Resolve outside the lock:** perform `_load_item` (stream resolution + buffer pre-fill) **before** acquiring the playback lock in `play_index`/`_handle_play_media`; take the lock only for the quick player hand-off (`players.play_media`). Add a cancellation check after resolution so a stop/skip that arrived during resolution wins. (Proper fix; needs care around track-transition serialization.)
-2. **Or** make `get_player_lock` fast-reject / cancel an in-progress holder for a new user command instead of waiting 30 s (so overlapping commands are responsive).
+2. **Or narrow the lock scope** so the playback lock guards only the **queue/player mutation** (the quick state change / player hand-off), not the slow resolution — and/or have `get_player_lock` fast-reject or cancel an in-progress holder for a new user command instead of waiting 30 s.
 
 Happy to provide full VERBOSE SlimProto traces and the per-condition reproduction matrix.
