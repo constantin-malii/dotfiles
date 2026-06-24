@@ -4,6 +4,15 @@
 
 > **Caveat / calibration:** the exact log string `previous holder appears stuck` does **not** appear in any public MA issue or discussion — it is an internal MA log line. The findings below are traced from MA + aioslimproto **source** (tag 2.9.3 / main) and from related issues/PRs, not from a bug report describing this exact repro. Claims are labelled **CONFIRMED** (read in source / quoted) or **INFERRED** (mechanistic deduction). The one local experiment that would confirm vs. refute the leading hypothesis is in §5. **Our repro appears to be ahead of the public issue tracker.**
 
+> ## ⚠️ EMPIRICAL UPDATE (2026-06-24) — the leading hypothesis was TESTED and REFUTED
+> A VERBOSE SlimProto trace of **6 clean radio play→stop cycles (6/6 clean, 0 wedged)** contradicts §2 H1/H1b:
+> - Every stop returned both Universal **and** protocol players to `idle`.
+> - The stop is signaled and handled via **`STMf` (connection closed)**, NOT `STMu`. So the claim "only `STMu`→STOPPED; connection-close emits no state-changing STAT" is **wrong** — `STMf` drives a clean stop.
+> - The `power(False)` no-op would make **every** stop wedge; none did → the deterministic-no-op hypothesis is **refuted**.
+> - **No upstream bug report was filed** (evidence doesn't support it).
+>
+> **Revised understanding:** the normal stop path is fine. The wedge is **condition-dependent / intermittent** — it only appeared amid **contended, interrupted, or errored** states (rapid back-to-back plays, **stop during resolution/buffering before `STMs`**, source switching, or a stream that 500'd/disconnected — e.g. the `chunked` HTTP-500 path, or a YTM stream that dropped). The true trigger is in an **error/interrupt path**, not the clean stop. **Next validation:** reproduce a wedge under those conditions and trace which STAT is missing (likely no clean `STMf`/`STMs` on an interrupted/errored stream), before any upstream report. Expected clean-stop reference timeline: `media_stop` → `STMf` (connection closed) → "Clearing active output protocol" → idle.
+
 ## 1. Root-cause tree
 
 ```

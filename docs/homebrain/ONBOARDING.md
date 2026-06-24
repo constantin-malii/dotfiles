@@ -109,10 +109,12 @@ Chronological summary of major investigations. Status: ✅ resolved · 🟡 part
 
 ## 9. Current Hypotheses (ranked)
 
-For the **open** stop-wedge / playback-lock problem. **Updated by upstream research (2026-06-24) — see [`research-playback-lock.md`](./research-playback-lock.md) for the source-traced root-cause tree.**
+For the **open** stop-wedge / playback-lock problem. See [`research-playback-lock.md`](./research-playback-lock.md) (source-traced tree **+ the 2026-06-24 empirical refutation**).
 
-### H1 — MA-side stop path for PROTOCOL players (`power(False)` no-op) (HIGHEST confidence) — NEW LEADER
-- **Confidence:** High (source-traced; not yet confirmed by a live debug trace).
+> ⚠️ **REFUTED by live test (2026-06-24):** a VERBOSE SlimProto trace of **6/6 clean radio play→stop cycles** showed every stop returns to `idle` via **`STMf` (connection closed)** — so H1 (`power(False)` no-op → deterministic wedge) and H1b ("only `STMu`→STOPPED") below are **wrong**. The normal stop path works. The wedge is **intermittent / condition-dependent** (contended/interrupted/errored stops: rapid plays, stop during buffering before `STMs`, source switch, or a 500'd/dropped stream) — **not** the clean stop path. No upstream report filed. Next: reproduce a wedge under those conditions and find the missing STAT. The H1/H1b text below is retained for history.
+
+### H1 — MA-side stop path for PROTOCOL players (`power(False)` no-op) (REFUTED — see box above)
+- **Confidence:** ~~High~~ → **refuted** (live trace: 6/6 clean stops via STMf).
 - **Supporting:** MA's `providers/squeezelite/player.py` issues **`client.power(False)`** (not `client.stop()`) to stop a PROTOCOL child. aioslimproto `power()` early-returns when `powered` is unchanged; protocol-player power forwarding was removed (PR #3659). With power managed at the Universal/group level, the child's `powered` can already be False → `power(False)` is a no-op → `strm "q"` never sent → `SlimClient.state` never reaches STOPPED → MA's `STATE_MAP` keeps reporting `playing` → the Universal stop coroutine never returns → the PLAYBACK lock (PR #4024) is never released → "previous holder appears stuck".
 - **Contradicting:** None yet; needs the §11 debug trace to confirm `strm "q"` is absent at stop.
 - **Next validation:** the debug-log trace in §11 step 1.
@@ -163,8 +165,8 @@ For the **open** stop-wedge / playback-lock problem. **Updated by upstream resea
 ## 11. Recommended Next Investigations (ranked by expected value)
 
 0. ✅ **DONE — upstream GitHub/Squeezelite research** (2026-06-24) → [`research-playback-lock.md`](./research-playback-lock.md). Outcome: no upstream issue matches our exact repro; root cause traced in MA source to the PROTOCOL-player stop path (`power(False)`); the "HTTP/1.1 Squeezelite" and "upgrade MA" ideas are dead ends (§10).
-1. **Live debug trace (highest value now)** — enable debug logging for `aioslimproto` and `music_assistant.providers.squeezelite`, do one clean **play → `media_stop`**, and capture: (1) whether aioslimproto **sends `strm "q"`** at stop — *absent ⇒ H1 confirmed*; (2) the **STAT** messages after stop — *absence of STMu / a late STMo ⇒ H1b*. This single trace pinpoints the broken path. *(Read-only; enabling debug logging is a logger change, confirm with user.)*
-2. **File a precise upstream issue** against `music-assistant/server` (+ `aioslimproto`) with the §1 trace — there is no shipped fix; if H1, the upstream patch is likely a one-liner (call `client.stop()` for PROTOCOL stop, or drop the `powered`-unchanged early-return when a stop is needed).
+1. ✅ **DONE — live debug trace (2026-06-24): REFUTED H1/H1b.** VERBOSE SlimProto trace of 6/6 clean radio play→stop cycles: every stop → `idle` via `STMf`. The clean stop path works; the wedge is NOT here.
+2. **Reproduce the wedge under its real (contended/interrupted/errored) conditions** *(highest value now)* — with squeezelite `log_level=VERBOSE`, trigger a wedge via e.g.: **stop during resolution/buffering (before `STMs`)**, **rapid back-to-back plays / source switches**, or a **stream that errors/drops** (e.g. the `chunked` 500 path, or a YTM stream disconnect). Capture which STAT is missing/late vs the clean reference (`media_stop`→`STMf`→idle). Only after the true trigger is identified should an upstream issue be considered. *(Read-only + logger change; revert log_level to GLOBAL after.)*
 3. **Universal Player lock internals** — read MA's `controllers/players/controller.py` stop path + `providers/squeezelite/player.py` to confirm the lock is only released in `finally` when the child converges, and why `players/cmd/stop` doesn't clear a wedged child.
 4. **Alternate player backend (lower priority)** — a different transport could sidestep the SlimProto stop quirk, but note the **macvtap/NAT constraint**: only the host can fetch the NAT-IP stream, so a LAN fetch-player (Cast/DLNA) hits the publish-IP conflict.
 
