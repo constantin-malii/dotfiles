@@ -127,3 +127,26 @@ Ran 6 interrupted-state conditions (squeezelite VERBOSE), each from clean idle: 
 **Revised root-cause statement for an upstream issue:** *MA holds the player's playback lock for the entire duration of (slow) stream resolution, so any concurrent/overlapping command (stop, new play, announcement, clear) blocks for the 30 s lock timeout and logs "previous holder appears stuck."* **Suggested fix:** resolve the stream OUTSIDE the playback lock; acquire the lock only to start/stop the player. This also removes the cold-start latency penalty for overlapping commands.
 
 **Note:** the earlier-observed "permanent" wedge was almost certainly this **transient ≤30–60 s lock-contention window** caught mid-flight during chaotic multi-op sessions — a clean spaced stop is fine (6/6).
+
+## 8. Code-path CONFIRMED + existing-issue scan + workaround feasibility (2026-06-24)
+
+Source-confirmed from MA 2.9.3 (architecture unchanged on `main`). Draft upstream issue: [`upstream-issue-draft.md`](./upstream-issue-draft.md).
+
+**Code path (CONFIRMED — lock IS held across resolution):**
+- `controllers/player_queues/controller.py` — `@handle_play_action` (~L124–158) wraps the **whole** method in `async with players.get_player_lock(queue_id, PLAYBACK)`.
+- `play_index()` (~L936, decorated) → `_load_item(...)` **inside the lock** → `streams.audio.get_stream_details()` (~L1693) → `music_prov.get_stream_details()` (the slow YTM yt-dlp extraction) + `AudioBuffer.get_buffer(wait_ready=True)` (~L1710). Player hand-off (`players.play_media`) happens only after.
+- `controllers/players/controller.py` `get_player_lock()` (~L173–232): 5 s soft + 25 s hard; at 30 s logs "previous holder appears stuck; proceeding without lock". Re-entrant **per asyncio task** → same play task fine; a *different* command task blocks. Other commands (`stop` ~L677, etc.) are also `@handle_play_action`-decorated → contend.
+- The 30 s timeout/message came from **PR #4024** (merged 2026-05-29); **no follow-up** refines the lock scope.
+- **Fix spot:** move `_load_item` resolution **before** the lock in `play_index`/`_handle_play_media` (lock only the hand-off, add a post-resolution cancellation check); or make `get_player_lock` fast-reject/cancel an in-progress holder.
+
+**Existing-issue scan — NO exact match (novel, fileable):**
+- Discussion **#5333** "youtube music slow when selecting music" — confirms slow YTM start (~10 s), maintainer blames hardware; does NOT mention the lock/timeouts. https://github.com/orgs/music-assistant/discussions/5333
+- **#5056** (yt-dlp BotGuard/GVS token), **#4000** (needs newer yt-dlp) — explain *why* resolution is slow. **#4896 / #3023** — adjacent slow/failed YTM start, no lock analysis.
+- **PR #4024** — introduced the lock timeout + "previous holder appears stuck". https://github.com/music-assistant/server/pull/4024
+- Nobody has connected slow-resolution + the lock contention, or reported the overlapping-command 30 s timeout.
+
+**Workaround feasibility (from code):**
+- **(A) Pre-resolve / warm-cache → NOT FEASIBLE.** No command resolves a stream without playing; `search`/`get_item`/library-add do NOT warm `get_stream_details`. The streamdetails cache is per-QueueItem, populated only by a prior play/load, and YTM signed URLs expire quickly. Only helps an *immediate* re-play of the same item.
+- **(C) pause vs stop → VIABLE.** `player_queues.stop()` is `@handle_play_action`-decorated (takes the lock → 30 s wait mid-resolution). `player_queues.pause()` is **NOT** decorated and calls the internal unlocked pause → returns immediately. **`media_pause` is the lowest-friction interrupt that avoids the 30 s lock wait.** Caveat: a paused queue auto-converts to (locked) `stop()` after ~30 s.
+- **(E) Local patch → feasible, deferred.** Smallest/low-risk: shorten the 30 s hard timeout in `get_player_lock` (the "proceed without lock" fallback already runs unsynchronized). Most-correct/medium-risk: move `_load_item` outside the lock in `play_index` (needs a cancellation check). Maintenance burden across add-on updates → prefer upstream.
+- **(B) HA-script-level serialization** (not MA code): a helper that rejects/queues overlapping commands while a YTM play is starting ("starting music, please wait") — would avoid the contention at our layer and is the realistic path to safe ChatGPT exposure. To be designed if/when we pursue assistant YTM.
