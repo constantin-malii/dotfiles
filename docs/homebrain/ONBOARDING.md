@@ -109,13 +109,17 @@ Chronological summary of major investigations. Status: ✅ resolved · 🟡 part
 
 ## 9. Current Hypotheses (ranked)
 
-For the **open** stop-wedge / playback-lock problem.
+For the **open** stop-wedge / playback-lock problem. **Updated by upstream research (2026-06-24) — see [`research-playback-lock.md`](./research-playback-lock.md) for the source-traced root-cause tree.**
 
-### H1 — Squeezelite HTTP/1.0 stream-termination handling (HIGHEST confidence)
-- **Confidence:** High.
-- **Supporting:** Direct log evidence — Squeezelite (aioslimproto) connects HTTP/1.0; `chunked` → `RuntimeError: Using chunked encoding is forbidden for HTTP/1.0` → 500. With content-length/no-length, the protocol player never transitions out of `playing` on stop (no clean end-of-stream signal). Only `chunked` (explicit terminating chunk) produced a clean stop.
-- **Contradicting:** None found locally. (Open: is HTTP/1.0 a hard limit of this Squeezelite build, or configurable?)
-- **Next validation:** Determine the host Squeezelite version + whether it can speak HTTP/1.1 (build/flags). If HTTP/1.1 is possible, `chunked` becomes usable → likely fixes the wedge. (Upstream research, then a host-side Squeezelite check.)
+### H1 — MA-side stop path for PROTOCOL players (`power(False)` no-op) (HIGHEST confidence) — NEW LEADER
+- **Confidence:** High (source-traced; not yet confirmed by a live debug trace).
+- **Supporting:** MA's `providers/squeezelite/player.py` issues **`client.power(False)`** (not `client.stop()`) to stop a PROTOCOL child. aioslimproto `power()` early-returns when `powered` is unchanged; protocol-player power forwarding was removed (PR #3659). With power managed at the Universal/group level, the child's `powered` can already be False → `power(False)` is a no-op → `strm "q"` never sent → `SlimClient.state` never reaches STOPPED → MA's `STATE_MAP` keeps reporting `playing` → the Universal stop coroutine never returns → the PLAYBACK lock (PR #4024) is never released → "previous holder appears stuck".
+- **Contradicting:** None yet; needs the §11 debug trace to confirm `strm "q"` is absent at stop.
+- **Next validation:** the debug-log trace in §11 step 1.
+- **⚠️ Correction:** the earlier idea here ("Squeezelite speaks HTTP/1.0 → run it with HTTP/1.1 so `chunked` works") is a **DEAD END** — the HTTP version is dictated by aioslimproto's hardcoded server-side request line, **not** the Squeezelite client; no Squeezelite build/flag changes it (see §10).
+
+### H1b — aioslimproto has no connection-close→STOPPED transition (only STMu→STOPPED) (High mechanism / Medium as sole cause)
+- **Supporting:** aioslimproto maps only STMu→STOPPED; Squeezelite detects EOF only via `recv()==0`; the `chunked`-only clean-stop result corroborates that EOF/STMu signaling governs reaching STOPPED. Must combine with H1 to wedge.
 
 ### H2 — Universal Player lock-release bug (Medium-High)
 - **Confidence:** Medium-High.
@@ -150,16 +154,19 @@ For the **open** stop-wedge / playback-lock problem.
 | **Direct protocol-player playback path** | The Squeezelite protocol player has **no queue** (`player_queues/get` empty) and is not an HA entity; MA routes all playback through the Universal player. You **cannot** bypass it. |
 | **Cookie / auth as the *playback* blocker** | Auth works after incognito-cookie refresh; search + resolution succeed. The stop-wedge happens with **radio** too (no YTM auth involved). |
 | **YTM-specific trigger** | The wedge reproduces on **radio** stop as well — it's a stop-of-any-live-stream problem, not YTM. |
+| **"Run Squeezelite with HTTP/1.1 to make `chunked` usable"** | DEAD END (upstream research). The stream's HTTP version is dictated by **aioslimproto's hardcoded server-side request line** (`GET … HTTP/1.0`), not by the Squeezelite client — no Squeezelite build/flag changes it. So `chunked` cannot be made usable that way. |
+| **"Upgrade MA to get a fix"** | No fix exists: MA 2.9.3 is current; the 2.10.0 beta/nightly changelogs (through 2026-06-24) contain **no** squeezelite/slimproto/lock/stop/state entries. The relevant code is identical across 2.9.3 and main. |
+| **Re-testing `chunked` for streaming** | It returns HTTP 500 on HTTP/1.0 (aiohttp forbids chunked) → breaks playback. Only revisit if the stop path is reworked upstream. |
 
 ---
 
 ## 11. Recommended Next Investigations (ranked by expected value)
 
-1. **Upstream GitHub issue/PR research** *(cheapest, highest value)* — MA + Squeezelite repos for "previous holder appears stuck", playback lock, Universal Player stop, HTTP/1.0, `no_content_length`/`chunked`, protocol player remaining in `playing`. Find existing fixes/workarounds before any local change. (See §13 Research Brief; partial results to be appended as research is done.)
-2. **Squeezelite version & HTTP capability analysis** — on the host: `squeezelite -?`/`--version`, package version, whether it negotiates HTTP/1.1. If HTTP/1.1 is achievable, `chunked` likely fixes the wedge. *(Read-only host check; the most promising concrete fix path.)*
-3. **Newer MA release-notes review** — changes since 2.9.3 touching SlimProto/Squeezelite stop handling, stream termination, or the lock. If a fix exists, an MA update may resolve it (but updating is gated by the add-on repo channel — check feasibility).
-4. **Universal Player lock internals** — read MA's player/queue controller stop path to understand why the lock isn't released on stop and why `players/cmd/stop` doesn't clear a wedged protocol player.
-5. **Alternate player backend evaluation** — would a different transport (e.g., a player that speaks HTTP/1.1, or DLNA/Cast on a LAN-reachable device) avoid the HTTP/1.0 limitation? Note the **macvtap/NAT constraint**: only the host can fetch the NAT-IP stream, so a LAN fetch-player would hit the publish-IP conflict.
+0. ✅ **DONE — upstream GitHub/Squeezelite research** (2026-06-24) → [`research-playback-lock.md`](./research-playback-lock.md). Outcome: no upstream issue matches our exact repro; root cause traced in MA source to the PROTOCOL-player stop path (`power(False)`); the "HTTP/1.1 Squeezelite" and "upgrade MA" ideas are dead ends (§10).
+1. **Live debug trace (highest value now)** — enable debug logging for `aioslimproto` and `music_assistant.providers.squeezelite`, do one clean **play → `media_stop`**, and capture: (1) whether aioslimproto **sends `strm "q"`** at stop — *absent ⇒ H1 confirmed*; (2) the **STAT** messages after stop — *absence of STMu / a late STMo ⇒ H1b*. This single trace pinpoints the broken path. *(Read-only; enabling debug logging is a logger change, confirm with user.)*
+2. **File a precise upstream issue** against `music-assistant/server` (+ `aioslimproto`) with the §1 trace — there is no shipped fix; if H1, the upstream patch is likely a one-liner (call `client.stop()` for PROTOCOL stop, or drop the `powered`-unchanged early-return when a stop is needed).
+3. **Universal Player lock internals** — read MA's `controllers/players/controller.py` stop path + `providers/squeezelite/player.py` to confirm the lock is only released in `finally` when the child converges, and why `players/cmd/stop` doesn't clear a wedged child.
+4. **Alternate player backend (lower priority)** — a different transport could sidestep the SlimProto stop quirk, but note the **macvtap/NAT constraint**: only the host can fetch the NAT-IP stream, so a LAN fetch-player (Cast/DLNA) hits the publish-IP conflict.
 
 ### Do Not Repeat Unless New Evidence Appears
 - Re-running local DNS / CPU / PO-token / search / basic-connectivity diagnostics (all ruled out — §10).
@@ -218,7 +225,9 @@ Reliable playback of **track, artist, album, playlist, genre** from YouTube Musi
 `"previous holder appears stuck"` · playback lock · Universal Player · Squeezelite · SlimProto · HTTP/1.0 · `no_content_length` · `chunked` · `forced_content_length` · stream termination · stop behavior · "protocol player" remaining in `playing`. Sources: Music Assistant GitHub (issues/discussions/releases), Squeezelite GitHub, SlimProto docs.
 
 ### Deliverables expected
-1. Root-cause tree. 2. Ranked hypotheses (reconcile with §9). 3. Relevant upstream issues/PRs (links). 4. Existing fixes/workarounds. 5. Recommended next experiment. *(Findings get appended below / committed separately.)*
+1. Root-cause tree. 2. Ranked hypotheses (reconcile with §9). 3. Relevant upstream issues/PRs (links). 4. Existing fixes/workarounds. 5. Recommended next experiment.
+
+> ✅ **First research pass complete (2026-06-24): [`research-playback-lock.md`](./research-playback-lock.md).** Root cause traced to MA's PROTOCOL-player stop (`power(False)` no-op) → SlimClient never reaches STOPPED → lock never released. No upstream fix; HTTP/1.1-Squeezelite and MA-upgrade are dead ends. Next: the live debug trace (§11 step 1) to confirm, then file upstream.
 
 ---
 
