@@ -113,3 +113,17 @@ Behaviorally related (not exact matches):
 - The stop-wedge is an **MA-side defect** (PROTOCOL stop via `power(False)`), not a Squeezelite/HTTP version problem and not fixable by config or by upgrading MA today.
 - Practical impact remains bounded: audio stops; only the **next** play after a stop is delayed ~30–60 s by the stale lock; first play from a clean state is fine.
 - Path to a real fix: capture the §5 debug trace → open an upstream MA (`music-assistant/server` + `aioslimproto`) issue with it → likely a small MA patch. Until then, keep YTM **unexposed to the LLM** and the assistant on radio.
+
+## 7. Interrupted-state experiment — REAL reproducible defect = lock held during resolution (2026-06-24)
+
+Ran 6 interrupted-state conditions (squeezelite VERBOSE), each from clean idle: (1) YTM play→stop during resolution; (2) 2nd YTM play before 1st starts; (3) YTM→radio before YTM starts; (4) radio playing→YTM→stop during setup; (5) YTM→announcement during setup; (6) YTM→clear queue during setup.
+
+**Results:**
+- **Persistent Universal/protocol state mismatch: NOT reproduced** in any condition — states always converged and ended idle. So "protocol stuck `playing` while Universal `idle`" is **not** permanent corruption from these transitions.
+- **Retained lock ("previous holder appears stuck"): reproduced in ALL 6** (lock timeouts: c1=1, c2=1, c3=2, **c4=11**, c5=4, c6=1).
+
+**Root cause (reproducible):** the **slow YTM stream-resolution holds the player playback lock for its full ~14–150 s duration.** Any command issued during that window collides with the held lock → 30 s timeout → "previous holder appears stuck" → "proceeds without lock." The lock is **held-during-resolution, not dead** — it releases when resolution completes/aborts, and state converges (finals were idle). This **supersedes** the §2 H1 `power(False)` theory (refuted by §empirical, and not needed — the lock contention fully explains "previous holder appears stuck" + the cold-start latency).
+
+**Revised root-cause statement for an upstream issue:** *MA holds the player's playback lock for the entire duration of (slow) stream resolution, so any concurrent/overlapping command (stop, new play, announcement, clear) blocks for the 30 s lock timeout and logs "previous holder appears stuck."* **Suggested fix:** resolve the stream OUTSIDE the playback lock; acquire the lock only to start/stop the player. This also removes the cold-start latency penalty for overlapping commands.
+
+**Note:** the earlier-observed "permanent" wedge was almost certainly this **transient ≤30–60 s lock-contention window** caught mid-flight during chaotic multi-op sessions — a clean spaced stop is fine (6/6).
