@@ -37,6 +37,23 @@ class HaConnTest(unittest.TestCase):
         h.announce("anything", FakeSettings(tts_service=""))
         self.assertEqual(h.sent, [])
 
+    def test_announce_noops_when_service_part_missing(self):
+        h = self._ha()
+        h.announce("x", FakeSettings(tts_service="tts"))    # no dot -> no service
+        h.announce("y", FakeSettings(tts_service="tts."))   # trailing dot -> empty service
+        self.assertEqual(h.sent, [])
+
+    def test_announce_survives_none_ceiling_entity(self):
+        h = self._ha()
+        s = FakeSettings(tts_service="tts.speak",
+                         tts_data={"media_player_entity_id": "{entity}", "message": "{msg}"},
+                         ceiling_entity=None)
+        h.announce("hello", s)   # must not raise
+        self.assertEqual(len(h.sent), 1)
+        _, _, data = h.sent[0]
+        self.assertEqual(data["media_player_entity_id"], "")   # None entity renders to empty string
+        self.assertEqual(data["message"], "hello")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

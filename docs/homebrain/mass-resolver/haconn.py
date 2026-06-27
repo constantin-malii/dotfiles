@@ -33,18 +33,20 @@ class HA(object):
                                 "domain": domain, "service": service, "service_data": data})
 
     def announce(self, message, settings):
-        svc = (settings.tts_service or "").strip()
-        if not svc or "." not in svc:
-            LOG.info("ANNOUNCE (no tts_service configured): %s", message)
-            return
-        domain, service = svc.split(".", 1)
-        data = {}
-        for k, v in (settings.tts_data or {}).items():
-            if isinstance(v, str):
-                data[k] = v.replace("{msg}", message).replace("{entity}", settings.ceiling_entity)
-            else:
-                data[k] = v
         try:
+            svc = (getattr(settings, "tts_service", "") or "").strip()
+            parts = svc.split(".", 1)
+            if len(parts) != 2 or not parts[0] or not parts[1]:
+                LOG.info("ANNOUNCE (no tts_service configured): %s", message)
+                return
+            domain, service = parts
+            entity = getattr(settings, "ceiling_entity", "") or ""
+            data = {}
+            for k, v in (getattr(settings, "tts_data", {}) or {}).items():
+                if isinstance(v, str):
+                    data[k] = v.replace("{msg}", message).replace("{entity}", entity)
+                else:
+                    data[k] = v
             self.call_service(domain, service, data)
             LOG.info("ANNOUNCE via %s: %s", svc, message)
         except Exception as e:
