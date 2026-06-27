@@ -153,3 +153,64 @@ Two deliberate, reversible notes:
   music provider preference list.
 - Remove redundant empty host provider `filesystem_smb--yYrXcamj`.
 - Metadata cleanup; Plex Music library browsing.
+- **Hardware volume buttons → ceiling speakers (Home Mode)** — see §11. Deferred until the
+  resolver, ChatGPT integration, and the local-music workflow are complete/stable.
+
+## 11. Deferred feature — Hardware volume buttons → ceiling speakers (Home Mode)
+
+> **Status: backlog only. Do not implement** until (1) the resolver architecture is complete,
+> (2) ChatGPT integration is complete, and (3) the local-music workflow is stable.
+
+### Background
+The HA Media Player widget works well, but Android hardware volume buttons currently only
+adjust the phone's media volume. The desired future behavior: while at home, the phone's
+hardware Volume Up/Down buttons control the **ceiling speakers** instead of (or in preference
+to) the phone.
+
+### Goal
+When connected to the home environment (preferably home Wi-Fi), pressing the Galaxy S26 Ultra
+hardware Volume Up/Down should increase/decrease the ceiling speaker volume.
+
+### Preferred architecture
+- Investigate **Tasker** as the primary implementation on the phone.
+- Keep playback/transport logic inside the **resolver**; the resolver stays the single
+  orchestration point (control plane).
+- Tasker should call a **small resolver HTTP API** (e.g. `POST /volume/up`, `/volume/down`)
+  rather than calling Home Assistant services directly. **Prerequisite:** the resolver has no
+  HTTP ingress today (it is HA-WebSocket-event driven, with MCP as a future option). This
+  feature therefore depends on adding a tiny LAN-bound HTTP endpoint to the resolver that maps
+  to the same capability layer (a third adapter alongside the HA-event adapter and future MCP).
+  Bind to the LAN interface only; consider a shared-secret/token; keep it additive.
+- Map the endpoints to the existing relative-volume logic (the validated ±% step), so phone
+  buttons and voice/widget all converge on one volume implementation.
+
+### Future capabilities to investigate
+- Home Wi-Fi (SSID) detection; auto enable/disable on home/away.
+- Short press = volume up/down. Long press (optional) = next/previous. Double press (optional)
+  = play/pause. Haptic feedback if appropriate.
+- Guaranteed normal phone-volume behavior when away from home.
+
+### Acceptance criteria
+- **Zero impact outside the home.**
+- Does **not** interfere with phone calls or Bluetooth headphone volume.
+- Resolver remains the system's control plane.
+- Modular enough to support future devices (other Android phones/tablets).
+
+### Android / Tasker limitations & risks (investigate before committing)
+- **Intercepting/suppressing hardware volume keys is the hard part.** Modern Android (12–15)
+  does not give background apps a clean, global way to capture volume keys and *suppress* the
+  phone's own volume change. Tasker's volume-key events generally need an active media session,
+  the screen on, or its Accessibility service; reliably overriding the system volume panel from
+  the background is not guaranteed. A likely-viable pattern is a dummy/foreground media session
+  that owns the volume keys while home, with Tasker mapping its volume deltas to resolver calls
+  — needs prototyping.
+- **Samsung One UI specifics:** the One UI volume panel, Good Lock/Routines, and Bixby Routines
+  may conflict or offer an alternative trigger path; Adaptive Battery / Doze can kill Tasker in
+  the background (whitelist required).
+- **Permissions:** Tasker likely needs Accessibility service, notification access, "modify
+  system settings," and on Android 8.1+ **location permission** to read the Wi-Fi SSID
+  (precise/"always" location on newer versions). May need the AutoInput plugin.
+- **Conflict states to detect and defer to the OS:** in-call (volume = call volume) and BT
+  headphones connected (volume = AVRCP device volume). The feature must bow out cleanly in both.
+- **Reliability:** background profile survival under Doze/One UI battery management; debounce of
+  rapid presses; latency of the LAN round-trip to the resolver vs. the perceived button feel.
