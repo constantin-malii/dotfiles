@@ -53,6 +53,8 @@ def serve(here):
     ctx = build_ctx(here)
     if not ctx.ha.token:
         LOG.error("no HA token (~/mass-resolver/.ha_token)"); sys.exit(2)
+    if not config.read_secret(here, ".ma_token"):
+        LOG.error("WARNING: no MA token (~/mass-resolver/.ma_token); play events will fail until it is present")
     s = ctx.settings
     backoff = 2
     while True:
@@ -76,6 +78,8 @@ def serve(here):
                 intent, params = call
                 LOG.info("SERVICE: event=%s -> intent=%s params=%r", ev.get("event_type"), intent, params)
                 try:
+                    # NOTE: on failure, dispatch may announce over this same HA socket; its
+                    # call_service response is a non-event frame and is skipped by the guard above.
                     core.dispatch(ctx, intent, params)
                 except Exception as e:
                     LOG.error("SERVICE: dispatch error: %r", e)
