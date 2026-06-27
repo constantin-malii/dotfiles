@@ -1,1 +1,13 @@
-{"ma_host":"192.168.122.10","ma_port":8095,"provider_preference":["filesystem_smb"],"ceiling_entity":"media_player.ceiling_speakers","ceiling_player_id":"upf8b156c25101","ha_url":"http://192.168.122.10:8123"}
+{
+  "ma_host": "192.168.122.10",
+  "ma_port": 8095,
+  "provider_preference": ["filesystem_smb"],
+  "ceiling_entity": "media_player.ceiling_speakers",
+  "ceiling_player_id": "upf8b156c25101",
+  "ha_url": "http://192.168.122.10:8123",
+  "event_type": "mass_play_request",
+  "sync_event_type": "mass_sync_request",
+  "announce_failures": true,
+  "tts_service": "",
+  "tts_data": {}
+}

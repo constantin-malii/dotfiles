@@ -1,0 +1,12 @@
+{
+  "favorites": {},
+  "aliases": {},
+  "defaults": {},
+  "country_codes": {
+    "romania": "ro", "russia": "ru", "russian": "ru",
+    "united states": "us", "usa": "us", "america": "us",
+    "uk": "gb", "united kingdom": "gb", "england": "gb",
+    "france": "fr", "germany": "de", "deutschland": "de",
+    "italy": "it", "spain": "es", "ukraine": "ua", "moldova": "md"
+  }
+}
