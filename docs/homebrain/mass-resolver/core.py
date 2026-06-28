@@ -61,6 +61,9 @@ def dispatch(ctx, intent, params, rid=None):
         LOG.error("req=%s intent=%s error: %r", rid, intent, e)
         result = {"ok": False, "intent": intent, "request_id": rid, "reason": "error",
                   "spoken": "Sorry, something went wrong."}
-    if (not result.get("ok")) and result.get("spoken") and ctx.settings.announce_failures:
-        ctx.ha.announce(result["spoken"], ctx.settings)
+    spk = result.get("spoken")
+    if spk and result.get("speak_success"):
+        ctx.ha.announce(spk, ctx.settings)
+    elif spk and (not result.get("ok")) and ctx.settings.announce_failures:
+        ctx.ha.announce(spk, ctx.settings)
     return result

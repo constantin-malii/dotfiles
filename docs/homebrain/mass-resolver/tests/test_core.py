@@ -70,7 +70,7 @@ class CoreTest(unittest.TestCase):
         r = core.dispatch(ctx, "radio", {"country": "Romania"})
         self.assertFalse(r["ok"])
         self.assertEqual(len(ha.announced), 1)
-        self.assertIn("yet", ha.announced[0].lower())
+        self.assertIn("couldn't find", ha.announced[0].lower())
 
     def test_sync_runs_and_never_announces(self):
         ma = FakeMA()
@@ -91,6 +91,32 @@ class CoreTest(unittest.TestCase):
         ctx, ha = self._ctx(ma)
         ctx.settings.announce_failures = False
         core.dispatch(ctx, "music", {"query": "Nope"})
+        self.assertEqual(ha.announced, [])
+
+    def test_radio_find_speaks_on_success(self):
+        # stub the radio intent to a find-style success with speak_success
+        import core as coremod
+        ctx, ha = self._ctx(FakeMA())
+        orig = coremod.INTENTS.get("radio")
+        coremod.INTENTS["radio"] = lambda c, p, rid: {"ok": True, "intent": "radio", "request_id": rid,
+                                                      "spoken": "I found A, B and C.", "speak_success": True}
+        try:
+            r = coremod.dispatch(ctx, "radio", {"mode": "find", "genre": "jazz"})
+        finally:
+            coremod.INTENTS["radio"] = orig
+        self.assertTrue(r["ok"])
+        self.assertEqual(ha.announced, ["I found A, B and C."])
+
+    def test_radio_play_success_does_not_speak(self):
+        import core as coremod
+        ctx, ha = self._ctx(FakeMA())
+        orig = coremod.INTENTS.get("radio")
+        coremod.INTENTS["radio"] = lambda c, p, rid: {"ok": True, "intent": "radio", "request_id": rid,
+                                                      "spoken": None, "played": True}
+        try:
+            coremod.dispatch(ctx, "radio", {"mode": "play", "station": "x"})
+        finally:
+            coremod.INTENTS["radio"] = orig
         self.assertEqual(ha.announced, [])
 
 
