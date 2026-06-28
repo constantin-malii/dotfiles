@@ -137,6 +137,17 @@ no attempt. **Fix:** prompt **v4** adds explicit `PLAYING RADIO` (named station 
 don't search/pre-judge) and `FINDING STATIONS` (speaker reads results; don't assert found/not-found)
 blocks. Re-validation of Hit FM / find jazz / unknown-station pending after v4 is pasted.
 
+**2026-06-28 — prompt v4 + legacy `ceiling_play_radio` un-exposed from ChatGPT.** With v4 alone, `find`
+text became honest ("I'm finding some jazz stations") and unknown stations now call the tool (Piper
+"couldn't find a station for X"); but "play Hit FM" had been grabbing the **legacy** `ceiling_play_radio`.
+After un-exposing it (only `play_radio`/`find_stations` remain for ChatGPT; the script stays for the
+local sentence-trigger layer), **"play Hit FM" routes to `play_radio` and plays the favorite** —
+named-station routing fixed. Residual: **gpt-4o-mini nondeterminism** — it occasionally declines a
+genre-play or says "couldn't find" for a station it actually played. Decision (user): **keep 4o-mini**;
+this residual maps to two tracked backlog items — synchronous play-result (fixes the text;
+model-agnostic) and a gpt-4o evaluation **gated** behind that work and only if tool-selection failures
+persist. Inc 1 closed on these terms.
+
 ## Maintenance
 
 When each increment lands: (1) update this doc, (2) update the affected script **descriptions**, and

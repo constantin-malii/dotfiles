@@ -112,7 +112,13 @@ says "playing" while nothing actually matched.
   (`filesystem_smb`, ~0.2–0.4 s), `music/sync`, and spoken no-match all confirmed via
   one-shot CLI and end-to-end HA events. Original preserved as `resolver.py.orig` (+ git
   baseline `2e2bec7`). Plan: `plans/2026-06-27-inc0-resolver-foundation.md`.
-- **Inc 1 — Radio.** country/genre play + `find`/list stations.
+- **Inc 1 — Radio. ✅ DONE (2026-06-28).** Resolver-controlled radio: play by
+  name/country/genre/language + `find`/list (favorites-first → RadioBrowser), config-driven via
+  `radio.json`, dry-run mode, honest feedback, name-dedupe. 90 unit tests; deployed + dry-run + audible
+  validated; exposed to ChatGPT (`play_radio`/`find_stations`; legacy `ceiling_play_radio` un-exposed
+  from ChatGPT but kept for the local sentence-trigger layer). Plan:
+  `plans/2026-06-27-inc1-radio.md`. Residual (deferred, see §10): gpt-4o-mini sometimes declines a
+  genre-play or mis-states results — addressed by synchronous play-result + a gated model eval.
 - **Inc 2 — News.** `news.json` sources; stations + headlines/TTS.
 - **Inc 3 — Acquisition.** `acquire` via Lidarr, guarded.
 - **Inc 4 — Status + household.** now-playing/status + sleep timer + shuffle favorites.
@@ -162,6 +168,10 @@ Two deliberate, reversible notes:
   speaker (Piper) honestly announces "couldn't find X". The speaker is authoritative. A future
   increment can make the play path return a found/not-found result so ChatGPT's text is also exact.
   Do not block other increments on this.
+- **Assistant model evaluation (gated, 2026-06-28):** gpt-4o-mini occasionally fails tool-selection
+  (declines a genre-play; mis-states results). Keep gpt-4o-mini for now. Evaluate gpt-4o (or
+  gpt-4.1-mini) **only after** the synchronous play-result work above is complete **and only if**
+  tool-selection failures still persist. Model is a one-field change; do not change it preemptively.
 - **Hardware volume buttons → ceiling speakers (Home Mode)** — see §11. Deferred until the
   resolver, ChatGPT integration, and the local-music workflow are complete/stable.
 
