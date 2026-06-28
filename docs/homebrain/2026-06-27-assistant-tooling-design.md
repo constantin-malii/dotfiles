@@ -104,10 +104,14 @@ says "playing" while nothing actually matched.
 
 ## 7. Build order (each = its own spec → plan → build, validated, docs updated)
 
-- **Inc 0 — Foundation.** Refactor resolver into modules + clean capability functions
-  (the MCP-ready boundary) + config files + the tool set + failure-feedback path. Current
-  `resolver.py` stays runnable until the modular version is validated. *(Mostly
-  restructuring existing code + scaffolding.)*
+- **Inc 0 — Foundation. ✅ DONE (2026-06-27).** Refactored the monolith into modules
+  (`wsutil`/`match`/`config`/`maconn`/`haconn`/`music`/`core` + `radio`/`news`/`acquire`/
+  `status` stubs) with the MCP-ready capability boundary, config scaffolds
+  (`radio.json`/`news.json`), and the honest failure-feedback path (wired to local
+  `tts.piper`). 49 unit tests; validated live on the host (Python 3.5.2) — music play
+  (`filesystem_smb`, ~0.2–0.4 s), `music/sync`, and spoken no-match all confirmed via
+  one-shot CLI and end-to-end HA events. Original preserved as `resolver.py.orig` (+ git
+  baseline `2e2bec7`). Plan: `plans/2026-06-27-inc0-resolver-foundation.md`.
 - **Inc 1 — Radio.** country/genre play + `find`/list stations.
 - **Inc 2 — News.** `news.json` sources; stations + headlines/TTS.
 - **Inc 3 — Acquisition.** `acquire` via Lidarr, guarded.
