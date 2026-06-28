@@ -49,6 +49,35 @@ def country_code(radio_cfg, name):
     return codes.get((name or "").strip().lower())
 
 
+def resolve_country(radio_cfg, word):
+    return (radio_cfg or {}).get("country_codes", {}).get((word or "").strip().lower())
+
+
+def resolve_language(radio_cfg, word):
+    return (radio_cfg or {}).get("languages", {}).get((word or "").strip().lower())
+
+
+def resolve_genre(radio_cfg, word):
+    w = (word or "").strip().lower()
+    syn = (radio_cfg or {}).get("genre_synonyms", {})
+    if w in syn:
+        return (w, syn[w])
+    for key, words in syn.items():
+        if w in [str(x).lower() for x in words]:
+            return (key, words)
+    return (w, [w])
+
+
+def radio_defaults(radio_cfg):
+    d = {"find_internal": 5, "find_speak": 3, "fallback_browse_limit": 10}
+    d.update((radio_cfg or {}).get("defaults", {}))
+    return d
+
+
+def favorites(radio_cfg):
+    return (radio_cfg or {}).get("favorites", [])
+
+
 def setup_logging(here):
     log = logging.getLogger("resolver")
     if log.handlers:
