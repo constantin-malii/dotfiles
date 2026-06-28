@@ -35,6 +35,8 @@ class Settings(object):
         self.radio_event_type = cfg.get("radio_event_type", "mass_radio_request")
         self.dry_run = bool(cfg.get("dry_run", False))
         self.announce_failures = bool(cfg.get("announce_failures", True))
+        self.http_host = cfg.get("http_host", "0.0.0.0")
+        self.http_port = int(cfg.get("http_port", 8770))
         # TTS announce service: domain.service + a template of data fields.
         # tts_data placeholders {msg}/{entity} are filled by haconn.announce().
         self.tts_service = cfg.get("tts_service", "")          # e.g. "tts.speak"

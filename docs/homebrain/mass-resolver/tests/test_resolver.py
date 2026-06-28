@@ -2,13 +2,24 @@
 """Unit tests for the HA-event -> dispatch mapping. Run: python tests/test_resolver.py"""
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import resolver
+import resolver, core, speaker
 
 
 class FakeSettings(object):
     event_type = "mass_play_request"
     sync_event_type = "mass_sync_request"
     radio_event_type = "mass_radio_request"
+    ma_host = "127.0.0.1"
+    ma_port = 8095
+    ha_host = "127.0.0.1"
+    ha_port = 8123
+    queue_id = "testqueue"
+    announce_failures = True
+    provider_preference = ["filesystem_smb"]
+    type_order = ["artist", "album", "track", "playlist"]
+    dry_run = False
+    http_host = "0.0.0.0"
+    http_port = 8770
 
 
 class EventMapTest(unittest.TestCase):
@@ -54,6 +65,38 @@ class EventMapTest(unittest.TestCase):
         _, params = resolver.event_to_call(FakeSettings(), ev)
         self.assertEqual(params["mode"], "find")
         self.assertTrue(params["dry_run"])
+
+
+class MakeCtxTest(unittest.TestCase):
+    def test_make_ctx_wires_speaker(self):
+        ctx = resolver.make_ctx(FakeSettings(), "matok", "hatok", {}, {})
+        self.assertIsNotNone(ctx.speaker)
+        self.assertIsInstance(ctx.speaker, speaker.Speaker)
+        self.assertTrue(callable(ctx.ma_factory))
+
+    def test_make_ctx_dispatch_unknown_is_safe(self):
+        ctx = resolver.make_ctx(FakeSettings(), "matok", "hatok", {}, {})
+        result = core.dispatch(ctx, "teleport", {})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "invalid_input")
+
+
+class HttpConfigDefaultsTest(unittest.TestCase):
+    def test_http_defaults_in_fake_settings(self):
+        s = FakeSettings()
+        self.assertEqual(s.http_port, 8770)
+        self.assertEqual(s.http_host, "0.0.0.0")
+
+    def test_load_settings_http_defaults(self):
+        import tempfile, shutil
+        d = tempfile.mkdtemp(prefix="cfg_")
+        try:
+            import config
+            s = config.load_settings(d)
+            self.assertEqual(s.http_port, 8770)
+            self.assertEqual(s.http_host, "0.0.0.0")
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":

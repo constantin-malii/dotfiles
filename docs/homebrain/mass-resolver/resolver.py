@@ -11,29 +11,39 @@
 #   python3 resolver.py --dry-run --query "Du Hast" --media-type track
 #   python3 resolver.py --query "Rammstein" --media-type artist
 #   python3 resolver.py --serve
-import os, sys, json, argparse, logging, uuid, time
+import os, sys, json, argparse, logging, uuid, time, threading
 import config
 from maconn import MA
 from haconn import HA
 import core
+import speaker
+import http_server
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LOG = logging.getLogger("resolver")
 
 
-def build_ctx(here):
-    settings = config.load_settings(here)
-    ma_token = config.read_secret(here, ".ma_token")
-    radio_cfg = config.load_json(here, "radio.json", {})
-    news_cfg = config.load_json(here, "news.json", {})
-    ha = HA(settings.ha_host, settings.ha_port, config.read_secret(here, ".ha_token"))
-
+def make_ctx(settings, ma_token, ha_token, radio_cfg, news_cfg):
+    """Testable seam: wire all dependencies into a Ctx given resolved values."""
     def ma_factory():
         return MA(settings.ma_host, settings.ma_port, ma_token)
 
-    ctx = core.Ctx(ma_factory=ma_factory, ha=ha, settings=settings,
-                   radio_cfg=radio_cfg, news_cfg=news_cfg)
-    return ctx
+    def ha_factory():
+        return HA(settings.ha_host, settings.ha_port, ha_token)
+
+    ha = ha_factory()  # event-read connection (used only by serve's read loop)
+    sp = speaker.Speaker(settings, ha_factory)  # SINGLE TTS owner (its own HA connection)
+    return core.Ctx(ma_factory=ma_factory, ha=ha, settings=settings,
+                    radio_cfg=radio_cfg, news_cfg=news_cfg, speaker=sp)
+
+
+def build_ctx(here):
+    settings = config.load_settings(here)
+    ma_token = config.read_secret(here, ".ma_token")
+    ha_token = config.read_secret(here, ".ha_token")
+    radio_cfg = config.load_json(here, "radio.json", {})
+    news_cfg = config.load_json(here, "news.json", {})
+    return make_ctx(settings, ma_token, ha_token, radio_cfg, news_cfg)
 
 
 def event_to_call(settings, event):
@@ -64,6 +74,22 @@ def serve(here):
     if not config.read_secret(here, ".ma_token"):
         LOG.error("WARNING: no MA token (~/mass-resolver/.ma_token); play events will fail until it is present")
     s = ctx.settings
+
+    # Start HTTP server in a daemon thread before the event loop.
+    http_secret = config.read_secret(here, ".http_secret")  # optional; None if absent
+
+    def dispatch_fn(intent, params):
+        return core.dispatch(ctx, intent, params)
+
+    try:
+        srv = http_server.serve_http(s.http_host, s.http_port, dispatch_fn, http_secret)
+        t = threading.Thread(target=srv.serve_forever)
+        t.daemon = True
+        t.start()
+        LOG.info("SERVICE: /command HTTP server on %s:%s", s.http_host, s.http_port)
+    except Exception as e:
+        LOG.error("SERVICE: HTTP server failed to start (%r); continuing event-only", e)
+
     backoff = 2
     while True:
         try:
