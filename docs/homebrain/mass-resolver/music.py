@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Music capability: resolve a query to a local (preferred-provider) item and play it. Python 3.5 safe.
 import logging
+import capability
+import command_result as cr
 from match import match_rank
 from maconn import WS_CMD
 
@@ -30,31 +32,79 @@ def _resolve_type(ma, query, media_type, settings, rid):
     return None
 
 
+class MusicCapability(capability.Capability):
+    name = "music"
+
+    def resolve(self, ctx, params):
+        ma = ctx.ma_factory()
+        if getattr(ma, "s", None) is None:
+            ma.connect()
+        try:
+            q = params.get("query")
+            mt = params.get("media_type") or ""
+            if mt in WS_CMD:
+                types = [mt] + [t for t in ctx.settings.type_order if t != mt]
+            else:
+                types = list(ctx.settings.type_order)
+            hit = None
+            for t in types:
+                hit = _resolve_type(ma, q, t, ctx.settings, params.get("_rid", ""))
+                if hit:
+                    break
+            dry_run = params.get("dry_run") or ctx.settings.dry_run
+            return {"ma": ma, "query": q, "hit": hit, "dry_run": dry_run}
+        except Exception:
+            ma.close()
+            raise
+
+    def validate(self, ctx, resolved):
+        if not resolved.get("hit"):
+            q = resolved.get("query") or "that"
+            resolved["ma"].close()
+            return {"code": "not_found", "reason": "no local match",
+                    "chat_text": q + " isn't in your local library yet.",
+                    "spoken_text": "Sorry, I couldn't find " + q + " in the local library.",
+                    "metadata": {"query": q}}
+        return None
+
+    def execute(self, ctx, resolved, rid):
+        ma = resolved["ma"]
+        hit = resolved["hit"]
+        try:
+            md = {"uri": hit["uri"], "provider": hit["provider"],
+                  "candidate": hit["candidate"], "media_type": hit["media_type"]}
+            if resolved["dry_run"]:
+                md["played"] = False
+                return cr.ok(self.name, rid, "Would play " + hit["candidate"] + ".",
+                             spoken_text=None, metadata=md)
+            pr = ma.play(ctx.settings.queue_id, hit["uri"])
+            if pr and "error_code" in pr:
+                md["played"] = False
+                return cr.err(self.name, rid, "play_failed", "play failed",
+                              "I found " + hit["candidate"] + ", but couldn't start it.",
+                              spoken_text="I found " + hit["candidate"] + ", but couldn't start playback.",
+                              metadata=md)
+            md["played"] = True
+            return cr.ok(self.name, rid, "Playing " + hit["candidate"] + ".",
+                         spoken_text=None, metadata=md)
+        finally:
+            ma.close()
+
+
 def resolve_music(ma, query, media_type, settings, rid):
-    if media_type in WS_CMD:
-        types = [media_type] + [t for t in settings.type_order if t != media_type]
-    else:
-        types = list(settings.type_order)
-    hit = None
-    for mt in types:
-        hit = _resolve_type(ma, query, mt, settings, rid)
-        if hit:
-            break
-    if not hit:
-        LOG.info("req=%s query=%r decision=REJECTED reason=no-local-match", rid, query)
-        return {"ok": False, "intent": "music", "request_id": rid, "reason": "no local match",
-                "spoken": "Sorry, I couldn't find " + (query or "that") + " in the local library."}
-    res = {"ok": True, "intent": "music", "request_id": rid, "spoken": None, "played": False}
-    res.update(hit)
-    if settings.dry_run:
-        LOG.info("[DRY-RUN] req=%s WOULD PLAY %s (provider=%s)", rid, hit["uri"], hit["provider"])
-        return res
-    pr = ma.play(settings.queue_id, hit["uri"])
-    if pr and "error_code" in pr:
-        LOG.error("req=%s PLAY FAILED code=%s details=%s", rid, pr.get("error_code"), pr.get("details"))
-        res["ok"] = False; res["reason"] = "play failed"
-        res["spoken"] = "I found " + hit["candidate"] + ", but couldn't start playback."
-        return res
-    LOG.info("req=%s PLAYING %s (provider=%s)", rid, hit["uri"], hit["provider"])
-    res["played"] = True
-    return res
+    """Legacy wrapper: runs MusicCapability and maps CommandResult back to the Inc 0/1 dict."""
+    class _Ctx(object):
+        def __init__(self, _ma, _settings):
+            self.settings = _settings
+            self._ma = _ma
+        def ma_factory(self):
+            return self._ma
+
+    res = capability.run(MusicCapability(), _Ctx(ma, settings),
+                         {"query": query, "media_type": media_type, "_rid": rid}, rid)
+    out = {"ok": res["ok"], "intent": "music", "request_id": rid,
+           "spoken": res.get("spoken_text")}
+    out.update(res.get("metadata") or {})
+    if not res["ok"]:
+        out["reason"] = (res.get("error") or {}).get("reason")
+    return out

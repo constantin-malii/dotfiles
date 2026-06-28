@@ -18,12 +18,29 @@ class FakeMA(object):
         self.play_reply = play_reply or {"result": {}}
         self.played = []
         self._data = {}
+        self.s = None  # connection guard: None = not connected
     def set(self, data):
         self._data = data; return self
+    def connect(self):
+        self.s = object()  # mark as connected
+    def close(self):
+        self.s = None
     def library(self, media_type):
         return self._data.get(media_type, [])
     def play(self, queue_id, uri, option="replace"):
         self.played.append((queue_id, uri, option)); return self.play_reply
+
+
+class FakeCtx(object):
+    def __init__(self, ma):
+        self._ma = ma
+        self.settings = FakeSettings()
+    def ma_factory(self):
+        return self._ma
+
+
+def _ctx(ma):
+    return FakeCtx(ma)
 
 
 def smb_item(name, item_id):
@@ -78,6 +95,28 @@ class MusicTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(r["reason"], "play failed")
         self.assertIn("couldn't start", r["spoken"].lower())
+
+
+    def test_capability_play_returns_commandresult(self):
+        ma = FakeMA().set({"artist": [smb_item("Rammstein", "42")]})
+        import capability, music
+        r = capability.run(music.MusicCapability(), _ctx(ma), {"query": "Rammstein", "media_type": "artist"}, "r1")
+        self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "music")
+        self.assertEqual(r["metadata"]["uri"], "filesystem_smb--kd66vco4://artist/42")
+        self.assertTrue(r["chat_text"]); self.assertEqual(r["error"], None)
+
+    def test_capability_not_found_is_error(self):
+        ma = FakeMA().set({"artist": [], "album": [], "track": [], "playlist": []})
+        import capability, music
+        r = capability.run(music.MusicCapability(), _ctx(ma), {"query": "Nope"}, "r2")
+        self.assertFalse(r["ok"]); self.assertEqual(r["error"]["code"], "not_found")
+        self.assertIn("library", r["chat_text"].lower())
+
+    def test_legacy_wrapper_still_returns_dict(self):
+        ma = FakeMA().set({"artist": [smb_item("Rammstein", "42")]})
+        import music
+        d = music.resolve_music(ma, "Rammstein", "artist", FakeSettings(), "r3")  # legacy shape
+        self.assertIn("ok", d); self.assertTrue(d["ok"])
 
 
 if __name__ == "__main__":
