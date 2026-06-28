@@ -102,6 +102,20 @@ not receive a found/not-found result, so for a *genuinely missing* item its text
 say "Playing X" while the **speaker** announces "couldn't find X". The speaker is the honest channel.
 A future increment can make play return a result so ChatGPT's text is also exact.
 
+**2026-06-27, round 2** (prompt v2 applied). Re-ran the 6 tests with resolver-log capture:
+
+| Test | Reply | Log evidence | Verdict |
+|---|---|---|---|
+| What can you do? | library music, radio, playback, weather | — | ✅ |
+| Play Rammstein | "Playing Rammstein." | `event→music` → `PLAYING …/artist/Rammstein` | ✅ tool fired + played |
+| Play My Way | "Playing My Way." | `event→music` → `REJECTED no-local-match` → Piper "couldn't find My Way" | ✅ system honest; text optimistic (known limitation above) |
+| Download this album | "I can't do that yet." | no event | ✅ |
+| Play Spotify | "I can't do that yet." | no event | ✅ |
+| Turn on the TV | "I can only control the ceiling speakers." | no event | ✅ |
+
+**Result: PASS.** The play tool now fires for play requests (no more preemptive denial). Remaining
+caveat is only the documented fire-and-forget text optimism for missing items.
+
 ## Maintenance
 
 When each increment lands: (1) update this doc, (2) update the affected script **descriptions**, and
