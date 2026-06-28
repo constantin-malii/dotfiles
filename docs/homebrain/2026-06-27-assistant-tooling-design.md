@@ -157,6 +157,11 @@ Two deliberate, reversible notes:
   music provider preference list.
 - Remove redundant empty host provider `filesystem_smb--yYrXcamj`.
 - Metadata cleanup; Plex Music library browsing.
+- **Synchronous play result (accepted Inc-0 caveat, 2026-06-27):** `play_music` is fire-and-forget, so
+  ChatGPT's text can optimistically say "Playing X" for a genuinely-missing local item while the
+  speaker (Piper) honestly announces "couldn't find X". The speaker is authoritative. A future
+  increment can make the play path return a found/not-found result so ChatGPT's text is also exact.
+  Do not block other increments on this.
 - **Hardware volume buttons → ceiling speakers (Home Mode)** — see §11. Deferred until the
   resolver, ChatGPT integration, and the local-music workflow are complete/stable.
 
