@@ -119,6 +119,12 @@ says "playing" while nothing actually matched.
   from ChatGPT but kept for the local sentence-trigger layer). Plan:
   `plans/2026-06-27-inc1-radio.md`. Residual (deferred, see §10): gpt-4o-mini sometimes declines a
   genre-play or mis-states results — addressed by synchronous play-result + a gated model eval.
+- **Foundation F1 — Synchronous Command Result Framework. (NEXT — design done 2026-06-28; impl plan
+  pending review.)** Replace fire-and-forget with a synchronous `CommandResult` (ok + spoken_text +
+  chat_text + structured metadata + error code/reason) via a `resolve→validate→execute` capability
+  interface and a resolver request/response (HTTP) adapter, so ChatGPT no longer infers outcomes.
+  Migrates Music + Radio; makes News/Status/Acquisition honest by construction. Additive/dual-path
+  (event path kept during migration). Design: `2026-06-28-F1-synchronous-command-result-design.md`.
 - **Inc 2 — News.** `news.json` sources; stations + headlines/TTS.
 - **Inc 3 — Acquisition.** `acquire` via Lidarr, guarded.
 - **Inc 4 — Status + household.** now-playing/status + sleep timer + shuffle favorites.
@@ -164,15 +170,14 @@ Two deliberate, reversible notes:
   music provider preference list.
 - Remove redundant empty host provider `filesystem_smb--yYrXcamj`.
 - Metadata cleanup; Plex Music library browsing.
-- **Synchronous play result (accepted Inc-0 caveat, 2026-06-27):** `play_music` is fire-and-forget, so
-  ChatGPT's text can optimistically say "Playing X" for a genuinely-missing local item while the
-  speaker (Piper) honestly announces "couldn't find X". The speaker is authoritative. A future
-  increment can make the play path return a found/not-found result so ChatGPT's text is also exact.
-  Do not block other increments on this.
+- **Synchronous play result — SUPERSEDED by Foundation F1** (2026-06-28). The fire-and-forget caveat
+  (ChatGPT text can be optimistic for missing items; speaker is authoritative) is now addressed by the
+  F1 `CommandResult` framework — see `2026-06-28-F1-synchronous-command-result-design.md`. No longer a
+  standalone backlog item.
 - **Assistant model evaluation (gated, 2026-06-28):** gpt-4o-mini occasionally fails tool-selection
   (declines a genre-play; mis-states results). Keep gpt-4o-mini for now. Evaluate gpt-4o (or
-  gpt-4.1-mini) **only after** the synchronous play-result work above is complete **and only if**
-  tool-selection failures still persist. Model is a one-field change; do not change it preemptively.
+  gpt-4.1-mini) **only after Foundation F1** is complete **and only if** tool-selection failures still
+  persist. Model is a one-field change; do not change it preemptively.
 - **Hardware volume buttons → ceiling speakers (Home Mode)** — see §11. Deferred until the
   resolver, ChatGPT integration, and the local-music workflow are complete/stable.
 
