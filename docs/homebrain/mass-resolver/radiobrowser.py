@@ -20,7 +20,7 @@ def station_from_item(item):
 def _items(result):
     res = (result or {}).get("result")
     if isinstance(res, dict):
-        return res.get("items") or res.get("radio") or []
+        return res.get("items") or []
     return res or []
 
 

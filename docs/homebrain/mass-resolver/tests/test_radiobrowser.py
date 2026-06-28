@@ -78,6 +78,12 @@ class RadioBrowserTest(unittest.TestCase):
                                  "radiobrowser://category/tag/jazz",
                                  "radiobrowser://category/language/ru"])
 
+    def test_station_from_radio_typed_back_is_none(self):
+        item = {"item_id": "back", "provider": "radiobrowser", "name": "Back FM",
+                "uri": "radiobrowser://radio/back", "media_type": "radio",
+                "provider_mappings": [{"provider_domain": "radiobrowser", "available": True}]}
+        self.assertIsNone(rb.station_from_item(item))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
