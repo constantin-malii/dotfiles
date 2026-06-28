@@ -2,6 +2,8 @@
 # Radio capability: play/find by name/country/genre/language, favorites-first then
 # RadioBrowser, with dry-run and honest feedback. Python 3.5 safe.
 import logging
+import capability
+import command_result as cr
 import config
 import favorites
 import radiobrowser as rb
@@ -48,46 +50,95 @@ def _candidates(ma, radio_cfg, params, cap):
     return [], ""
 
 
+class RadioCapability(capability.Capability):
+    name = "radio"
+
+    def resolve(self, ctx, params):
+        radio_cfg = ctx.radio_cfg or {}
+        d = config.radio_defaults(radio_cfg)
+        ma = ctx.ma_factory()
+        try:
+            ma.connect()
+            cands, label = _candidates(ma, radio_cfg, params, d["find_internal"])
+            mode = params.get("mode") or "play"
+            dry_run = bool(params.get("dry_run"))
+            LOG.info("req=? radio mode=%s target=%r candidates=%d", mode, label, len(cands))
+            return {"ma": ma, "mode": mode, "candidates": cands, "label": label,
+                    "dry_run": dry_run, "find_speak": d["find_speak"]}
+        except Exception:
+            ma.close()
+            raise
+
+    def validate(self, ctx, resolved):
+        if not resolved.get("candidates"):
+            label = resolved.get("label") or "that"
+            resolved["ma"].close()
+            return {"code": "not_found", "reason": "no match",
+                    "chat_text": "I couldn't find a station for " + label + ".",
+                    "spoken_text": "I couldn't find a station for " + label + ".",
+                    "metadata": {"label": label}}
+        return None
+
+    def execute(self, ctx, resolved, rid):
+        ma = resolved["ma"]
+        mode = resolved["mode"]
+        cands = resolved["candidates"]
+        label = resolved.get("label") or "that"
+        find_speak = resolved.get("find_speak") or 3
+        try:
+            if mode == "find":
+                names = [s["name"] for s in cands[:find_speak]]
+                if len(names) == 1:
+                    spoken = "I found " + names[0] + "."
+                    chat = "Here are some stations: " + names[0] + "."
+                else:
+                    spoken = "I found " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                    chat = "Here are some stations: " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                return cr.ok(self.name, rid, chat, spoken_text=spoken,
+                             metadata={"stations": cands, "mode": "find", "label": label})
+
+            # mode == play
+            chosen = cands[0]
+            md = {"uri": chosen["uri"], "station": chosen["name"], "source": chosen["source"], "mode": "play"}
+            if resolved["dry_run"]:
+                LOG.info("[DRY-RUN] req=%s WOULD PLAY radio %r uri=%s source=%s",
+                         rid, chosen["name"], chosen["uri"], chosen["source"])
+                md["played"] = False
+                return cr.ok(self.name, rid, "Would play " + chosen["name"] + ".",
+                             spoken_text=None, metadata=md)
+            pr = ma.play(ctx.settings.queue_id, chosen["uri"])
+            if (not pr) or ("error_code" in pr):
+                LOG.error("req=%s RADIO PLAY FAILED code=%s", rid,
+                          pr.get("error_code") if pr else None)
+                md["played"] = False
+                return cr.err(self.name, rid, "play_failed", "play failed",
+                              "I found " + chosen["name"] + ", but couldn't start it.",
+                              spoken_text="I found " + chosen["name"] + ", but couldn't start it.",
+                              metadata=md)
+            LOG.info("req=%s RADIO PLAYING %r uri=%s source=%s",
+                     rid, chosen["name"], chosen["uri"], chosen["source"])
+            md["played"] = True
+            return cr.ok(self.name, rid, "Playing " + chosen["name"] + ".",
+                         spoken_text=None, metadata=md)
+        finally:
+            ma.close()
+
+
 def resolve_radio(ctx, params, rid):
-    mode = params.get("mode") or "play"
-    radio_cfg = ctx.radio_cfg or {}
-    d = config.radio_defaults(radio_cfg)
-    ma = ctx.ma_factory()
-    try:
-        ma.connect()
-        cands, label = _candidates(ma, radio_cfg, params, d["find_internal"])
-        LOG.info("req=%s radio mode=%s target=%r candidates=%d", rid, mode, label, len(cands))
-
-        if mode == "find":
-            if not cands:
-                return {"ok": False, "intent": "radio", "request_id": rid, "reason": "no match",
-                        "spoken": "I couldn't find any stations for " + (label or "that") + "."}
-            names = [s["name"] for s in cands[:d["find_speak"]]]
-            if len(names) == 1:
-                spoken = "I found " + names[0] + "."
-            else:
-                spoken = "I found " + ", ".join(names[:-1]) + " and " + names[-1] + "."
-            return {"ok": True, "intent": "radio", "request_id": rid, "spoken": spoken,
-                    "speak_success": True, "stations": cands}
-
-        # mode == play
-        if not cands:
-            return {"ok": False, "intent": "radio", "request_id": rid, "reason": "no match",
-                    "spoken": "I couldn't find a station for " + (label or "that") + "."}
-        chosen = cands[0]
-        res = {"ok": True, "intent": "radio", "request_id": rid, "spoken": None, "played": False,
-               "uri": chosen["uri"], "station": chosen["name"], "source": chosen["source"]}
-        if params.get("dry_run"):
-            LOG.info("[DRY-RUN] req=%s WOULD PLAY radio %r uri=%s source=%s", rid, chosen["name"], chosen["uri"], chosen["source"])
-            return res
-        pr = ma.play(ctx.settings.queue_id, chosen["uri"])
-        if (not pr) or ("error_code" in pr):
-            LOG.error("req=%s RADIO PLAY FAILED code=%s", rid, pr.get("error_code") if pr else None)
-            res["ok"] = False; res["reason"] = "play failed"
-            res["spoken"] = "I found " + chosen["name"] + ", but couldn't start it."
-            return res
-        LOG.info("req=%s RADIO PLAYING %r uri=%s source=%s", rid, chosen["name"], chosen["uri"], chosen["source"])
-        res["played"] = True
-        return res
-    finally:
-        ma.close()
+    """Legacy wrapper: runs RadioCapability and maps CommandResult back to the Inc 1 dict."""
+    res = capability.run(RadioCapability(), ctx, params, rid)
+    md = res.get("metadata") or {}
+    out = {"ok": res["ok"], "intent": "radio", "request_id": rid,
+           "spoken": res.get("spoken_text")}
+    # play fields
+    for k in ("uri", "station", "source", "played"):
+        if k in md:
+            out[k] = md[k]
+    # find fields
+    if "stations" in md:
+        out["stations"] = md["stations"]
+    # speak_success: True when ok and spoken_text is not None (find-list case)
+    out["speak_success"] = bool(res["ok"] and res.get("spoken_text") is not None)
+    if not res["ok"]:
+        out["reason"] = (res.get("error") or {}).get("reason")
+    return out
