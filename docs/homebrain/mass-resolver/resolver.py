@@ -46,6 +46,14 @@ def event_to_call(settings, event):
         return ("music", {"query": q, "media_type": data.get("media_type") or ""})
     if et == settings.sync_event_type:
         return ("sync", {"source": data.get("source")})
+    if et == getattr(settings, "radio_event_type", "mass_radio_request"):
+        params = {"mode": data.get("mode") or "play"}
+        for k in ("station", "country", "language", "genre"):
+            if data.get(k):
+                params[k] = data.get(k)
+        if data.get("dry_run"):
+            params["dry_run"] = True
+        return ("radio", params)
     return None
 
 
@@ -62,6 +70,7 @@ def serve(here):
             ctx.ha.connect()
             ctx.ha.subscribe(s.event_type, 1)
             ctx.ha.subscribe(s.sync_event_type, 2)
+            ctx.ha.subscribe(s.radio_event_type, 3)
             LOG.info("SERVICE: connected; subscribed to %r (play) + %r (sync); provider_preference=%s",
                      s.event_type, s.sync_event_type, s.provider_preference)
             backoff = 2
@@ -97,12 +106,35 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--radio", action="store_true")
+    ap.add_argument("--mode", default="play", choices=["play", "find"])
+    ap.add_argument("--station"); ap.add_argument("--country")
+    ap.add_argument("--genre"); ap.add_argument("--language")
     ap.add_argument("--query")
     ap.add_argument("--media-type", default="", choices=["", "artist", "album", "track", "playlist"])
     a = ap.parse_args()
 
     if a.serve:
         serve(HERE); return
+
+    if a.radio:
+        import radio as radiomod
+        ctx = build_ctx(HERE)
+        params = {"mode": a.mode}
+        for k in ("station", "country", "genre", "language"):
+            v = getattr(a, k)
+            if v:
+                params[k] = v
+        if a.dry_run:
+            params["dry_run"] = True
+        rid = uuid.uuid4().hex[:8]
+        res = radiomod.resolve_radio(ctx, params, rid)
+        if res.get("spoken") and (res.get("speak_success") or not res.get("ok")) and not a.dry_run:
+            try:
+                ctx.ha.connect(); ctx.ha.announce(res["spoken"], ctx.settings); ctx.ha.close()
+            except Exception as e:
+                LOG.error("radio announce failed: %r", e)
+        print(json.dumps(res)); return
 
     ctx = build_ctx(HERE)
     ma_token = config.read_secret(HERE, ".ma_token")

@@ -32,6 +32,7 @@ class Settings(object):
         self.ceiling_entity = cfg.get("ceiling_entity", "media_player.ceiling_speakers")
         self.event_type = cfg.get("event_type", "mass_play_request")
         self.sync_event_type = cfg.get("sync_event_type", "mass_sync_request")
+        self.radio_event_type = cfg.get("radio_event_type", "mass_radio_request")
         self.dry_run = bool(cfg.get("dry_run", False))
         self.announce_failures = bool(cfg.get("announce_failures", True))
         # TTS announce service: domain.service + a template of data fields.
