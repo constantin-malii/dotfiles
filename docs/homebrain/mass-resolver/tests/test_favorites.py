@@ -39,6 +39,13 @@ class FavoritesTest(unittest.TestCase):
         out = favorites.by_language(RC, "en")
         self.assertEqual([s["uri"] for s in out], ["library://radio/2"])
 
+    def test_by_name_alias_key_case_insensitive(self):
+        rc = {"favorites": RC["favorites"], "aliases": {"ActualitaTI": "Radio Romania Actualitati"}}
+        out = favorites.by_name(rc, "actualitati")
+        self.assertTrue(out)
+        self.assertEqual(out[0]["uri"], "library://radio/10")
+        self.assertEqual(out[0]["source"], "favorite")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

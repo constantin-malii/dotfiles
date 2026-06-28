@@ -11,7 +11,11 @@ def _st(fav):
 def by_name(radio_cfg, query):
     favs = config.favorites(radio_cfg)
     aliases = (radio_cfg or {}).get("aliases", {})
-    target = aliases.get((query or "").strip().lower(), query)
+    q = (query or "").strip()
+    aliases_lower = {}
+    for k, v in aliases.items():
+        aliases_lower[k.lower()] = v
+    target = aliases_lower.get(q.lower(), q)
     ranked = []
     for f in favs:
         r = match_rank(target, f.get("name"))
