@@ -23,19 +23,21 @@ and this repo doc is the human source of truth we keep them in sync with:
    This is where to put system/setup knowledge, scope, routing rules, and limits so ChatGPT can answer
    *"what can you do?"* accurately. A paste-ready draft is at the bottom of this doc.
 
-> Status: the curated Instructions prompt below is **drafted but NOT yet applied** to the live config
-> (applying it is a deliberate "expose to ChatGPT" step, done as its own validated change).
+> Status: the Instructions prompt below (**v4**) is the live OpenAI Conversation prompt (Inc 0
+> music/transport/weather + Inc 1 radio). Edit it via the HA UI (paste) — not the config API.
 
 ---
 
 ## Currently exposed to ChatGPT (verified 2026-06-27)
 
-10 entities are exposed to the conversation assistant:
+12 entities are exposed to the conversation assistant:
 
 | Tool (entity) | What it does |
 |---|---|
 | `script.play_music` | Play LOCAL music by song/album/artist/playlist (fires `mass_play_request` → resolver) |
-| `script.ceiling_play_radio` | Play a radio station **by name** |
+| `script.play_radio` | Play radio by **name / country / genre / language** (resolver: favorites-first → RadioBrowser) |
+| `script.find_stations` | **Find/list** stations by genre/country; speaks the top 3 |
+| `script.ceiling_play_radio` | Legacy: play a station by name (kept as fallback, not retired) |
 | `script.ceiling_pause` / `ceiling_resume` / `ceiling_stop` | Transport |
 | `script.ceiling_next` / `ceiling_previous` | Skip within a local queue |
 | `script.ceiling_volume_up` / `ceiling_volume_down` | **Relative** volume change (±%, default 10) |
@@ -60,7 +62,6 @@ ceiling speakers ("Sorry, I couldn't find X in the local library") via local Pip
 
 | Capability | Increment |
 |---|---|
-| Radio by **country / genre**, list/discover stations | Inc 1 |
 | **News** headlines (spoken) and news stations | Inc 2 |
 | **Search & acquire** a song/artist (Lidarr) | Inc 3 |
 | **"What's playing"/status**, sleep timer, shuffle favorites | Inc 4 |
@@ -73,7 +74,7 @@ locally yet and that acquisition is on the roadmap.
 
 - **Music:** call `play_music` with the user's phrase as the query; leave `media_type` empty unless the
   user explicitly says "album"/"artist"/"playlist".
-- **Radio:** call `ceiling_play_radio` with the station name.
+- **Radio:** call `play_radio` (station for a name; country/genre/language for those); call `find_stations` for "find/list stations". `ceiling_play_radio` is a legacy fallback.
 - **Transport / volume:** use the `ceiling_*` tools; never use a raw media_player service.
 - **Don't invent content.** If nothing matches, the speaker announces the miss — don't report success.
 - **Capability questions:** answer from the "currently exposed" + "not available yet" lists above.
@@ -116,6 +117,26 @@ A future increment can make play return a result so ChatGPT's text is also exact
 **Result: PASS.** The play tool now fires for play requests (no more preemptive denial). Remaining
 caveat is only the documented fire-and-forget text optimism for missing items.
 
+**2026-06-28 — Inc 1 radio exposed** (`script.play_radio` + `script.find_stations`), prompt v3 (added
+the two radio capability lines). Conversational tests vs `conversation.openai_conversation`:
+
+| Test | Reply / log | Verdict |
+|---|---|---|
+| What can you do? | lists library, radio, playback, weather | ✅ |
+| play Romanian radio | play country=Romania → Deep House Bucharest (fav) | ✅ |
+| play jazz | play genre=jazz → 101 Smooth Jazz (fav) | ✅ |
+| play country radio | play genre=country → .977 Country (RadioBrowser) | ✅ "country"=genre |
+| play Hit FM | **misrouted** → `find(genre=pop, country=Ukraine)` (spoke 3 incl. Hit FM); text wrongly said "can't play" | ❌ routing |
+| find jazz stations | speaker correctly said "I found 101 SMOOTH JAZZ, Classic Vinyl HD and Jazz Radio Blues"; **ChatGPT text said "couldn't find any"** | ⚠️ fire-and-forget text on find |
+| play Wackadoodle FM | ChatGPT declined, **no tool call** | ⚠️ didn't try |
+| Inc 0 regression: play Rammstein / volume up / pause / resume / stop / what-can-you-do | all correct (Rammstein played; 0.35→0.44; paused/playing/idle) | ✅ no regression |
+
+**Gaps (all ChatGPT routing — resolver behaved correctly each time):** (1) play-by-name went to `find`
+instead of `play_radio`; (2) `find` text contradicts the (correct) spoken list; (3) unknown station →
+no attempt. **Fix:** prompt **v4** adds explicit `PLAYING RADIO` (named station → always use play-radio,
+don't search/pre-judge) and `FINDING STATIONS` (speaker reads results; don't assert found/not-found)
+blocks. Re-validation of Hit FM / find jazz / unknown-station pending after v4 is pasted.
+
 ## Maintenance
 
 When each increment lands: (1) update this doc, (2) update the affected script **descriptions**, and
@@ -141,7 +162,8 @@ speakers". Answer in plain text, briefly and naturally.
 
 WHAT YOU CAN DO
 - Play music from the household's personal music library — by song, album, artist, or playlist.
-- Play radio stations by name.
+- Play radio stations — by name, by country or nationality, by genre, or by language.
+- Find and list radio stations by genre or country (the speakers read out the top few options).
 - Control playback on the ceiling speakers: pause, resume, stop, skip to next or previous track,
   and turn the volume up or down.
 - Tell the local weather.
@@ -154,9 +176,21 @@ PLAYING MUSIC
   (for example, "Playing Rammstein."). Never refuse a play request, and never say something isn't in
   the library, without first using the tool to try.
 
+PLAYING RADIO
+- To play a specific station by name, ALWAYS use the play-radio tool with that exact station name — do
+  NOT search for it, list alternatives, or judge yourself whether it exists. For "Romanian/Russian
+  radio" pass the country; for a genre like jazz, news, or country pass the genre; for a language pass
+  the language. The speakers announce if nothing was found. After using the tool, confirm briefly
+  (for example, "Playing Hit FM.").
+
+FINDING STATIONS
+- When the user asks to find or list stations, use the find-stations tool. The speakers read the
+  results aloud, so just say you're finding them (for example, "Here are some jazz stations.") — do
+  NOT state whether any were or weren't found.
+
 WHICH SOURCE TO USE (in order of preference)
 1. The household's personal music library first.
-2. Radio — when the user asks for a station by name.
+2. Radio — for a station by name, or a country, genre, or language request.
 3. Streaming services aren't connected yet; when added, they come after the library and radio.
    Don't offer them until then.
 
