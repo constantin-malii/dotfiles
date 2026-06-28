@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTP server for resolver commands. Python 3.5 compatible."""
 import json
-import sys
+import hmac
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from socketserver import ThreadingMixIn
 import command_result as cr
@@ -13,17 +13,21 @@ def make_handler(dispatch_fn, secret):
         def do_POST(self):
             # Check path
             if self.path != "/command":
-                self.send_error(404)
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                error_resp = cr.err("command", "", "not_found", "unknown path", "Not found.")
+                self.wfile.write(json.dumps(error_resp).encode())
                 return
 
             # Check secret if set
             if secret:
-                key = self.headers.get("X-Resolver-Key")
-                if key != secret:
+                key = self.headers.get("X-Resolver-Key") or ""
+                if not hmac.compare_digest(key, secret):
                     self.send_response(401)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
-                    error_resp = cr.err("", "r", "unauthorized", "missing or invalid key", "Unauthorized.")
+                    error_resp = cr.err("command", "", "unauthorized", "bad key", "Unauthorized.")
                     self.wfile.write(json.dumps(error_resp).encode())
                     return
 
@@ -36,38 +40,49 @@ def make_handler(dispatch_fn, secret):
 
             body = self.rfile.read(content_length) if content_length > 0 else b""
 
-            # Parse JSON
+            # Parse JSON and validate it is a dict
             try:
                 data = json.loads(body.decode())
+                if not isinstance(data, dict):
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    error_resp = cr.err("command", "", "invalid_input", "malformed request body", "Bad request.")
+                    self.wfile.write(json.dumps(error_resp).encode())
+                    return
             except (ValueError, UnicodeDecodeError):
-                data = {}
-
-            # Validate intent
-            intent = data.get("intent", "").strip()
-            if not intent:
                 self.send_response(400)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                error_resp = cr.err("", "r", "invalid_input", "missing intent", "Invalid input.")
+                error_resp = cr.err("command", "", "invalid_input", "malformed request body", "Bad request.")
+                self.wfile.write(json.dumps(error_resp).encode())
+                return
+
+            # Validate intent
+            intent = data.get("intent")
+            if not (isinstance(intent, str) and intent.strip()):
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                error_resp = cr.err("command", "", "invalid_input", "missing intent", "Bad request.")
                 self.wfile.write(json.dumps(error_resp).encode())
                 return
 
             # Get params
             params = data.get("params", {})
 
-            # Call dispatch and send response
+            # Call dispatch and send response with exception handling
             try:
                 result = dispatch_fn(intent, params)
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps(result).encode())
-            except Exception:
-                # Log error but don't leak details
+            except Exception as e:
                 self.send_response(500)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                error_resp = cr.err(intent, "r", "upstream_error", "handler error", "Server error.")
+                error_resp = cr.err(str(intent) if isinstance(intent, str) else "command", "", "upstream_error", repr(e), "Sorry, something went wrong.")
                 self.wfile.write(json.dumps(error_resp).encode())
 
         def log_message(self, format, *args):
