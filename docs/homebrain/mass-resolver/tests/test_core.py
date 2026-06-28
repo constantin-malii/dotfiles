@@ -67,10 +67,10 @@ class CoreTest(unittest.TestCase):
 
     def test_stub_intent_announces_not_available(self):
         ctx, ha = self._ctx(FakeMA())
-        r = core.dispatch(ctx, "radio", {"country": "Romania"})
+        r = core.dispatch(ctx, "news", {"country": "Romania"})
         self.assertFalse(r["ok"])
         self.assertEqual(len(ha.announced), 1)
-        self.assertIn("couldn't find", ha.announced[0].lower())
+        self.assertIn("yet", ha.announced[0].lower())
 
     def test_sync_runs_and_never_announces(self):
         ma = FakeMA()
