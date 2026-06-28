@@ -117,6 +117,17 @@ class RadioTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(r["spoken"], "I found 101 SMOOTH JAZZ.")
 
+    def test_find_dedupes_duplicate_names_favorite_wins(self):
+        # RadioBrowser (browse) returns a station with the SAME name as the jazz favorite
+        ma = FakeMA(browse=[rb_item("dup", "101 SMOOTH JAZZ"), rb_item("u9", "Other Jazz")])
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "find", "genre": "jazz"}, "rid")
+        names = [s["name"] for s in r["stations"]]
+        self.assertEqual(len(names), len(set(n.lower() for n in names)))  # no duplicate names
+        smooth = [s for s in r["stations"] if s["name"] == "101 SMOOTH JAZZ"]
+        self.assertEqual(len(smooth), 1)
+        self.assertEqual(smooth[0]["uri"], "library://radio/2")   # favorite kept, not RB dup
+        self.assertEqual(smooth[0]["source"], "favorite")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

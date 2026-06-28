@@ -10,13 +10,18 @@ LOG = logging.getLogger("resolver")
 
 
 def _dedupe(stations, cap):
-    seen = set(); out = []
+    seen_uri = set(); seen_name = set(); out = []
     for s in stations:
         u = s.get("uri")
-        if u and u not in seen:
-            seen.add(u); out.append(s)
-            if len(out) >= cap:
-                break
+        n = (s.get("name") or "").strip().lower()
+        if (not u) or (u in seen_uri) or (n and n in seen_name):
+            continue
+        seen_uri.add(u)
+        if n:
+            seen_name.add(n)
+        out.append(s)
+        if len(out) >= cap:
+            break
     return out
 
 
