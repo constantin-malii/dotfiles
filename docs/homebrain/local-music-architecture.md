@@ -232,6 +232,39 @@ The monolithic `resolver.py` was refactored into focused modules (the original i
 - **Rollback:** `cp ~/mass-resolver/resolver.py.orig ~/mass-resolver/resolver.py && sudo systemctl restart mass-resolver` (the monolith imports no new modules).
 - **Not yet exposed to ChatGPT:** the existing `script.play_music` path is unchanged and now served by the modular resolver; `radio`/`news`/`acquire`/`status` remain stubs wired to nothing (Inc 1–4).
 
+## Voice volume control — STABLE / locked (2026-06-28)
+
+**Status: COMPLETE & frozen.** Validated by an automated check (through `conversation.home_assistant`,
+the sentence-trigger path) and by real use. **Do not change `automation.voice_ceiling_speakers`
+further unless a new regression is observed.**
+
+**Supported & stable phrases** (ceiling speakers, local sentence-trigger layer):
+
+| Phrase | Behavior |
+|---|---|
+| `volume up` | relative **+10%** |
+| `volume down` | relative **−10%** |
+| `volume up 15 percent` | relative **+15%** |
+| `volume down 15 percent` | relative **−15%** |
+| `volume 40 percent` | absolute **40%** |
+| `set volume to 40 percent` | absolute **40%** |
+| `volume to 40` | absolute **40%** |
+
+**Root cause:** Home Assistant sentence matching (hassil) routed some *relative* phrases through the
+*absolute* volume branch — the greedy `volume {percent} percent` pattern captured "down 15"/"up 15",
+so a relative request set an absolute level (e.g. "volume up 15 percent" dropped volume to ~15%).
+Relying on trigger precedence alone did **not** reliably prefer the more-specific relative patterns.
+
+**Permanent fix:** **direction-aware parsing inside the action logic** (not trigger precedence). The
+absolute (`vol_set`) branch now inspects the captured text — `down` → relative −N%, `up` → relative
++N%, otherwise absolute N% — with robust number parsing (digits or words). This is correct regardless
+of which trigger the matcher selects, while keeping the natural absolute form (`volume 40 percent`).
+The `vol_up`/`vol_down` branches keep the bare ±10% behavior.
+
+**Backups (retain through the planned retention period — do NOT delete yet):**
+- `costea@homebrain:~/voice_ceiling_speakers.backup-20260628-113058.json` (pre-fix original)
+- `costea@homebrain:~/voice_ceiling_speakers.backup2-20260628-114033.json` (pre-direction-aware change)
+
 ## Requested features (backlog — not yet built)
 
 - **Local name matching — improved 2026-06-27, more wanted (Phase 6).** Resolver matcher now normalizes punctuation (so "E-N-G-E-L" → engel), strips "<title> by <artist>", and does a conservative typo-fuzzy (difflib ≥0.86). Still missing: **semantic/translation** matching — "Angel" does not match the German "Engel" (ChatGPT should map the meaning, or add embeddings/aliases). 

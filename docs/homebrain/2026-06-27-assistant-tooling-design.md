@@ -134,7 +134,8 @@ preserved:
 - Local music resolver playback → becomes `core` + `music` (same logic, reorganized).
 - Radio (`ceiling_play_radio`, favorites + arbitrary stations) → becomes `radio`, **gains**
   country/genre/list on top.
-- Transport (play/pause/stop, volume ±% — including the validated relative-volume fix) →
+- Transport (play/pause/stop, volume ±% — including the **validated & locked** relative/absolute
+  volume fix, COMPLETE 2026-06-28; see local-music-architecture.md "Voice volume control — STABLE") →
   **untouched**, stays in the fast local sentence-trigger layer.
 - Lidarr→MA auto-sync webhook → **untouched**; `acquire` adds a manual path alongside it.
 
