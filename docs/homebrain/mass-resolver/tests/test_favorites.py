@@ -46,6 +46,18 @@ class FavoritesTest(unittest.TestCase):
         self.assertEqual(out[0]["uri"], "library://radio/10")
         self.assertEqual(out[0]["source"], "favorite")
 
+    def test_by_name_cyrillic_exact(self):
+        rc = {"favorites": [{"name": "Ретро ФМ", "uri": "library://radio/8", "country": "ru", "language": "ru", "genres": ["retro"]}], "aliases": {}}
+        out = favorites.by_name(rc, "Ретро ФМ")
+        self.assertTrue(out)
+        self.assertEqual(out[0]["uri"], "library://radio/8")
+
+    def test_by_name_alias_to_cyrillic(self):
+        rc = {"favorites": [{"name": "Ретро ФМ", "uri": "library://radio/8", "country": "ru", "language": "ru", "genres": ["retro"]}], "aliases": {"retro fm": "Ретро ФМ"}}
+        out = favorites.by_name(rc, "Retro FM")
+        self.assertTrue(out)
+        self.assertEqual(out[0]["uri"], "library://radio/8")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

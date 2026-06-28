@@ -16,13 +16,26 @@ def by_name(radio_cfg, query):
     for k, v in aliases.items():
         aliases_lower[k.lower()] = v
     target = aliases_lower.get(q.lower(), q)
+    tl = target.strip().lower()
+    out = []
+    seen = set()
+    # 1) exact case-insensitive raw-name match (works for non-ASCII/Cyrillic names)
+    for f in favs:
+        if (f.get("name") or "").strip().lower() == tl and f.get("uri") not in seen:
+            seen.add(f.get("uri")); out.append(_st(f))
+    # 2) ASCII fuzzy fallback via match_rank
     ranked = []
     for f in favs:
+        if f.get("uri") in seen:
+            continue
         r = match_rank(target, f.get("name"))
         if r is not None:
             ranked.append((r, f))
     ranked.sort(key=lambda t: t[0])
-    return [_st(f) for _, f in ranked]
+    for _, f in ranked:
+        if f.get("uri") not in seen:
+            seen.add(f.get("uri")); out.append(_st(f))
+    return out
 
 
 def by_country(radio_cfg, code):
