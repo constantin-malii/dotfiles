@@ -22,8 +22,8 @@ def rb_item(uuid, name):
 
 
 class FakeMA(object):
-    def __init__(self, browse=None, search=None):
-        self._browse = browse or []; self._search = search or []; self.played = []
+    def __init__(self, browse=None, search=None, play_reply="__ok__"):
+        self._browse = browse or []; self._search = search or []; self.played = []; self._play_reply = play_reply
     def connect(self): pass
     def cmd(self, command, **a):
         if command == "music/browse":
@@ -32,7 +32,8 @@ class FakeMA(object):
             return {"result": {"radio": self._search}}
         return None
     def play(self, q, uri, option="replace"):
-        self.played.append((q, uri, option)); return {"result": {}}
+        self.played.append((q, uri, option))
+        return {"result": {}} if self._play_reply == "__ok__" else self._play_reply
     def close(self): pass
 
 
@@ -97,6 +98,24 @@ class RadioTest(unittest.TestCase):
         r2 = radio.resolve_radio(FakeCtx(FakeMA(browse=[])), {"mode": "find", "genre": "polka"}, "rid")
         self.assertFalse(r2["ok"])
         self.assertIn("couldn't find", r2["spoken"].lower())
+
+    def test_play_error_is_honest(self):
+        ma = FakeMA(play_reply={"error_code": "x"})
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "play", "station": "jazz"}, "rid")
+        self.assertFalse(r["ok"])
+        self.assertIn("couldn't start", r["spoken"].lower())
+
+    def test_play_none_return_is_honest(self):
+        ma = FakeMA(play_reply=None)
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "play", "station": "jazz"}, "rid")
+        self.assertFalse(r["ok"])
+        self.assertIn("couldn't start", r["spoken"].lower())
+
+    def test_find_single_result(self):
+        ma = FakeMA(search=[])
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "find", "genre": "jazz"}, "rid")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["spoken"], "I found 101 SMOOTH JAZZ.")
 
 
 if __name__ == "__main__":

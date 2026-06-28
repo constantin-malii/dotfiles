@@ -76,8 +76,8 @@ def resolve_radio(ctx, params, rid):
             LOG.info("[DRY-RUN] req=%s WOULD PLAY radio %r uri=%s source=%s", rid, chosen["name"], chosen["uri"], chosen["source"])
             return res
         pr = ma.play(ctx.settings.queue_id, chosen["uri"])
-        if pr and "error_code" in pr:
-            LOG.error("req=%s RADIO PLAY FAILED code=%s", rid, pr.get("error_code"))
+        if (not pr) or ("error_code" in pr):
+            LOG.error("req=%s RADIO PLAY FAILED code=%s", rid, pr.get("error_code") if pr else None)
             res["ok"] = False; res["reason"] = "play failed"
             res["spoken"] = "I found " + chosen["name"] + ", but couldn't start it."
             return res
