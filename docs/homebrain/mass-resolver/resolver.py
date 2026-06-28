@@ -71,8 +71,8 @@ def serve(here):
             ctx.ha.subscribe(s.event_type, 1)
             ctx.ha.subscribe(s.sync_event_type, 2)
             ctx.ha.subscribe(s.radio_event_type, 3)
-            LOG.info("SERVICE: connected; subscribed to %r (play) + %r (sync); provider_preference=%s",
-                     s.event_type, s.sync_event_type, s.provider_preference)
+            LOG.info("SERVICE: connected; subscribed to %r (play) + %r (sync) + %r (radio); provider_preference=%s",
+                     s.event_type, s.sync_event_type, s.radio_event_type, s.provider_preference)
             backoff = 2
             while True:
                 m = ctx.ha.read()

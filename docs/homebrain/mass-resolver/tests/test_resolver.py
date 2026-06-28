@@ -41,6 +41,7 @@ class EventMapTest(unittest.TestCase):
         self.assertEqual(intent, "radio")
         self.assertEqual(params["mode"], "play")
         self.assertEqual(params["country"], "Romania")
+        self.assertEqual(set(params.keys()), {"mode", "country"})
 
     def test_radio_event_defaults_mode_play(self):
         ev = {"event_type": "mass_radio_request", "data": {"genre": "jazz"}}
