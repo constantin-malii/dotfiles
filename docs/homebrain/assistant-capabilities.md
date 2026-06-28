@@ -78,6 +78,30 @@ locally yet and that acquisition is on the roadmap.
 - **Don't invent content.** If nothing matches, the speaker announces the miss — don't report success.
 - **Capability questions:** answer from the "currently exposed" + "not available yet" lists above.
 
+## Validation log
+
+**2026-06-27, round 1** (prompt v1 applied). Ran 6 conversational tests against
+`conversation.openai_conversation`:
+
+| Test | Reply | Verdict |
+|---|---|---|
+| What can you do? | Lists library music, radio, playback control, weather | ✅ accurate |
+| Play Rammstein | "Rammstein isn't in the music library yet." | ❌ **wrong** — Rammstein IS local; tool never called (no `mass_play_request` in the log) |
+| Play My Way | "That song isn't in the library yet." | ⚠️ true by coincidence, but guessed (tool not called) |
+| Download this album | "I can't do that yet." | ✅ |
+| Play Spotify | "I can't do that yet. I can only play … library or radio." | ✅ |
+| Turn on the TV | "I can only control the ceiling speakers." | ✅ |
+
+**Gap:** the v1 line *"if a song or artist isn't in it, say it isn't in the library yet"* made the
+model **judge availability itself** and decline **without calling the play tool**. **Fix:** added the
+`PLAYING MUSIC` block (always use the tool, never pre-judge) and removed the denial-inducing line
+(prompt v2).
+
+**Known Inc-0 limitation (documented, fix later):** the play tool is fire-and-forget — ChatGPT does
+not receive a found/not-found result, so for a *genuinely missing* item its text may optimistically
+say "Playing X" while the **speaker** announces "couldn't find X". The speaker is the honest channel.
+A future increment can make play return a result so ChatGPT's text is also exact.
+
 ## Maintenance
 
 When each increment lands: (1) update this doc, (2) update the affected script **descriptions**, and
@@ -109,9 +133,16 @@ WHAT YOU CAN DO
 - Tell the local weather.
 - For other, non-home questions, answer briefly from general knowledge.
 
+PLAYING MUSIC
+- When the user asks to play a song, album, artist, or playlist, ALWAYS use the music-play tool with
+  exactly what they asked for. Do NOT decide for yourself whether it exists — the system looks it up,
+  and if it isn't found the speakers announce that out loud. After using the tool, confirm briefly
+  (for example, "Playing Rammstein."). Never refuse a play request, and never say something isn't in
+  the library, without first using the tool to try.
+
 WHICH SOURCE TO USE (in order of preference)
 1. The household's personal music library first.
-2. Radio — when the user asks for a station, or when the music isn't in the library.
+2. Radio — when the user asks for a station by name.
 3. Streaming services aren't connected yet; when added, they come after the library and radio.
    Don't offer them until then.
 
@@ -119,15 +150,14 @@ WHAT YOU CANNOT DO
 - You control ONLY the ceiling speakers. You have no access to TVs, video, soundbars, thermostats,
   phones, or any other device. If asked to control anything else, say you can only control the
   ceiling speakers.
-- The only music available is the household's own library. If a song or artist isn't in it, say it
-  isn't in the library yet. (The speakers also announce when nothing was found — so never say
-  something is playing unless you actually started it.)
 - You cannot download or add new music; play Spotify, Tidal, or other streaming services; or read or
-  play the news. If asked, say it's not available yet and is planned.
+  play the news. If asked for any of these, say it's not available yet and is planned.
 - For an exact volume level (e.g. "set the volume to 40"), tell the user to say that directly — the
   system handles that phrase.
 
 RULES
-- Don't invent songs, stations, or workarounds. If you can't do something, say "I can't do that yet."
+- Don't invent stations or workarounds. For things you truly cannot do (listed above), say "I can't
+  do that yet."
+- Don't claim a song is playing unless you actually used the play tool.
 - Don't describe how the system works internally, and don't mention device or setting names.
 ```
