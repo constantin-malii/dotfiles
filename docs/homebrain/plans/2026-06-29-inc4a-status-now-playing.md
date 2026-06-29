@@ -318,4 +318,52 @@ MA/HA config beyond creating the one new (initially-unexposed) script.
 - Raw `media_player` exposure rejected (noted) ✓. Keeps `script.media_status`, hard return, no event
   adapter, no change to existing scripts, no exposure before approval, Python 3.5 ✓.
 - Nine phases retained; **default path has two live gates + separate exposure** (host probe gate removed).
-- **No implementation performed; no host/HA changes; nothing exposed** — plan only.
+- **No implementation performed; no host/HA changes; nothing exposed** — *plan only at authoring time
+  (see Execution outcome below).*
+
+---
+
+## Execution outcome — Phases 1–7 DONE (2026-06-29; Inc 4A **validated-but-unexposed**)
+
+**Phases 1–4 (repo).** `StatusCapability` (+ pure `normalize_status` / `build_chat_text`) implemented
+HA-state-primary, summary-only; wired into `core.CAPS["status"]` with `"status"` removed from
+`_STUBS`; read-only HA REST reader `haconn.HA.get_entity_state()` added (fresh per-call, not the shared
+event socket); legacy `status()` stub removed and `test_stubs.py` updated. Full suite **160 tests OK**.
+Committed `f110d67` (six files: `core.py`, `haconn.py`, `resolver.py`, `status.py`, `tests/test_status.py`,
+`tests/test_stubs.py`).
+
+**Phase 5 — host deploy (DONE).**
+- Deployed the four runtime files to `~/mass-resolver/`: `core.py`, `haconn.py`, `resolver.py`,
+  `status.py` (tests not deployed). Backup: **`/home/costea/mass-resolver/.inc4a-bak/20260629T200033Z/`**.
+- Checksums host==local (all four); modes preserved (664 core/haconn/status, 755 resolver); host
+  Python 3.5.2 `py_compile` clean; import check `status in CAPS`, `status not in _STUBS`.
+- Service **restarted successfully** (user-run sudo); 0 startup tracebacks.
+- `/command` auth: **401 without key / 200 with key**.
+- Direct status validated against live state:
+  - radio: `Playing 101 SMOOTH JAZZ at 27% volume.` — `content_kind=radio`, `spoken_text=null`.
+  - music: `Playing "Zeit" by Rammstein at 27% volume.` — `content_kind=track`.
+- **No speaker announcement** for status (ANNOUNCE count unchanged).
+- No-regression: `music`, `radio` play, `radio` find all OK via `/command`; playback baseline restored.
+
+**Phase 7 — HA script (DONE).**
+- Created **`script.media_status`** (alias **`Ceiling: Media Status (resolver)`**, mode `single`, **no
+  fields**). Sequence calls `rest_command.resolver_command` (`intent=status`, `params={}`),
+  `response_variable: r`, returns `{chat_text: r.content.chat_text}` via `stop` + `response_variable: resp`.
+- Structural readback: alias/mode/sequence/intent/params/`response_variable`/final-stop all correct;
+  **no `tts.speak`**, **no `set_conversation_response`**, **no fields**.
+- Invoked with `return_response=true` → service response exactly
+  **`{chat_text: "Playing 101 SMOOTH JAZZ at 27% volume."}`**; **no speaker announcement**.
+- Existing scripts **unchanged by SHA**: `play_music`, `play_radio`, `find_stations`.
+- **Not exposed to ChatGPT** (no expose API called).
+
+**Current state.** Inc 4A is **validated-but-unexposed**: the resolver capability and `script.media_status`
+are live and validated, but the script is **not exposed to the conversation agent**, so **ChatGPT cannot
+call it yet**. **Phase 9 exposure remains a separate explicit gate.**
+
+**Rollback.**
+- Resolver: restore the four files from `/home/costea/mass-resolver/.inc4a-bak/20260629T200033Z/`
+  (atomic 3-part: stub `status.py` + drop from `CAPS` + re-add to `_STUBS`); resolver restart is
+  approval-gated (user-run), never automatic.
+- HA script: **delete `script.media_status` + reload scripts** (brand-new entity; no existing script
+  touched). **No resolver rollback is needed for a script-only failure** (`/command` is independent and
+  was validated in Phase 5).

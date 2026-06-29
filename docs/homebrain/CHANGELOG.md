@@ -3,6 +3,31 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-06-29 — Inc 4A Status / Now-Playing: resolver capability + `script.media_status` DONE (validated-but-unexposed)
+
+- **What:** built and deployed the **`status` capability** (now-playing read) and created the HA script
+  **`script.media_status`** — **not exposed to ChatGPT** (Phase 9 exposure is a separate gate).
+- **Resolver (committed `f110d67`):** HA-state-primary, summary-only `StatusCapability`
+  (`resolve→validate→execute→CommandResult`); wired into `core.CAPS["status"]`, removed from `_STUBS`;
+  read-only HA REST reader `haconn.HA.get_entity_state()` (fresh per-call, not the shared event socket);
+  unconditionally silent (`spoken_text=None`). 160 unit tests pass.
+- **Phase 5 deploy (host):** deployed `core.py`, `haconn.py`, `resolver.py`, `status.py` to
+  `~/mass-resolver/` (backup `/home/costea/mass-resolver/.inc4a-bak/20260629T200033Z/`); checksums match,
+  modes preserved (664/664/664/755), host Python 3.5.2 `py_compile` clean. Service restarted; 0 tracebacks.
+  `/command` **401 without key / 200 with key**. Live validation: radio →
+  `Playing 101 SMOOTH JAZZ at 27% volume.` (`content_kind=radio`, `spoken_text=null`); music →
+  `Playing "Zeit" by Rammstein at 27% volume.` (`content_kind=track`). **No speaker announcement** for
+  status. No-regression: `music`/`radio` play/`radio` find all OK; playback baseline restored.
+- **Phase 7 (HA script):** `script.media_status`, alias `Ceiling: Media Status (resolver)`, mode
+  `single`, **no fields**; returns **exactly `{chat_text: "..."}`** via `stop`+`response_variable`
+  (validated by `return_response`); **no `tts.speak`**, **no `set_conversation_response`**. Existing
+  scripts **unchanged by SHA** (`play_music`, `play_radio`, `find_stations`). **Not exposed to ChatGPT.**
+- **State:** Inc 4A **validated-but-unexposed** — ChatGPT cannot call `script.media_status` yet.
+- **Rollback:** resolver = restore four files from the backup above (restart approval-gated); HA script =
+  delete `script.media_status` + reload (no resolver rollback needed for a script-only failure).
+- See `plans/2026-06-29-inc4a-status-now-playing.md` (Execution outcome) and
+  `2026-06-29-inc4a-status-now-playing-design.md`.
+
 ## 2026-06-28 — F1-R music-only migration DONE (`script.play_music` synchronous, ChatGPT relays chat_text)
 
 - **What:** re-migrated **`script.play_music` only** to the resolver `/command` path using the

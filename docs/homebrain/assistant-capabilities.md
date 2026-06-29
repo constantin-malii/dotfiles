@@ -52,6 +52,14 @@ ChatGPT is the fallback for everything else and for natural-language requests.
 "set volume to N". The raw `media_player.ceiling_speakers` is also not exposed (keeps ChatGPT on the
 guarded resolver surface).
 
+**Built but NOT exposed — Inc 4A `script.media_status` (status / now-playing), 2026-06-29:** the
+now-playing **status** capability is implemented and validated end-to-end (resolver `/command` `status`
+intent + the HA script `script.media_status` returning `{chat_text}` via `stop`+`response_variable`,
+silent — `spoken_text=null`, no announcement). It is **deliberately NOT exposed to the conversation
+agent yet** — exposure is a separate gate (Inc 4A Phase 9). **Until then ChatGPT cannot call it** and
+must still treat "what's playing" as not-yet-available (see the roadmap table below). Status:
+**validated-but-unexposed.**
+
 ## Honest failure feedback (Inc 0)
 
 When `play_music` can't find a match in the **local** library, the resolver speaks the truth on the
