@@ -1,11 +1,13 @@
 # F1-R — ChatGPT Tool Result Relay (Design Addendum)
 
 **Date:** 2026-06-28
-**Status:** **Phase-0 PASS (2026-06-28)** — Option **A+B** (script `stop`/`response_variable` return +
-verbatim agent instruction) is **proven** to relay `chat_text` to the OpenAI agent as a hard tool
-result. Next executable step: the **music-only re-migration plan**
-([plans/2026-06-28-F1-R-music-remigration.md](plans/2026-06-28-F1-R-music-remigration.md)). Option D
-(custom `llm.Tool`) is **not needed now** (kept as a documented fallback).
+**Status:** **Music migration DONE (2026-06-28)** — Option **A+B** (script `stop`/`response_variable`
+return + verbatim agent instruction) is live for `script.play_music`: ChatGPT relays
+`CommandResult.chat_text` as the hard tool result (G1 exact; no-match honest). See the *Outcome* of
+[plans/2026-06-28-F1-R-music-remigration.md](plans/2026-06-28-F1-R-music-remigration.md). Radio/find
+stay on the event path. Option D (custom `llm.Tool`) **not needed** (documented fallback). A separate
+Speaker-reconnect bug was found and is tracked in
+[plans/2026-06-28-speaker-reconnect-bugfix.md](plans/2026-06-28-speaker-reconnect-bugfix.md).
 **Parent:** [F1 — Synchronous Command Result Framework](2026-06-28-F1-synchronous-command-result-design.md)
 **Triggered by:** T11 Gate G1 failure — see the *Outcome* section of
 [plans/2026-06-28-F1-T11-T12-script-migration.md](plans/2026-06-28-F1-T11-T12-script-migration.md).

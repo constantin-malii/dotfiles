@@ -148,3 +148,27 @@ radio/find. **Stop for review.**
   event fallback → stop). Rollback preserves `/command` + event adapter + `mass_sync_request` +
   radio/find ✓.
 - **No implementation performed** — this document is design only.
+
+---
+
+## Outcome — EXECUTED & DONE (2026-06-28)
+All gates ran on the host; `script.play_music` is **left in the migrated state** (not rolled back).
+
+- **G1 backup:** `~/script_backups/play_music.preF1R.json` (original event version) ✅
+- **Apply + readback:** new sequence live; **no `set_conversation_response`**, **no `tts.speak`**;
+  returns `{chat_text: r.content.chat_text}` via `stop`/`response_variable` ✅
+- **Direct test (no playback):** `call_service … return_response` →
+  `{'chat_text': "Zzz Direct Test isn't in your local library yet."}` ✅
+- **Gate G1 — `play Rammstein`:** ChatGPT reply `Playing Rammstein.` = **exact `chat_text`** (verbatim
+  relay via the new agent instruction); music played; **0 duplicate TTS**; restored PLAYING log present ✅
+- **No-match — `play My Way`:** ChatGPT relayed the honest `chat_text` (`"My Way" isn't in your local
+  library yet.`); **no incorrect playback** ✅ — *this is the exact T11 failure, now fixed.*
+- **Event fallback:** `mass_play_request` still dispatches + plays ✅ · **`/command`** 200/401 ✅
+- **Separate issue found (not F1-R):** the resolver's **Piper announce** was failing with
+  `BrokenPipeError` after the mid-session HA restart — root cause: `haconn.HA.announce()` swallows the
+  send error so `Speaker.speak()`'s reconnect-once never fires. Recovered immediately by a resolver
+  restart (announce verified working again). Permanent fix tracked separately:
+  [plans/2026-06-28-speaker-reconnect-bugfix.md](2026-06-28-speaker-reconnect-bugfix.md).
+
+**Verdict:** F1-R music-only migration **DONE** — ChatGPT now relays `CommandResult.chat_text` as the
+hard tool result. Radio/find remain on the event path (not migrated).

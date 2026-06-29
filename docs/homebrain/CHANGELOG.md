@@ -3,6 +3,23 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-06-28 — F1-R music-only migration DONE (`script.play_music` synchronous, ChatGPT relays chat_text)
+
+- **What:** re-migrated **`script.play_music` only** to the resolver `/command` path using the
+  Phase-0-proven relay — the script **returns** `{chat_text: r.content.chat_text}` via `stop` +
+  `response_variable` (a hard tool result), with **no `set_conversation_response`** and **no
+  `tts.speak`** (resolver stays sole TTS owner). One line added to the OpenAI agent Instructions:
+  *"When a tool returns a chat_text field, relay that text verbatim."*
+- **Validated (Gates 1–8):** `play Rammstein` → ChatGPT reply `Playing Rammstein.` = **exact `chat_text`**;
+  music played; no duplicate TTS; restored PLAYING log present. `play My Way` → ChatGPT relayed the
+  honest `"My Way" isn't in your local library yet.` with no playback (the T11 failure, now fixed).
+  Direct `return_response` test returned the expected `chat_text`. Event fallback and `/command`
+  (200/401) intact. Backup at `~/script_backups/play_music.preF1R.json`.
+- **Left migrated** (not rolled back). **Radio/find untouched** (still event-path). No new tools; no
+  model change (gpt-4o-mini kept).
+- See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
+  `plans/2026-06-28-F1-R-music-remigration.md` (Outcome).
+
 ## 2026-06-28 — F1-R Phase-0 probe: hard tool-result relay PROVEN (PASS)
 
 - **Why:** T11 proved `set_conversation_response` is ignored by the OpenAI Conversation agent for
