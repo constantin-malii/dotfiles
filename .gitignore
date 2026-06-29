@@ -45,3 +45,10 @@ temp/
 NOTES.md
 TODO.md
 scratch/
+
+# Python build artifacts
+__pycache__/
+*.pyc
+
+# SDD / superpowers scratch ledgers (machine-local, not tracked)
+.superpowers/
