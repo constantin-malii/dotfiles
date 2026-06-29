@@ -1,13 +1,14 @@
 # F1-R — ChatGPT Tool Result Relay (Design Addendum)
 
 **Date:** 2026-06-28
-**Status:** **Music migration DONE (2026-06-28)** — Option **A+B** (script `stop`/`response_variable`
-return + verbatim agent instruction) is live for `script.play_music`: ChatGPT relays
-`CommandResult.chat_text` as the hard tool result (G1 exact; no-match honest). See the *Outcome* of
-[plans/2026-06-28-F1-R-music-remigration.md](plans/2026-06-28-F1-R-music-remigration.md). Radio/find
-stay on the event path. Option D (custom `llm.Tool`) **not needed** (documented fallback). A separate
-Speaker-reconnect bug was found and is tracked in
-[plans/2026-06-28-speaker-reconnect-bugfix.md](plans/2026-06-28-speaker-reconnect-bugfix.md).
+**Status:** **F1-R COMPLETE (2026-06-29)** — Option **A+B** (script `stop`/`response_variable` return +
+verbatim agent instruction) is live for **all three** exposed scripts: `script.play_music`
+([music plan](plans/2026-06-28-F1-R-music-remigration.md)), and `script.play_radio` +
+`script.find_stations` ([radio/find plan](plans/2026-06-29-F1-R-radio-find-migration.md)). ChatGPT
+relays `CommandResult.chat_text` as the hard tool result (verbatim for clean text; harmless cosmetic
+tidying of verbose RadioBrowser station names). Option D (custom `llm.Tool`) **not needed** (documented
+fallback). The separate Speaker-reconnect bug found during this work was fixed + deployed
+([bugfix plan](plans/2026-06-28-speaker-reconnect-bugfix.md)).
 **Parent:** [F1 — Synchronous Command Result Framework](2026-06-28-F1-synchronous-command-result-design.md)
 **Triggered by:** T11 Gate G1 failure — see the *Outcome* section of
 [plans/2026-06-28-F1-T11-T12-script-migration.md](plans/2026-06-28-F1-T11-T12-script-migration.md).

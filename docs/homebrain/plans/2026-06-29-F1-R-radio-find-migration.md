@@ -163,3 +163,30 @@ No new tools; no model change (gpt-4o-mini); no Inc 2; no resolver code change (
   1, find 1) ✓; rollback per script, `/command` + event fallback preserved ✓; no new tools / model /
   Inc 2 ✓.
 - **No implementation performed** — design only.
+
+---
+
+## Outcome — EXECUTED & DONE (2026-06-29)
+Both scripts migrated and left in place; radio/find now relay `chat_text` as a hard tool result.
+
+**Stage A — `script.play_radio` (accepted):**
+- Backup `~/script_backups/play_radio.preF1R.json`; applied; readback clean (no `set_conversation_response`,
+  no `tts.speak`, returns `chat_text`).
+- Conversational: `play jazz` → `Playing 101 SMOOTH JAZZ.` and `play country radio` → `Playing .977 Country.`
+  relayed **verbatim**; `play Hit FM`/`play Romanian radio` relayed the **right** station but ChatGPT
+  cosmetically tidied verbose RadioBrowser names (accepted — substance correct, no misrouting). Success
+  is **silent** from Piper (stream is the confirmation); no-match (`play Flibberwock radio`) →
+  `I couldn't find a station for Flibberwock.` with **one** Piper announcement and no playback.
+- The no-match also demonstrated the **Speaker reconnect fix live** (first announce hit a stale socket →
+  auto-reconnect → retry spoke). `/command` 200/401; event fallback intact.
+
+**Stage B — `script.find_stations` (this run):**
+- Backup `~/script_backups/find_stations.preF1R.json`; applied; readback clean.
+- Ground-truth `/command find jazz` `chat_text` was **stable** across calls. ChatGPT relayed **all three**
+  stations **in order**, none omitted/invented, meaning unchanged (only title-case + Oxford-comma +
+  "jazz" framing — harmless). Resolver spoke the list **once**; **no duplicate TTS**; **no playback**.
+- `/command` 200/401; `find` event fallback intact.
+
+**State:** `play_music`, `play_radio`, `find_stations` all synchronous (relay `chat_text`);
+`mass_sync_request` + event adapter + `/command` intact; no new tools; gpt-4o-mini unchanged. Rollback
+backups retained per script (`*.preF1R.json`). **F1-R is complete across all three exposed scripts.**

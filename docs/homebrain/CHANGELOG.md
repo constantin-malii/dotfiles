@@ -20,6 +20,22 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
   `plans/2026-06-28-F1-R-music-remigration.md` (Outcome).
 
+## 2026-06-29 — F1-R radio/find migration DONE (`play_radio` + `find_stations` synchronous)
+
+- **What:** migrated the two remaining exposed radio scripts to the resolver `/command` path using the
+  proven hard-return pattern — each script **returns** `{chat_text: r.content.chat_text}` via `stop` +
+  `response_variable` (intent `radio`, `mode: play`/`find`). **No `set_conversation_response`**, **no
+  `tts.speak`**; resolver stays sole TTS owner. Existing fields/mapping preserved verbatim. Migrated one
+  at a time with per-script backups (`play_radio.preF1R.json`, `find_stations.preF1R.json`).
+- **`play_radio` (Stage A):** success plays + ChatGPT relays `Playing <station>.` (verbatim for clean
+  names; cosmetic tidying of verbose RadioBrowser names — accepted, no misrouting); success silent from
+  Piper; no-match → one honest Piper line + no playback. (Also exercised the Speaker reconnect fix live.)
+- **`find_stations` (Stage B):** ChatGPT relayed the full station list **in order, none omitted/invented**
+  (only harmless formatting); resolver spoke the same list once; no duplicate TTS; no playback.
+- **State:** all three exposed scripts (`play_music`, `play_radio`, `find_stations`) now synchronous;
+  `/command` 200/401, event adapter, and `mass_sync_request` intact; no new tools; gpt-4o-mini unchanged.
+  **F1-R complete.** See `plans/2026-06-29-F1-R-radio-find-migration.md` (Outcome).
+
 ## 2026-06-28/29 — Speaker WebSocket reconnect bug FIXED & DEPLOYED
 
 - **Symptom:** after an HA restart mid-session, every resolver Piper announcement failed with
