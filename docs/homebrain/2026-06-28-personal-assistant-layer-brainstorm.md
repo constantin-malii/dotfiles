@@ -162,6 +162,38 @@ A new, **containerized** service (modern Python) beside the resolver. Owns its d
 
 ---
 
+## 4A. Architecture Pattern Analysis (⟲ Added 2026-06-28)
+
+§4 chose *where the service lives*. This section evaluates the *internal patterns* the design leans on, against four simpler alternatives, and explains why the composite is best on the criteria that matter (multiple clients, privacy, future satellites, future MCP, notes/reminders/receipts, media handoff).
+
+### The five patterns we adopt
+1. **Hub-and-spoke companion.** `homebrain-companion` is the central **policy + context + memory hub**; clients (satellite, mobile, web, HA Assist, dashboard, automation, MCP) are **thin spokes** that submit context; HA and `mass-resolver` are **downstream systems** the hub orchestrates. One brain, many edges.
+2. **Client adapter / output adapter.** Every input client **normalizes into a common request** (`InteractionContext` / `AssistantRequest`, §13A) via an *input adapter*; every output is **selected by routing policy** and rendered by an *output adapter* (text · source-device audio · ceiling/media zone · satellite voice · push · dashboard · silent). Adding a client = adding an adapter, **not** changing the core.
+3. **`ResponseRoutingPolicy`.** Deterministic, privacy-aware, confirmation-aware, room/person-aware-later (§6A.5). Output destination is a *decision*, never a wired default.
+4. **Event bus (HA).** HA carries **events, entities, notifications, delivery**. It does **not** own reasoning, memory, or long-term assistant state. HA is transport + actuation; the companion is the brain.
+5. **Context store.** The companion's **own store** holds short-term referents ("the second one") *and* durable notes/reminders/decisions — **never rely solely on ChatGPT memory.**
+
+### Simpler alternatives, and why each falls short
+- **PCL inside `mass-resolver`:** couples stateful private data to the pure media executor, pins it to Python 3.5.2, shares blast radius. Loses privacy isolation and independent iteration. (§4 A.)
+- **Mostly inside HA:** HA's entity/helper model is wrong for documents/memory/recall, and it would make HA the brain (violates pattern 4) and tie personal data to HA's upgrade cadence. (§4 C.)
+- **Satellites directly control outputs:** hard-codes "input device = output device", with no central policy and no privacy gate → private content spoken on shared zones, no cross-client coherence. Directly violates §6A.
+- **ChatGPT memory only:** not durable, not local, not private, not deterministically queryable, not truthful (the F1-R lesson), and gives no indexable referents. Loses everything pattern 5 provides.
+
+### Why the composite wins, by criterion
+| Criterion | Why hub + adapters + policy + event-bus + store wins |
+|---|---|
+| **Multiple clients** | Input adapters normalize any client to one request shape; one brain serves all; zero per-client logic duplication. |
+| **Privacy** | Deterministic policy + `privacy_level` gating in **one** place; data local-first in **one** owned store. Alternatives scatter or expose it. |
+| **Future satellites** | A satellite is just another client adapter + output adapter; routing already abstracts destination → **no re-architecture**. |
+| **Future MCP / custom tools** | MCP is another spoke *and* the companion can **expose its own capabilities as MCP tools** over the same `resolve→validate→execute→CommandResult` lifecycle. |
+| **Notes / reminders / receipts** | Require a durable, queryable, private store (pattern 5) — only the dedicated companion store provides it; HA and ChatGPT-memory cannot. |
+| **Media handoff** | The hub orchestrates downstream: media intents delegate to `/command`; resolver stays pure and the sole media-TTS owner. Clean seam. |
+
+### Conclusion
+Adopt the composite. It is the only option that simultaneously delivers **one brain, many thin edges, deterministic privacy/routing, a private durable store, and a clean downstream handoff**. Each simpler alternative optimizes a single axis at the cost of privacy, durability, or coupling. (Reinforces §4–§5 and §18.)
+
+---
+
 ## 5. Recommended Architecture
 
 **`homebrain-companion`: a containerized sibling that owns conversation + memory + personal data, reuses the resolver's lifecycle and `CommandResult`/relay contracts, delegates device actions to the resolver `/command`, and delegates device-native primitives (timer firing, notifications, ceiling TTS) to Home Assistant.**
@@ -468,6 +500,94 @@ Applying the database-selection workflow to this profile (tiny volume; light rel
 
 ---
 
+## 13A. Formal Request/Response Contract (⟲ Added 2026-06-28)
+
+Model the PCL boundary like an **LLM / tool-call API**. Just as an LLM request carries *messages + tools + metadata + session + client constraints*, the PCL **`AssistantRequest`** carries *home-aware* context: who, where, what device, how private. **Design principle: the client does not decide the final output route** — it supplies **context + capabilities + hints**; the deterministic `ResponseRoutingPolicy` (§6A.5) decides where output goes.
+
+### `AssistantRequest` — request envelope
+```jsonc
+{
+  "request_id": "uuid",
+  "client": {
+    "client_type": "mobile|web|satellite|ha_assist|dashboard|automation|mcp",
+    "client_id": "kitchen-sat-01",
+    "source_device": "...",
+    "source_room": "kitchen",
+    "capabilities": ["voice_input","voice_output","screen","notification","camera","file_upload"]
+  },
+  "actor": {
+    "user_id": "constantin | null",
+    "user_confidence": 0.0,           // identity certainty (0..1); gates privacy, fail-safe low
+    "household_role": "adult | child | guest | null"   // later phase
+  },
+  "conversation": {
+    "conversation_id": "uuid",
+    "turn_id": "uuid",
+    "previous_request_id": "uuid | null",
+    "referents_available": ["last_list","last_options","last_draft","current_topic"]
+  },
+  "input": {
+    "mode": "text|voice|image|file|event",
+    "text": "play the second one",
+    "attachments": []                 // references only; blobs NEVER inlined to the LLM
+  },
+  "intent": {                          // optional; filled by client, HA, or the LLM
+    "name": "note|reminder|decide|recall|draft|media|...",
+    "params": { },
+    "confidence": 0.0
+  },
+  "routing_hints": {                   // HINTS ONLY — the policy decides, not the client
+    "reply_mode": "text|voice|both|silent",
+    "privacy_level": "public|household|private",
+    "target_device": "... | null",
+    "target_room": "... | null",
+    "target_person": "... | null"
+  },
+  "safety": {
+    "requires_confirmation": false,
+    "allowed_side_effects": ["write_note","set_reminder","play_media","announce"]
+  }
+}
+```
+- **`routing_hints` are hints, not directives.** A satellite may *prefer* voice but cannot *force* private content onto a shared zone — the policy can override every hint.
+- **`actor.user_confidence` + `privacy_level` drive the fail-safe** (§18.4.2): low confidence / unknown privacy → least-disclosive route (text-to-source, silent aloud).
+- **`safety.allowed_side_effects`** bounds what the request may do — the companion **refuses** side effects not in the list (capability scoping; matters most for `mcp` / `automation` clients).
+- **`intent` is optional:** deterministic clients pre-fill it; otherwise the LLM resolves intent from `input.text`.
+
+### Response — `CommandResult` at the external boundary (locked C§3)
+```jsonc
+{
+  "ok": true,
+  "request_id": "uuid",
+  "chat_text": "Playing the second station, Classic Vinyl HD.",  // always present; relayed via F1-R
+  "spoken_text": null,                  // optional; null = silent
+  "error": null,                         // | { "code", "reason" }
+  "metadata": { },                       // capability-specific (stations[], note_id, ...)
+  "routing_decision": {                  // policy output — auditable; HA delivers it
+    "channels": ["text_source"],         // e.g. ["satellite_voice","phone_notification"]
+    "spoke_aloud": false,
+    "confirmation_required": false,
+    "reason": "private content -> source text only"
+  },
+  "actions": []                          // suggested follow-ups ("say 'play the first one'")
+}
+```
+- The external response **stays `CommandResult`** — `routing_decision` is an **extension field inside it**, not a second contract (holds C§3 / "no second external relay"). ChatGPT still consumes `chat_text` verbatim via F1-R; `routing_decision` is for **HA delivery + the audit log**.
+- `routing_decision.channels` is the **abstract channel intent**; HA's output adapters resolve it to concrete entities and deliver (the §18.2(2) seam, made concrete).
+
+### Why model it like an LLM API
+| LLM API request | PCL `AssistantRequest` |
+|---|---|
+| `messages` / `input` | `input` (+ `conversation` history & referents) |
+| `tools` | `intent` + `safety.allowed_side_effects` (what may be invoked) |
+| `metadata` / `session` | `request_id` / `conversation_id` / `turn_id` / `previous_request_id` |
+| client modality constraints | `client.capabilities` + `routing_hints` |
+| system / policy | `ResponseRoutingPolicy` — **server-side, never the client** |
+
+Same discipline: a **structured envelope** carries everything the server needs to decide; the **client states constraints but not the decision**; the **response is one typed result**. The home-aware twist is that **"where the answer goes" is a first-class server decision**, not an implicit per-client default.
+
+---
+
 ## 14. MVP Proposal
 
 **Goal:** prove the sibling-service shape + truthful memory at lowest privacy/operational risk, reusing the resolver's contracts and the F1-R relay.
@@ -601,7 +721,7 @@ If a future change blurs two of these again, it is wrong. That is the design's l
 5. **Later gated:** receipts (meta → image → OCR), multi-user, semantic memory, cloud.
 
 ### 18.6 Conclusion
-The design is **sound and buildable as specified**, and the satellite correction strengthens rather than complicates it — because the right abstraction (`InteractionContext` + a deterministic `ResponseRoutingPolicy`, with the companion deciding and HA delivering) makes "everything to the ceiling" just one configurable policy, and makes the MVP a trivial special case of it. The critical discipline to hold during implementation is **#18.4.3 — keep routing and privacy in deterministic code, never the LLM.** With that held, the system can grow from "notes and reminders, text-first" all the way to "whole-house, multi-room, identity-aware household communication" **without re-architecting** — only by enriching the policy and lifting gates in order. **Recommendation: approve the design; begin Track P at P0 once the two gates pass; keep Track S in design until satellites are installed and inventoried.**
+The design is **sound and buildable as specified**, and the satellite correction strengthens rather than complicates it — because the right abstraction (`InteractionContext` + a deterministic `ResponseRoutingPolicy`, with the companion deciding and HA delivering) makes "everything to the ceiling" just one configurable policy, and makes the MVP a trivial special case of it. The critical discipline to hold during implementation is **#18.4.3 — keep routing and privacy in deterministic code, never the LLM.** With that held, the system can grow from "notes and reminders, text-first" all the way to "whole-house, multi-room, identity-aware household communication" **without re-architecting** — only by enriching the policy and lifting gates in order. The pattern analysis (§4A) confirms the composite (hub-and-spoke + adapters + deterministic policy + HA event-bus + private context store) beats every simpler alternative on the criteria that matter, and the formal envelope (§13A) gives it an LLM-API-shaped boundary where the client states constraints but the server decides routing. **Recommendation: approve the design; begin Track P at P0 once the two gates pass; keep Track S in design until satellites are installed and inventoried.**
 
 ---
 
