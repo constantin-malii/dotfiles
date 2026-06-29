@@ -2,7 +2,7 @@
 # Music Assistant provider-aware resolver -- thin entrypoint + HA event adapter.
 # Runs on the homebrain HOST. Python 3.5 compatible (no f-strings).
 #
-# Capability modules: music (live), radio/news/acquire/status (stubs). Dispatch + honest
+# Capability modules: music/radio/status (live), news/acquire (stubs). Dispatch + honest
 # failure feedback in core. Transport in wsutil; MA in maconn; HA in haconn; config in config.
 #
 # Secrets (0600, NEVER logged): ~/mass-resolver/.ma_token  ~/mass-resolver/.ha_token

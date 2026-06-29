@@ -2,7 +2,7 @@
 """Contract tests for not-yet-implemented capabilities. Run: python tests/test_stubs.py"""
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import news, acquire, status
+import news, acquire
 
 
 class StubTest(unittest.TestCase):
@@ -19,9 +19,6 @@ class StubTest(unittest.TestCase):
 
     def test_acquire_stub(self):
         self._check(acquire.acquire, "acquire")
-
-    def test_status_stub(self):
-        self._check(status.status, "status")
 
 
 if __name__ == "__main__":

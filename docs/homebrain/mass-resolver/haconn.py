@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # Home Assistant WebSocket client + TTS announce (honest failure feedback). Python 3.5 safe.
 import logging
+import http.client
+import json
 import wsutil
 
 LOG = logging.getLogger("resolver")
@@ -31,6 +33,28 @@ class HA(object):
         self.cmd_id += 1
         wsutil.ws_send(self.s, {"id": self.cmd_id, "type": "call_service",
                                 "domain": domain, "service": service, "service_data": data})
+
+    def get_entity_state(self, entity_id):
+        """Read-only HA REST GET /api/states/<entity_id>.
+
+        Uses a FRESH per-call HTTP connection (NOT the shared event WebSocket self.s), so it never
+        interleaves with the subscribe_events read loop and is safe to call from the HTTP server
+        thread. Returns the parsed state dict on HTTP 200; raises on any failure. Never logs the token.
+        """
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        try:
+            headers = {"Authorization": "Bearer " + (self.token or ""), "Accept": "application/json"}
+            conn.request("GET", "/api/states/" + entity_id, headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()
+            if resp.status != 200:
+                raise IOError("HA REST GET states/%s -> HTTP %s" % (entity_id, resp.status))
+            return json.loads(body.decode("utf-8"))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def announce(self, message, settings):
         svc = (getattr(settings, "tts_service", "") or "").strip()
