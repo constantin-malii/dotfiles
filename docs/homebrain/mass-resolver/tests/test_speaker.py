@@ -44,6 +44,46 @@ class SpeakerTest(unittest.TestCase):
         sp.speak("x")  # first announce raises -> reconnect -> good
         self.assertEqual(good.said, ["x"])
 
+    def test_real_announce_failure_triggers_reconnect(self):
+        import haconn
+        made = []
+        def factory():
+            h = haconn.HA("host", 1, "tok"); h.sent = []
+            if not made:                       # first HA: send dies (dead socket)
+                def boom(domain, service, data):
+                    raise BrokenPipeError(32, "Broken pipe")
+                h.call_service = boom
+            else:                              # reconnect HA: send works
+                h.call_service = lambda d, s, dd: h.sent.append((d, s, dd))
+            h.connect = lambda: None
+            made.append(h)
+            return h
+        sp = speaker.Speaker(_RealishSettings(), factory)
+        sp.speak("hello")
+        self.assertEqual(len(made), 2)                 # exactly one reconnect
+        self.assertEqual(len(made[1].sent), 1)         # second HA actually announced
+
+    def test_both_attempts_fail_no_infinite_loop(self):
+        import haconn
+        made = []
+        def factory():
+            h = haconn.HA("host", 1, "tok")
+            def boom(domain, service, data):
+                raise BrokenPipeError(32, "Broken pipe")
+            h.call_service = boom; h.connect = lambda: None
+            made.append(h); return h
+        sp = speaker.Speaker(_RealishSettings(), factory)
+        sp.speak("hello")                              # must not raise, must not loop
+        self.assertEqual(len(made), 2)                 # tried twice, then gave up
+        self.assertIsNone(sp.ha)                       # cleared for a fresh attempt next time
+
+
+class _RealishSettings(object):
+    announce_failures = True
+    tts_service = "tts.speak"
+    tts_data = {"media_player_entity_id": "{entity}", "message": "{msg}"}
+    ceiling_entity = "media_player.ceiling_speakers"
+
 
 def _raiser(*a, **k):
     raise IOError("ws gone")
