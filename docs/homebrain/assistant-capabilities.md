@@ -28,16 +28,17 @@ and this repo doc is the human source of truth we keep them in sync with:
 
 ---
 
-## Currently exposed to ChatGPT (verified 2026-06-27)
+## Currently exposed to ChatGPT (verified 2026-06-29)
 
-12 entities are exposed to the conversation assistant:
+**12 entities** are exposed to the conversation assistant (verified live via
+`homeassistant/expose_entity/list`):
 
 | Tool (entity) | What it does |
 |---|---|
-| `script.play_music` | Play LOCAL music by song/album/artist/playlist (fires `mass_play_request` → resolver) |
+| `script.play_music` | Play LOCAL music by song/album/artist/playlist (resolver `/command` music) |
 | `script.play_radio` | Play radio by **name / country / genre / language** (resolver: favorites-first → RadioBrowser) |
 | `script.find_stations` | **Find/list** stations by genre/country; speaks the top 3 |
-| `script.ceiling_play_radio` | Legacy: play a station by name (kept as fallback, not retired) |
+| `script.media_status` | **What's playing** — song/station + volume on the ceiling speakers; **read-only & silent** (resolver `status` intent → hard-return `{chat_text}`) |
 | `script.ceiling_pause` / `ceiling_resume` / `ceiling_stop` | Transport |
 | `script.ceiling_next` / `ceiling_previous` | Skip within a local queue |
 | `script.ceiling_volume_up` / `ceiling_volume_down` | **Relative** volume change (±%, default 10) |
@@ -50,15 +51,19 @@ ChatGPT is the fallback for everything else and for natural-language requests.
 **Deliberately NOT exposed:** `ceiling_set_volume` (absolute set) — removed from ChatGPT to stop the
 "volume up 10%" → "sets to 10%" confusion; absolute set still works via the local phrase
 "set volume to N". The raw `media_player.ceiling_speakers` is also not exposed (keeps ChatGPT on the
-guarded resolver surface).
+guarded resolver surface). **`script.ceiling_play_radio`** (legacy play-by-name) is **not exposed to
+ChatGPT** either — it was un-exposed during Inc 1 (prompt v4; `play_radio` handles named stations) and is
+kept only for the local sentence-trigger layer. (No MA / `media_player.*` entities are exposed.)
 
-**Built but NOT exposed — Inc 4A `script.media_status` (status / now-playing), 2026-06-29:** the
-now-playing **status** capability is implemented and validated end-to-end (resolver `/command` `status`
-intent + the HA script `script.media_status` returning `{chat_text}` via `stop`+`response_variable`,
-silent — `spoken_text=null`, no announcement). It is **deliberately NOT exposed to the conversation
-agent yet** — exposure is a separate gate (Inc 4A Phase 9). **Until then ChatGPT cannot call it** and
-must still treat "what's playing" as not-yet-available (see the roadmap table below). Status:
-**validated-but-unexposed.**
+**Status / now-playing — ACTIVE (Inc 4A, exposed 2026-06-29):** `script.media_status` answers
+*what's playing* on the ceiling speakers by calling the resolver **`status`** intent and relaying its
+**`chat_text`** (e.g. `Playing 101 SMOOTH JAZZ at 27% volume.` / `Playing "Zeit" by Rammstein at 27%
+volume.` / `Nothing is playing right now.`). It reports the **song or radio station and the volume**
+when available. It is **read-only** (no playback/transport/config side effects) and **silent**
+(`spoken_text=null`; no Piper announcement) — the relayed text is the only output. Raw
+`media_player.ceiling_speakers` stays unexposed. **Conversationally validated 2026-06-29:** the four
+status prompts call the tool and relay the real now-playing/volume (no fabrication; silent); ChatGPT may
+lightly re-case/rephrase the text (substance correct — same accepted cosmetic behavior as F1-R radio).
 
 ## Honest failure feedback (Inc 0)
 
@@ -72,7 +77,7 @@ ceiling speakers ("Sorry, I couldn't find X in the local library") via local Pip
 |---|---|
 | **News** headlines (spoken) and news stations | Inc 2 |
 | **Search & acquire** a song/artist (Lidarr) | Inc 3 |
-| **"What's playing"/status**, sleep timer, shuffle favorites | Inc 4 |
+| Sleep timer, shuffle favorites (**"what's playing"/status is now ACTIVE** — `script.media_status`) | Inc 4 |
 | Streaming services (Tidal/Qobuz/Spotify), YouTube Music | later / disabled |
 
 Music is **local-only** today. If asked for something not in the library, say it isn't available
@@ -82,7 +87,10 @@ locally yet and that acquisition is on the roadmap.
 
 - **Music:** call `play_music` with the user's phrase as the query; leave `media_type` empty unless the
   user explicitly says "album"/"artist"/"playlist".
-- **Radio:** call `play_radio` (station for a name; country/genre/language for those); call `find_stations` for "find/list stations". `ceiling_play_radio` is a legacy fallback.
+- **Radio:** call `play_radio` (station for a name; country/genre/language for those); call `find_stations` for "find/list stations". (`ceiling_play_radio` is **not exposed** to ChatGPT — local layer only.)
+- **Status / now-playing:** for "what's playing", "what song/station is on", "what volume is it", or
+  "is anything playing", call `script.media_status` and **relay its `chat_text`**. Do **not** guess or
+  invent the song, station, or volume; if it says nothing is playing, say that.
 - **Transport / volume:** use the `ceiling_*` tools; never use a raw media_player service.
 - **Don't invent content.** If nothing matches, the speaker announces the miss — don't report success.
 - **Capability questions:** answer from the "currently exposed" + "not available yet" lists above.
@@ -185,6 +193,7 @@ WHAT YOU CAN DO
 - Find and list radio stations by genre or country (the speakers read out the top few options).
 - Control playback on the ceiling speakers: pause, resume, stop, skip to next or previous track,
   and turn the volume up or down.
+- Tell you what is currently playing on the ceiling speakers, including the song or station and volume.
 - Tell the local weather.
 - For other, non-home questions, answer briefly from general knowledge.
 
@@ -207,6 +216,11 @@ FINDING STATIONS
   results aloud, so just say you're finding them (for example, "Here are some jazz stations.") — do
   NOT state whether any were or weren't found.
 
+CHECKING WHAT'S PLAYING
+- When the user asks what's playing, what song or station is on, whether anything is playing, or what
+  the current volume is, ALWAYS use the status tool. Relay exactly what it returns. Do NOT guess or
+  invent the song, station, or volume. If the tool says nothing is playing, say that.
+
 WHICH SOURCE TO USE (in order of preference)
 1. The household's personal music library first.
 2. Radio — for a station by name, or a country, genre, or language request.
@@ -223,6 +237,7 @@ WHAT YOU CANNOT DO
   system handles that phrase.
 
 RULES
+- When a tool returns a chat_text field, relay that text verbatim.
 - Don't invent stations or workarounds. For things you truly cannot do (listed above), say "I can't
   do that yet."
 - Don't claim a song is playing unless you actually used the play tool.

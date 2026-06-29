@@ -3,6 +3,28 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-06-29 — Inc 4A Phase 9 §2a–§2b: `script.media_status` exposed to ChatGPT
+
+- **What:** added a `description` to **`script.media_status`** and **exposed it to the `conversation`
+  assistant** (WS `homeassistant/expose_entity`, `assistants:["conversation"]`, `should_expose:true`).
+- **Description added:** "Reports what is currently playing on the ceiling speakers … Read-only. Use
+  when the user asks what's playing, what song or station is on, whether anything is playing, or the
+  current/how-loud volume." Structural readback unchanged otherwise (alias/mode/sequence intact, **no
+  `tts.speak`**, **no `set_conversation_response`**, no fields); hard return still
+  `{chat_text: "..."}`; silent (no announcement).
+- **Exposure delta (verified):** baseline **11 → 12**; **added `script.media_status`**, **removed none**,
+  **changed none**. `play_music`/`play_radio`/`find_stations` still exposed; raw
+  `media_player.ceiling_speakers` and all MA/`media_player.*` entities **not** exposed; no unrelated
+  scripts exposed.
+- **§3–§4 DONE (2026-06-29):** appended the STATUS Instructions (WHAT YOU CAN DO bullet + CHECKING
+  WHAT'S PLAYING block; verbatim-relay line preserved). Conversational validation via
+  `conversation.openai_conversation`: all four status prompts called `script.media_status` and relayed
+  the real state (exact `27%` volume in every reply → tool genuinely used; **no fabrication**); **silent**
+  (no announcement). No-regression: play music / play radio / find stations all still route+work. Exposed
+  set verified **exactly 12** (baseline + `media_status`); no `media_player`/MA exposed. Baseline restored.
+  **Inc 4A Phase 9 COMPLETE.**
+- See `plans/2026-06-29-inc4a-status-now-playing.md` (Execution outcome).
+
 ## 2026-06-29 — Inc 4A Status / Now-Playing: resolver capability + `script.media_status` DONE (validated-but-unexposed)
 
 - **What:** built and deployed the **`status` capability** (now-playing read) and created the HA script

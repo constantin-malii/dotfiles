@@ -367,3 +367,28 @@ call it yet**. **Phase 9 exposure remains a separate explicit gate.**
 - HA script: **delete `script.media_status` + reload scripts** (brand-new entity; no existing script
   touched). **No resolver rollback is needed for a script-only failure** (`/command` is independent and
   was validated in Phase 5).
+
+**Phase 9 — exposure §2a–§2b DONE (2026-06-29).**
+- **§2a:** added a `description` to `script.media_status` (touched only the new script); structural
+  readback unchanged (alias `Ceiling: Media Status (resolver)`, mode `single`, `rest_command` /
+  `intent=status` / `params={}` / `stop`+`response_variable: resp`, **no `tts.speak`**, **no
+  `set_conversation_response`**, no fields, `description_matches`); hard return `{chat_text}` confirmed;
+  silent (ANNOUNCE count unchanged).
+- **§2b:** exposed only `script.media_status` to the `conversation` assistant.
+  **Exposure delta: baseline 11 → 12; added `script.media_status`; removed none; changed none.**
+  `play_music`/`play_radio`/`find_stations` remain exposed; `media_player.ceiling_speakers` and
+  MA/`media_player.*` remain unexposed.
+- **§3 (docs) — DONE in repo (uncommitted):** `assistant-capabilities.md` (table + active STATUS note +
+  routing rule + prompt block incl. CHECKING WHAT'S PLAYING and the verbatim-relay line; corrected
+  `ceiling_play_radio` as not-exposed), `CHANGELOG.md`, this plan.
+- **§3 (Instructions) DONE** — append-only STATUS additions (WHAT YOU CAN DO bullet + CHECKING WHAT'S
+  PLAYING block) pasted in the HA UI; the verbatim-relay RULES line preserved; model settings unchanged.
+- **§4 (conversational validation) DONE (2026-06-29):** all four status prompts via
+  `conversation.openai_conversation` called `script.media_status` and relayed the real now-playing state
+  (exact volume `27%` present in every reply — unobtainable without the tool; **no fabrication**);
+  **silent** (ANNOUNCE 65→65 across the status prompts). No-regression: `play jazz radio`,
+  `play Rammstein`, `find jazz stations` all routed and executed (resolver log: RADIO PLAYING / Rammstein
+  PLAYING / mode=find). Exposure sanity: **exactly 12** (baseline 11 + `script.media_status`), no
+  `media_player`/MA exposed. Baseline restored (idle). *Note:* ChatGPT sometimes lightly re-cases/rephrases
+  the relayed text (e.g. "101 Smooth Jazz") — substance correct (same accepted cosmetic behavior as F1-R
+  radio). **Inc 4A Phase 9 COMPLETE — `script.media_status` live and conversationally validated.**
