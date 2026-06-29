@@ -113,12 +113,38 @@ needed field (e.g. cannot distinguish radio from a track, or lacks the station n
 and **only with explicit approval** — add read-only `players/get` / `player_queues/get` wrappers to
 `maconn.py` as enrichment/fallback. **Not used in v1; no MA probe in v1.**
 
-**Radio-vs-track discriminator:** derive `source ∈ {music, radio, none}` from HA attributes (e.g.
-`media_content_type`, presence of `media_artist` vs a station-style `media_title`). The exact field
-mapping is confirmed by the **no-host HA attribute capture** (Phase 2) before the normalizer is coded.
+**Empirical field mapping (CONFIRMED by the Phase-2 capture, 2026-06-29).** Observed HA states:
+`playing | paused | idle` (also tolerate `off`/`unavailable`). `media_content_type` is **`music` for
+both radio and tracks** — **not** a discriminator. Now-playing fields are **stale in `idle`** (they
+retain the last item) and present-but-paused in `paused`, so the normalizer **gates now-playing on
+`state == "playing"`**.
 
-**Normalized `metadata` (built by a pure normalizer):** `player_state`, `source`, `title`, `artist`,
-`station`, `media_content_type`, `volume_level` (0–1), `volume_percent` (0–100 int), `available`.
+| Normalized `metadata` field | From HA attribute | Notes (from captures) |
+|---|---|---|
+| `player_state` | `state` | `playing \| paused \| idle \| off \| unavailable` |
+| `content_kind` | derived from `media_content_id` prefix | `library://radio/…` → `radio`; `library://track/…` (or other non-radio) → `music`; absent / not-playing → `none` |
+| `station` | `media_album_name` | **radio only** — observed station name (e.g. `101 SMOOTH JAZZ`) |
+| `title` | `media_title` | music = track title; radio = current stream track (intermittent) |
+| `artist` | `media_artist` | **`"[unknown]"` or empty → `None`** (never render "by [unknown]"); absent for radio in Capture 1 |
+| `album` | `media_album_name` | **music only** (same HA attr that carries the radio station) |
+| `volume_level` / `volume_percent` | `volume_level` | reliable in every state; `volume_percent` = round-half-up(×100) |
+| `media_content_id` | `media_content_id` | raw, kept for diagnostics / discriminator |
+| `available` | derived | `False` if entity missing or `state == unavailable` |
+
+**Discriminator (locked):** `media_content_id` prefix — `library://radio/` = radio, `library://track/`
+= track/music — evaluated **only when `state == "playing"`** (the id is retained stale in `idle`). If
+`state == playing` but `media_content_id` is absent → `content_kind = music` if a `title` exists, else a
+generic "something is playing" (no fabrication).
+
+**Naming-collision note (real-data):** HA exposes an attribute literally named **`source`** (value
+`"Music Assistant Queue"`). This is **not** our discriminator. To prevent confusion the normalized
+discriminator is named **`content_kind`** (renamed from the earlier `source`); the HA `source` attribute
+is ignored in v1.
+
+**Fields ignored in v1:** `media_content_type` (always `music`), `media_position` / `media_duration`
+(unreliable — `0`/`0` at track start), `media_position_updated_at`, and the static/UI attrs
+(`shuffle`, `repeat`, `group_members`, `supported_features`, `app_id`, `source`, `device_class`, `icon`,
+`entity_picture*`, `mass_player_type`, `active_queue`).
 
 ---
 
@@ -135,22 +161,26 @@ outside the enum). `intent = "status"`.
   "spoken_text": null,
   "chat_text": "Playing \"Du Hast\" by Rammstein at 35% volume.",
   "error": null,
-  "metadata": { "player_state": "playing", "source": "music",
-                "title": "Du Hast", "artist": "Rammstein", "station": null,
-                "media_content_type": "music",
+  "metadata": { "player_state": "playing", "content_kind": "music",
+                "title": "Du Hast", "artist": "Rammstein", "station": null, "album": null,
+                "media_content_id": "library://track/41",
                 "volume_level": 0.35, "volume_percent": 35, "available": true },
   "actions": []
 }
 ```
 
-**Success — radio playing:** `chat_text: "Playing 101 SMOOTH JAZZ at 35% volume."`,
-`metadata.source:"radio"`, `metadata.station:"101 SMOOTH JAZZ"`, `title/artist: null`.
+**Success — radio playing:** `chat_text: "Playing 101 SMOOTH JAZZ at 27% volume."`,
+`metadata.content_kind:"radio"`, `metadata.station:"101 SMOOTH JAZZ"` (from `media_album_name`),
+`title` = current stream track if present (intermittent), `artist` per `[unknown]` rule. Station is the
+**reliable anchor**; appending the current stream track is an optional later enhancement.
 
-**Success — paused:** `chat_text: "Playback is paused — \"Du Hast\" by Rammstein."`,
-`player_state:"paused"`.
+**Success — paused:** `chat_text: "Playback is paused — \"Du Hast\" by Rammstein."` (music) /
+`"Playback is paused — 101 SMOOTH JAZZ."` (radio) / `"Playback is paused."` (fallback);
+`player_state:"paused"`. Paused metadata reflects the *paused item* (valid), not stale.
 
-**Success — nothing playing (idle/off):** `ok:true` (the query succeeded), `source:"none"`,
-`chat_text:"Nothing is playing right now."`
+**Success — nothing playing (idle/off):** `ok:true` (the query succeeded), `content_kind:"none"`,
+`chat_text:"Nothing is playing right now."` **Stale `media_*` attributes retained in `idle` are
+ignored** (proven in Capture 2) — output is gated on `state == "playing"`/`"paused"`.
 
 **Error / unavailable:**
 ```json
@@ -178,10 +208,13 @@ Field rules:
 
 **Edge cases the normalizer must handle (tested in §5):** `volume_level` **null**, **0.0**, and
 **near-silent** (e.g. 0.09) — report truthfully, never infer audibility; **rounding** of
-`volume_percent` (define: round half-up, e.g. 0.355 → 36); **missing artist** (music with title only);
-**missing station/title** (radio with no name; "playing" but media fields empty during the transition
-window → report `playing` with whatever is known, don't fabricate); **`off` vs `idle`** (map both to
-`source:"none"`; preserve the distinct `player_state`).
+`volume_percent` (round half-up, e.g. 0.355 → 36); **`media_artist == "[unknown]"` or empty → `None`**
+(omit "by …"; observed in Capture 4); **missing/intermittent radio `media_artist`** (absent in Capture
+1) — lead with the station; **missing station/title** ("playing" but media fields empty during the
+transition window → report what's known, don't fabricate); **stale metadata in `idle`** (Capture 2 —
+ignored, gated on `state`); **`off` vs `idle`** (both → `content_kind:"none"`; preserve the distinct
+`player_state`); **missing `media_content_id` while playing** → `content_kind=music` if a title exists,
+else generic.
 
 ---
 
@@ -233,15 +266,18 @@ summary-only).
 
 | # | Scenario | Setup | Expected `chat_text` | `ok` | `metadata` checks |
 |---|---|---|---|---|---|
-| 1 | **Music playing** | play a local track | `Playing "<title>" by <artist> at N% volume.` | true | `source=music`, title/artist set, `volume_percent` |
-| 2 | **Radio playing** | play a station | `Playing <station> at N% volume.` | true | `source=radio`, `station` set, no fabricated artist |
-| 3 | **Paused** | pause playback | `Playback is paused — …` | true | `player_state=paused` |
-| 4 | **Idle / off** | stopped / nothing queued | `Nothing is playing right now.` | true | `source=none` (both off & idle) |
-| 5 | **Unavailable / error** | HA read fails / entity unavailable | `Sorry, I couldn't check what's playing right now.` | false | `error.code=unavailable`, `available=false` |
+| 1 | **Music playing** | play a local track (`media_content_id` `library://track/…`) | `Playing "<title>" by <artist> at N% volume.` | true | `content_kind=music`, title set, artist per `[unknown]` rule, `volume_percent` |
+| 2 | **Radio playing** | play a station (`library://radio/…`) | `Playing <station> at N% volume.` | true | `content_kind=radio`, `station`=`media_album_name`, no fabricated artist |
+| 3 | **Paused** | pause playback | `Playback is paused — …` | true | `player_state=paused`, valid (not stale) |
+| 4 | **Idle / off** | stopped / nothing queued (stale `media_*` retained) | `Nothing is playing right now.` | true | `content_kind=none` (both off & idle); stale fields ignored |
+| 5 | **Unavailable / error** | HA REST read fails / entity unavailable | `Sorry, I couldn't check what's playing right now.` | false | `error.code=unavailable`, `available=false` |
 
-**Edge-case unit tests (fixtures from the Phase-2 capture; no live needed):** null volume; zero volume;
-near-silent volume (0.09); rounding (0.355 → 36); missing artist; missing station/title; off vs idle;
-playing-but-empty media fields (no fabrication).
+**Edge-case unit tests (fixtures = the four Phase-2 captures; no live needed):** discriminator via
+`media_content_id` prefix (radio vs track); `media_artist == "[unknown]"` → None (omit "by"); missing/
+intermittent radio artist (lead with station); **stale `idle` metadata ignored** (Capture 2 → "nothing
+playing"); **paused retains valid metadata** (Capture 3); null volume; zero volume; near-silent volume
+(0.09); rounding (0.355 → 36); missing station/title; playing-but-empty media fields (no fabrication);
+missing `media_content_id` while playing.
 
 **Standard gates (as in F1-R):**
 - **Direct `/command`** (`intent=status`) → expected `CommandResult`; `200` w/ key, `401` w/o.

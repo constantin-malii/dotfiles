@@ -88,6 +88,17 @@ station name):**
 **Exit criteria:** confirmed HA field mapping + discriminator recorded in the design.
 **Rollback:** n/a (capture is user-pasted text; no host/HA change).
 
+### Outcome — capture DONE (2026-06-29)
+Four sanitized `media_player.ceiling_speakers` captures (radio playing, idle-after-radio, paused radio,
+track playing) were reviewed; the **confirmed field mapping + discriminator are recorded in design §2**
+(empirical mapping table). Key results: states seen = `playing/paused/idle`; **`media_content_type` is
+`music` for both radio and track** (not a discriminator); **discriminator = `media_content_id` prefix**
+(`library://radio/` vs `library://track/`, only when `state==playing`); **radio station =
+`media_album_name`**; **`media_artist` may be `"[unknown]"`/intermittent → `None`**; **`idle` retains
+stale `media_*`** → gate on `state`; HA has a colliding `source` attribute → normalized field renamed to
+**`content_kind`**. **No host access used** (user-pasted). MA WS fallback **not** needed. Phase 3 fixtures
+= these four captures.
+
 ---
 
 ## Phase 3 — Repo-only TDD for `StatusCapability`
@@ -97,10 +108,12 @@ station name):**
 
 Build the **deterministic core first**:
 1. **Normalizer (pure):** `normalize_status(ha_state) -> metadata` mapping the HA `state`+`attributes`
-   (fields from Phase 2) → `player_state ∈ {playing,paused,idle,off,unavailable}`,
-   `source ∈ {music,radio,none}`, `title/artist/station`, `media_content_type`,
-   `volume_level (0–1)`, `volume_percent (0–100 int, round half-up)`, `available`. Includes the
-   Phase-2-confirmed radio-vs-track discriminator.
+   (fields confirmed in Phase 2 / design §2) → `player_state ∈ {playing,paused,idle,off,unavailable}`,
+   `content_kind ∈ {music,radio,none}` (via `media_content_id` prefix, **only when `state==playing`**;
+   gated otherwise), `title` (`media_title`), `artist` (`media_artist`, **`"[unknown]"`/empty → None**),
+   `station` (`media_album_name`, radio only), `album` (`media_album_name`, music only),
+   `media_content_id`, `volume_level (0–1)`, `volume_percent (0–100 int, round half-up)`, `available`.
+   **Stale `media_*` in `idle` is ignored** (gate on `state`); paused metadata is treated as valid.
 2. **`chat_text` builder (pure):** `status_chat_text(metadata) -> str` — one self-sufficient summary
    (state + title/artist-or-station + volume; idle → "Nothing is playing right now."). **No aspect, no
    parsing.**
@@ -111,22 +124,25 @@ Build the **deterministic core first**:
 
 **Unit tests — fixtures from the Phase-2 capture:**
 
-| Test | Asserts |
+| Test (fixture = Phase-2 capture) | Asserts |
 |---|---|
-| music playing | `ok=true`, `source=music`, title/artist set, `volume_percent`, summary `chat_text` |
-| radio playing | `ok=true`, `source=radio`, `station` set, no fabricated artist |
-| paused | `player_state=paused`, "paused" wording |
-| idle / off | `ok=true`, `source=none`, "Nothing is playing right now." (both off & idle) |
+| music playing (Capture 4) | `ok=true`, `content_kind=music` (via `library://track/`), `title` set, `volume_percent`, summary `chat_text` |
+| radio playing (Capture 1) | `ok=true`, `content_kind=radio` (via `library://radio/`), `station`=`media_album_name`, no fabricated artist |
+| paused (Capture 3) | `player_state=paused`, "paused" wording, metadata treated as valid (not stale) |
+| idle (Capture 2 — stale `media_*` present) | `ok=true`, `content_kind=none`, "Nothing is playing right now." (**stale fields ignored**) |
+| off | `content_kind=none`; distinct `player_state=off` preserved |
 | unavailable / error | seam raises / entity unavailable → `ok=false`, `error.code=unavailable`, `available=false`, `spoken_text=None` |
+| **discriminator** | `media_content_id` prefix decides radio vs music; only honored when `state==playing` |
+| **`[unknown]` artist** | `media_artist=="[unknown]"` (Capture 4) → `artist=None`; chat omits "by" |
+| **missing/intermittent radio artist** | radio with no `media_artist` (Capture 1) → lead with station, no fabrication |
 | **silence on success** | success result `spoken_text is None` |
 | **silence on error** | error result `spoken_text is None` (so `announce_failures` can't make status speak) |
-| null volume | `volume_level=None` handled; `volume_percent` omitted/None, no crash |
+| null volume | `volume_level=None` handled; `volume_percent` None, no crash |
 | zero volume | `0.0 → 0%` |
 | near-silent volume | `0.09 → 9%` reported truthfully |
 | rounding | `0.355 → 36` (round half-up; pin the rule) |
-| missing artist | music, title only → no fabricated artist |
-| missing station/title | radio with no name / empty media fields while `playing` → no fabrication |
-| off vs idle | both → `source=none`; distinct `player_state` preserved |
+| missing station/title | empty media fields while `playing` → no fabrication |
+| missing `media_content_id` while playing | `content_kind=music` if title present, else generic; no crash |
 
 **Exit criteria:** all tests green on a 3.5-compatible interpreter; every row covered.
 **Rollback:** n/a (repo). **Commit:** only when asked.
