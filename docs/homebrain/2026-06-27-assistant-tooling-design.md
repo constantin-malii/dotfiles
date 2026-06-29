@@ -118,13 +118,21 @@ says "playing" while nothing actually matched.
   validated; exposed to ChatGPT (`play_radio`/`find_stations`; legacy `ceiling_play_radio` un-exposed
   from ChatGPT but kept for the local sentence-trigger layer). Plan:
   `plans/2026-06-27-inc1-radio.md`. Residual (deferred, see §10): gpt-4o-mini sometimes declines a
-  genre-play or mis-states results — addressed by synchronous play-result + a gated model eval.
-- **Foundation F1 — Synchronous Command Result Framework. (NEXT — design done 2026-06-28; impl plan
-  pending review.)** Replace fire-and-forget with a synchronous `CommandResult` (ok + spoken_text +
-  chat_text + structured metadata + error code/reason) via a `resolve→validate→execute` capability
-  interface and a resolver request/response (HTTP) adapter, so ChatGPT no longer infers outcomes.
-  Migrates Music + Radio; makes News/Status/Acquisition honest by construction. Additive/dual-path
-  (event path kept during migration). Design: `2026-06-28-F1-synchronous-command-result-design.md`.
+  genre-play or mis-states results — the "mis-states results" half is **resolved by F1-R** (ChatGPT now
+  relays the real `chat_text`); the occasional tool-selection decline remains the gated model eval.
+- **Foundation F1 + F1-R — Synchronous Command Result Framework. ✅ DONE (2026-06-29).** Replaced
+  fire-and-forget with a synchronous `CommandResult` (ok + spoken_text + chat_text + structured metadata
+  + error code/reason) via a `resolve→validate→execute` capability interface and an authenticated
+  resolver HTTP `/command` adapter, so ChatGPT no longer infers outcomes. All three exposed scripts
+  (`play_music`, `play_radio`, `find_stations`) now relay `CommandResult.chat_text` as a **hard tool
+  result** via `stop` + `response_variable` (the F1-R relay; `set_conversation_response` was proven
+  ignored by the OpenAI agent for tool-called scripts and is **not** used). Resolver remains the sole TTS
+  owner (no `tts.speak` in scripts). Additive/dual-path (event adapter kept live). A Speaker
+  WebSocket-reconnect bug found during the work was fixed + deployed. Docs:
+  `2026-06-28-F1-synchronous-command-result-design.md`,
+  `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md`, and the plans under `plans/` (music re-migration,
+  radio/find migration, speaker-reconnect bugfix). **See §10 for the production-state / validation /
+  rollback closeout.**
 - **Inc 2 — News.** `news.json` sources; stations + headlines/TTS.
 - **Inc 3 — Acquisition.** `acquire` via Lidarr, guarded.
 - **Inc 4 — Status + household.** now-playing/status + sleep timer + shuffle favorites.
@@ -164,6 +172,38 @@ Two deliberate, reversible notes:
 
 ## 10. Open items / backlog (tracked, not in scope of a specific increment yet)
 
+### F1 / F1-R closeout (✅ DONE 2026-06-29)
+
+**Final production state:**
+- `script.play_music`, `script.play_radio`, `script.find_stations` each call
+  `rest_command.resolver_command`, capture `response_variable`, and **return `{chat_text:
+  r.content.chat_text}` via `stop` + `response_variable`** (hard tool result).
+- **None** use `set_conversation_response`. **None** call `tts.speak`. The **resolver is the sole TTS
+  owner** (Piper speaks `spoken_text`).
+- Resolver HTTP **`/command` is live and authenticated** (`X-Resolver-Key`, bound to the internal
+  HA-reachable interface). The **event adapter remains live** (`mass_play_request` / `mass_radio_request`).
+  **`mass_sync_request` (Lidarr) untouched.** **gpt-4o-mini unchanged.** **No new tools exposed.**
+
+**Validation summary:**
+- Music: success (`play Rammstein` → exact `Playing Rammstein.` + plays) and no-match (`play My Way` →
+  honest "not in your local library") validated.
+- Radio play: success (`play jazz` / `play country radio` exact; `play Hit FM` / `Romanian radio` correct
+  station, cosmetic name tidy) and no-match (one honest Piper line, no playback) validated.
+- Find stations: `find jazz stations` → full list relayed in order, none omitted/invented; resolver speaks
+  the list once; no playback.
+- ChatGPT relays `chat_text` through the **hard tool-return** mechanism (`set_conversation_response` was
+  proven ignored for tool-called scripts — see the F1-R addendum). The Speaker WebSocket-**reconnect bug**
+  found during this work was **fixed and deployed**.
+
+**Rollback:** per-script `*.preF1R.json` backups retained (`~/script_backups/`); restoring any one
+reverts just that script to its event path while **`/command` stays live** and the **event path remains
+available** — independent and non-disruptive.
+
+### Other backlog
+- **Tidy verbose RadioBrowser station names before they enter `chat_text`** (optional, UX): RadioBrowser
+  names like `Hit FM (UKraine) - 128kb/s` are functional but verbose; ChatGPT already trims them
+  cosmetically. If future UX warrants strictly-verbatim relay, clean the names resolver-side so `chat_text`
+  is presentation-ready. Low priority; no correctness impact.
 - Semantic match gap (e.g. "Angel" → German "Engel"): ChatGPT should map; resolver may add
   alias/translation hints.
 - Music breadth decision (streaming Tidal/Qobuz vs Soulseek) — informs `acquire` and the
@@ -174,10 +214,11 @@ Two deliberate, reversible notes:
   (ChatGPT text can be optimistic for missing items; speaker is authoritative) is now addressed by the
   F1 `CommandResult` framework — see `2026-06-28-F1-synchronous-command-result-design.md`. No longer a
   standalone backlog item.
-- **Assistant model evaluation (gated, 2026-06-28):** gpt-4o-mini occasionally fails tool-selection
-  (declines a genre-play; mis-states results). Keep gpt-4o-mini for now. Evaluate gpt-4o (or
-  gpt-4.1-mini) **only after Foundation F1** is complete **and only if** tool-selection failures still
-  persist. Model is a one-field change; do not change it preemptively.
+- **Assistant model evaluation (gated; F1 gate now satisfied, 2026-06-29):** F1/F1-R is complete and the
+  "mis-states results" failure mode is resolved (ChatGPT relays the real `chat_text`). The remaining
+  trigger is the occasional **tool-selection decline** (e.g. declining a genre-play). Keep gpt-4o-mini
+  for now; evaluate gpt-4o (or gpt-4.1-mini) **only if** that decline still recurs in normal use. Model
+  is a one-field change; do not change it preemptively.
 - **Hardware volume buttons → ceiling speakers (Home Mode)** — see §11. Deferred until the
   resolver, ChatGPT integration, and the local-music workflow are complete/stable.
 

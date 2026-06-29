@@ -20,6 +20,21 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
   `plans/2026-06-28-F1-R-music-remigration.md` (Outcome).
 
+## 2026-06-29 — F1 / F1-R CLOSEOUT (accepted complete)
+
+- **Marked F1/F1-R DONE** in the umbrella roadmap (`2026-06-27-assistant-tooling-design.md` §7) with a
+  production-state / validation / rollback closeout in §10.
+- **Final production state:** `play_music`, `play_radio`, `find_stations` all return
+  `{chat_text: r.content.chat_text}` via `stop` + `response_variable` (hard tool result); none use
+  `set_conversation_response`; none call `tts.speak`; resolver is sole TTS owner; `/command` live +
+  authenticated; event adapter live; `mass_sync_request` untouched; gpt-4o-mini unchanged; no new tools.
+- **Validation:** music success + no-match; radio play success + no-match; find stations — all validated;
+  ChatGPT relays `chat_text` via the hard tool-return mechanism; Speaker reconnect bug fixed + deployed.
+- **Rollback:** per-script `*.preF1R.json` backups retained; `/command` and the event path stay available
+  even if a script is rolled back (independent).
+- **Backlog added:** optionally tidy verbose RadioBrowser station names before they enter `chat_text`
+  (UX only, no correctness impact).
+
 ## 2026-06-29 — F1-R radio/find migration DONE (`play_radio` + `find_stations` synchronous)
 
 - **What:** migrated the two remaining exposed radio scripts to the resolver `/command` path using the
