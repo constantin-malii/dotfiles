@@ -75,16 +75,19 @@ class MusicCapability(capability.Capability):
                   "candidate": hit["candidate"], "media_type": hit["media_type"]}
             if resolved["dry_run"]:
                 md["played"] = False
+                LOG.info("[DRY-RUN] req=%s WOULD PLAY %s (provider=%s)", rid, hit["uri"], hit["provider"])
                 return cr.ok(self.name, rid, "Would play " + hit["candidate"] + ".",
                              spoken_text=None, metadata=md)
             pr = ma.play(ctx.settings.queue_id, hit["uri"])
             if pr and "error_code" in pr:
                 md["played"] = False
+                LOG.error("req=%s PLAY FAILED for %s", rid, hit["uri"])
                 return cr.err(self.name, rid, "play_failed", "play failed",
                               "I found " + hit["candidate"] + ", but couldn't start it.",
                               spoken_text="I found " + hit["candidate"] + ", but couldn't start playback.",
                               metadata=md)
             md["played"] = True
+            LOG.info("req=%s PLAYING %s (provider=%s)", rid, hit["uri"], hit["provider"])
             return cr.ok(self.name, rid, "Playing " + hit["candidate"] + ".",
                          spoken_text=None, metadata=md)
         finally:
