@@ -150,3 +150,51 @@ Source-confirmed from MA 2.9.3 (architecture unchanged on `main`). Draft upstrea
 - **(C) pause vs stop → VIABLE.** `player_queues.stop()` is `@handle_play_action`-decorated (takes the lock → 30 s wait mid-resolution). `player_queues.pause()` is **NOT** decorated and calls the internal unlocked pause → returns immediately. **`media_pause` is the lowest-friction interrupt that avoids the 30 s lock wait.** Caveat: a paused queue auto-converts to (locked) `stop()` after ~30 s.
 - **(E) Local patch → feasible, deferred.** Smallest/low-risk: shorten the 30 s hard timeout in `get_player_lock` (the "proceed without lock" fallback already runs unsynchronized). Most-correct/medium-risk: move `_load_item` outside the lock in `play_index` (needs a cancellation check). Maintenance burden across add-on updates → prefer upstream.
 - **(B) HA-script-level serialization** (not MA code): a helper that rejects/queues overlapping commands while a YTM play is starting ("starting music, please wait") — would avoid the contention at our layer and is the realistic path to safe ChatGPT exposure. To be designed if/when we pursue assistant YTM.
+
+### 8a. Workaround C — EMPIRICALLY VALIDATED (2026-06-24)
+
+Live test from a clean state, with a guard confirming resolution was genuinely in progress (the `play_media` worker thread was still blocking at the +3 s mark before the interrupt was issued):
+
+| Command issued DURING YTM resolution | Returned in | Result | New "previous holder appears stuck" |
+|---|---|---|---|
+| `media_pause` (Pink Floyd, lock-free path) | **0.0 s** | ok | **0** |
+| `media_stop` (Queen, locked path) | **45.0 s** | client-timeout (≥45 s) | **3** |
+
+Matches the code prediction exactly: `pause()` is **not** `@handle_play_action`-decorated → skips the PLAYBACK lock → instant. `stop()` **is** decorated → blocks for the full resolution and stacks 30 s "stuck holder" timeouts. Test harness: `scratchpad/pause_test2.py`; raw log: `scratchpad/pause_test.txt`.
+
+**Important caveat (from code, not yet load-tested):** a paused MA queue **auto-converts to a (locked) `stop()` after ~30 s**. So `pause` buys a ~30 s window of lock-free responsiveness, *not* a durable hold. ⇒ In the assistant design, **the serializer (B) is the load-bearing guard; `pause` (C) is only the fast-feedback / interject primitive.** Design: [`ytm-guarded-assistant.md`](./ytm-guarded-assistant.md).
+
+### 8b. Live integration test of the serializer FAILED — deeper root cause (2026-06-24)
+
+The `ytm_guard.py` serializer passed 7/7 local unit tests but **FAILED the live HA/MA integration test** (`scratchpad/live_guard_test.*`): 19 new "previous holder appears stuck" across the stop/switch scenarios. Root-cause diagnostics (`scratchpad/diag_timing.*`, `diag2.*`) then established the real timing, which invalidates a core assumption:
+
+| Source | `play_media` returns | audio (`state=playing`) | `media_stop` after that |
+|---|---|---|---|
+| **radio** (control) | **+4.3 s** (ok) | +6.1 s | **0.0 s, clean, 0 stuck** |
+| **YTM artist** | **did NOT return in 240 s** | +10 s (diag1) / never (diag2, degraded) | wedges: 45 s, +3 stuck |
+
+**Corrected root cause:** for YTM the MA PLAYBACK lock is held for the **entire `play_media` call**, which does **not return within any practical window** — it stays held *long after audio starts* (a stop at +14 s, 4 s after `playing`, still wedged). So:
+- `state==playing` does **NOT** mean the lock is free.
+- There is **no safe moment to issue `media_stop`/switch during YTM playback startup** (not at audio-start, not at any tested time before 240 s).
+- The serializer premise "defer the real stop until the in-flight play *exits*" fails: the play does not exit in time. The original wrapper made it worse by **forcing a `media_stop` at its 180 s ceiling while the lock was still held** — directly causing the wedges.
+
+**Untested lever — SINGLE-TRACK plays (senior re-analysis, 2026-06-24):** every YTM lock measurement to date used an **artist** URI (`ytmusic://artist/...`), which enqueues many items and (with `flow_mode`) muxes a continuous flow — so `play_index`/`_load_item` may resolve/pre-buffer **multiple items inside the lock** before `play_media` returns. The lock-hold scales with the size of the play operation. **Hypothesis: a single-TRACK play is the smallest critical section** — its `play_media` should return after that one track resolves (~14 s, like radio's ~4 s), releasing the lock so a subsequent `media_stop`/switch is clean. If true, the corrected serializer (never issue stop/play while in-flight; resolve every request to ONE track URI; pause for interim feedback) becomes viable. **Could NOT be tested 2026-06-24: YTM degraded to unplayable** (diag1 artist played @+10 s → diag2 never @240 s → diag3 never @90 s; track search returned None) — almost certainly Google-side rate-limiting from the day's repeated plays. Re-run `scratchpad/diag3.py` after a cool-down to confirm/refute single-track bounded return. Also still unfixed: the wrapper's ceiling-forced-stop bug (must change to never stop while a play worker is alive).
+
+### 8c. Single-track narrow test + DECISION: SHELVED (2026-06-24)
+
+After a ~30 min cool-down, ran the narrow single-track test (`scratchpad/narrow_single_track.{py,txt}`): resolve one concrete track URI → `play_media` → measure return + time-to-playback → `media_stop` after return → check no new "stuck" and BOTH Universal+protocol states sane.
+
+- **TRACK 1 (Bohemian Rhapsody, `ytmusic://track/utwMHfDZ6SA`): `play_media` did NOT return within 150 s, and the player never reached `playing` (uni/prot stayed idle).** 0/1 clean. Per the agreed decision rule ("if play_media does not return → shelve"), **the YTM client-side workaround is SHELVED.**
+- **Nuance (kept for honesty):** the track never reached playback (degradation signature), so the single-track *lock* hypothesis is **unproven, not strictly refuted** — a clean test needs a YTM that can actually play. But (a) `play_media` has never returned in bounded time for ANY YTM play all day (only radio returns, ~4 s), leaning against bounded single-track return; and (b) a source that can't play one track in 150 s after a cool-down is too unreliable to expose regardless of the lock. Revisit ONLY if YTM playback reliability is first restored (e.g., a yt-dlp / PO-token / add-on update), then re-run `narrow_single_track.py`.
+
+### 8d. Source-alternatives investigation (2026-06-25)
+
+To "get music working" beyond fighting the YTM lock, checked what else MA could use:
+- **MA configured music providers (only 3):** `ytmusic` (problematic), `radiobrowser` (healthy), `builtin`. No Plex/local/Spotify connected. MA *supports* adding `plex`, `filesystem_local/smb/nfs`, `spotify`, `tidal`, `qobuz`, `apple_music`, `jellyfin`, `subsonic`, etc. (provider manifests confirmed via WS `providers/manifests`). Adding a provider is **additive, reversible, and needs no add-on restart** (config save only).
+- **Plex/local pivot is BLOCKED — no music files exist.** SSH to host (read-only): Plex is running but serves **video/photo only** (`/media/MediaServerData` = Movies, TV Shows, Video, Photo, ProgrammingTutorials; 0 mp3, 0 flac, 3 stray m4a). `/home/costea` has no music; `/mnt/nas` not mounted. So a Plex/filesystem provider would have nothing to serve.
+- **MA add-on / yt-dlp version:** can't read programmatically (HA supervisor API → 401). MA server = **2.9.3** (schema 31). Updating the add-on (newer bundled yt-dlp) must be done in the HA UI.
+- **Self-inflicted load:** MA runs a full **YTM library sync every ~2 h** (artists/albums/tracks/playlists/podcasts) — a heavy recurring YTM workload that likely feeds the rate-limiting/degradation. Disabling it is a low-risk config lever.
+
+**Implication:** reliable assistant-controllable music needs a *well-behaved source* (radio already is; a streaming sub like **Spotify/Tidal/Qobuz/Apple** would resolve fast + stop clean like radio; or build a local library). YTM hardening (add-on update + disable sync) is possible but YTM stays inherently fragile. Awaiting user choice of source.
+
+**Final status:** workaround C/serializer is **NOT validated and is shelved.** Radio remains healthy and needs no guard. Still-true validated facts: `pause` is lock-free during resolution; `stop` during resolution wedges (§8a); for YTM the lock is held for the entire `play_media` call (§8b). YTM stays **unexposed to the LLM** — today's degradation reinforces that. Artifacts kept for a future attempt: `ytm_guard.py` (+ `test_ytm_guard.py`, has a known ceiling-forced-stop bug), `ytm-guarded-assistant.md`; rollback = delete those files.
