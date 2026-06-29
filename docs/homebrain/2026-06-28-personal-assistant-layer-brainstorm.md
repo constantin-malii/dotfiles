@@ -314,6 +314,29 @@ Given an `InteractionContext` **plus the result's content class/privacy**, the p
 
 > **Reject the hard-code.** "Satellite input always replies on the ceiling speakers" is **wrong** and must not be wired in. A reasonable *current practical default* may be: *satellite media/household commands → ceiling speakers; mobile/web → same client* — but that is a **policy default, overridable per `InteractionContext`**, not a fixed rule.
 
+### 6A.5.1 Routing precedence (⟲ Added 2026-06-28)
+
+When inputs conflict, the policy resolves them in this **fixed order** (earlier wins):
+
+1. **Safety / privacy rules (highest).** Private content must **not** be spoken on shared speakers by default; sensitive notes/receipts/reminders take a text/private route **or require confirmation**. *These can never be overridden by a lower rule* — a client hint or a "tell everyone" cannot force private content aloud without explicit confirmation.
+2. **Explicit user instruction.** "tell everyone", "send this to my phone", "say it in the kitchen" — an in-utterance directive beats defaults/hints (but still passes the safety gate above; e.g. "tell everyone <private thing>" → confirm first).
+3. **Capability / domain default.** media → ceiling speakers / media zone; personal reminder → source-client confirmation + reminder policy; receipt/note query → text/private by default.
+4. **Client capabilities.** what the device can actually do — screen present? voice output present? notification present? (Don't pick a channel the client can't render.)
+5. **Client routing hints.** `routing_hints.reply_mode` = voice/text/both/silent — a *preference*, **overridable by any rule above**.
+6. **System fallback (lowest).** the **safest available** route — usually **text/private**, else **silent + audit**.
+
+> The ordering encodes the core principle (§18.4.2): **privacy and safety dominate; the client's hint is the weakest signal; and when nothing else decides, fail safe.**
+
+**Worked examples (showing the override):**
+
+| Scenario | Winning rule | Decision |
+|---|---|---|
+| Satellite asks "what's my receipt total?" | (1) privacy | **Do not speak aloud by default** → text to source / phone; or confirm before speaking. Beats the satellite's voice default. |
+| Mobile asks a general question | (3) domain + (4) capability | Reply **on the mobile client**, text-first. |
+| Satellite asks to **play music** | (3) media default | Output to **ceiling speakers / media zone** (non-private, media) — delegate to `mass-resolver`. |
+| "**Tell everyone** dinner is ready" | (2) explicit instruction | **Household announcement** to selected satellites/whole-house — **confirmation if required** (non-private content, so confirm-then-broadcast). |
+| Automation fires a reminder | (3) reminder policy | Notify/speak per the **reminder's policy**, **not** the original client's hint; private reminder → push/text, not a shared-zone announce. |
+
 ### 6A.6 Ownership (architecture update)
 - **Home Assistant owns** the **satellite entities, routing primitives, assist pipelines, and room/device metadata** (which satellite is in which room, its capabilities, its pipeline binding) — and **executes** the actual audio/notification delivery to the chosen channel.
 - **`homebrain-companion` owns** communication **intent, memory, reminders, messages, follow-up context**, and **computes the routing decision** (it alone holds the content + `privacy_level` to decide *desired* channel). It expresses the decision declaratively; **HA executes** it.
