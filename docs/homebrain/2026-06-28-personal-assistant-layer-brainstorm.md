@@ -228,6 +228,82 @@ What HA provides / is used for:
 
 ---
 
+## 6A. Satellite / Whole-House Communication Model (⟲ Added 2026-06-28)
+
+**Premise (design correction).** The purchased voice satellites are intended to become **general household communication endpoints** — not just media-control microphones. This breaks the system's current core assumption that *output goes to the ceiling speakers*. With satellites, **where a request comes from and where its answer goes are separate decisions**, and the answer's destination depends on *who asked, from where, on what device, and how sensitive the content is*. Output destination becomes a **policy decision**, never a hard-coded default.
+
+### 6A.1 Satellites as general voice I/O endpoints
+Future voice I/O for: **questions, brainstorming, reminders, household messages, timers, notes, communication with family members, and media commands** — the full PCL surface, not just media.
+
+### 6A.2 Separate the conflated concepts
+The design must distinguish, as first-class and independent:
+- **input device** (where the utterance was captured)
+- **output device** (where the response is delivered — *not necessarily the same*)
+- **source room** and **target room / person**
+- **reply mode:** voice · text · both · silent
+
+Today these collapse into "mic → ceiling." That collapse must end before satellites carry real household communication.
+
+### 6A.3 Do not assume the ceiling speakers
+Illustrative content-class → channel mapping (made concrete by the policy in 6A.5):
+- **music / radio / media** → ceiling speakers / configured media zone
+- **personal answer** → the requesting satellite (only if non-private) **or** phone text
+- **family announcement** → selected satellites / whole house (**after confirmation**)
+- **receipts / notes** → **text-first**, optional voice confirmation
+- **reminders** → phone notification, satellite announcement, or both — per reminder policy **and** privacy
+- **mobile / web request** → reply on **that** client, text-first
+
+### 6A.4 `InteractionContext` (concept)
+Every interaction carries context that the routing decision consumes:
+
+| Field | Meaning |
+|---|---|
+| `client_type` | `satellite` \| `mobile` \| `web` \| … |
+| `source_device` | the specific device that captured the request |
+| `source_room` | room of the source device |
+| `user` | requesting user (if identity is available; see 6A.7) |
+| `reply_mode` | `voice` \| `text` \| `both` \| `silent` |
+| `privacy_level` | content sensitivity (e.g. `public` \| `household` \| `private`) |
+| `target_device` | explicit output device, if specified/derived |
+| `target_room` | explicit output room, if specified/derived |
+| `target_person` | explicit recipient, if specified/derived |
+| `conversation_id` | session linkage for short-term context (§8.1) |
+
+### 6A.5 `ResponseRoutingPolicy` (concept)
+Given an `InteractionContext` **plus the result's content class/privacy**, the policy **chooses one (or more) output channel(s)** from: **text** (to the source client) · **source-device audio** (the satellite that asked) · **ceiling speakers / media zone** · **push notification** · **dashboard** · **silent result**.
+
+**Default routing (policy-driven — explicitly NOT hard-coded):**
+- **Mobile / web clients →** reply on **that client, text-first**.
+- **Satellite clients →** reply through the **configured house voice/audio route only when** the response is **non-private** or **household/media-related**.
+- **Music / radio / media commands →** **ceiling speakers / configured media zone**.
+- **Private notes, receipts, reminders, personal questions →** **do not speak on the ceiling speakers by default**; **return text to the initiating client**, or **ask for confirmation before speaking aloud**.
+- **Household announcements →** route to **selected satellites / rooms / whole-house after confirmation**.
+- **Timers / reminders →** **confirm to the source client**; later notify/speak based on the reminder's policy.
+
+> **Reject the hard-code.** "Satellite input always replies on the ceiling speakers" is **wrong** and must not be wired in. A reasonable *current practical default* may be: *satellite media/household commands → ceiling speakers; mobile/web → same client* — but that is a **policy default, overridable per `InteractionContext`**, not a fixed rule.
+
+### 6A.6 Ownership (architecture update)
+- **Home Assistant owns** the **satellite entities, routing primitives, assist pipelines, and room/device metadata** (which satellite is in which room, its capabilities, its pipeline binding) — and **executes** the actual audio/notification delivery to the chosen channel.
+- **`homebrain-companion` owns** communication **intent, memory, reminders, messages, follow-up context**, and **computes the routing decision** (it alone holds the content + `privacy_level` to decide *desired* channel). It expresses the decision declaratively; **HA executes** it.
+- **`mass-resolver` remains** the deterministic **media/speaker executor** (ceiling / media zone) and the **sole TTS owner for the media path**.
+- The **`ResponseRoutingPolicy` is a shared contract** (a common vocabulary of channels) between companion (decides) and HA (delivers); the resolver continues to own media-zone output.
+
+> **TTS consistency (cf. locked C§4).** The "resolver is sole TTS owner" invariant applies to the **ceiling / media path**. **Satellite voice output is a *new, HA-delivered* path** — the companion never spins up its own TTS; it asks HA to speak on a satellite. This is exactly the "any voice output must go through the established path **or be explicitly designed later**" clause — and the satellite track (6A.8 / Track S) is that explicit later design. No second TTS path is created on the media zone.
+
+### 6A.7 Privacy rules
+- **Do not read receipts, private notes, or sensitive reminders aloud by default.** `privacy_level=private` content is never spoken on a shared zone without explicit confirmation.
+- **Require confirmation before whole-house announcements.**
+- **Support room / person targeting later** (deferred; needs satellite room metadata + targeting UX).
+- **Keep multi-user identity a later gated phase** (§11) **unless the satellites already provide reliable user identity** (e.g. per-device or voice ID surfaced by HA) — in which case identity may arrive earlier from satellite metadata, still behind a privacy review.
+
+### 6A.8 Roadmap impact
+- **PCL MVP is unchanged** (notes / durable reminders / light decisions / short-term referents) and is **text-first to the initiating client** — which *needs no routing engine*, so the MVP is unaffected by satellite work.
+- **Satellite integration is a required, separate design track ("Track S")** that must land **before real household communication is exposed** on satellites.
+- **Do not build satellite routing yet unless specifically approved.**
+- **First step (Track S):** **inventory satellite capabilities/entities after they are installed** — entities, room mapping, assist-pipeline binding, per-device TTS reachability (recall the ceiling path depends on the host fetching NAT-IP TTS URLs; satellites may differ), and whether they expose reliable user identity.
+
+---
+
 ## 7. ChatGPT / Tool Integration Model (⟲ Reconciled — bound to the F1-R relay)
 
 **Principle: expose *capabilities*, not *internals*; the LLM orchestrates, deterministic code executes/persists; and every exposed result rides the proven relay.**
@@ -296,7 +372,7 @@ Record types: **Notes** (text + tags + ts), **Decisions** (topic/options/chosen/
 Split the two concerns:
 
 1. **Intent + content + schedule** (companion-owned): the durable reminder record with a concrete `due_at`.
-2. **Firing + delivery** (HA-owned): at `due_at`, fire via **ceiling-announce** (room; works because the host fetches the NAT-IP TTS URL) and/or **mobile push** (the phone path, since phone TTS is unreachable). The companion must not speak directly (single-TTS-owner discipline, §6).
+2. **Firing + delivery** (HA-owned, **channel chosen by `ResponseRoutingPolicy`** — §6A.5): at `due_at`, deliver via the policy-selected channel(s) — **mobile push**, **source/target satellite announce**, **ceiling-announce**, or **silent + dashboard** — never a fixed default. **Privacy gate (§6A.7):** a `privacy_level=private` reminder is **not spoken on a shared zone by default** (text/push or confirm-first). The companion must not speak directly (single-TTS-owner discipline for the media path, §6/§6A.6).
 
 **Time parsing** is deterministic-with-LLM-assist: the LLM proposes structured time; **code normalizes to an absolute timestamp** in the home timezone and **echoes it for confirmation** ("Okay — tomorrow, Mon Jun 29, 9:00 AM?"). Confirming the *resolved* time prevents "set it for next year."
 
@@ -347,6 +423,7 @@ The PCL holds the most sensitive data in HomeBrain. Security is a first-class dr
 6. **Redaction at the boundary** when recall feeds the LLM for phrasing (don't pass full card numbers to draft a summary).
 7. **Authn between services:** `/companion` LAN-bound + shared-secret, same as `/command`. Don't expose it unauthenticated even on the LAN.
 8. **Multi-user is a security boundary, not just a feature** (below).
+9. **Aloud-output is privacy-gated (⟲ §6A.7).** Receipts, private notes, and sensitive reminders are **not spoken on shared zones (ceiling/satellites) by default**; whole-house announcements **require confirmation**. `privacy_level` on the `InteractionContext` (§6A.4) governs this, enforced by the `ResponseRoutingPolicy` (§6A.5).
 
 ### Family / multi-user (⟲ Reconciled)
 - Early phases: **single shared context** (whoever talks to the home). Simplest; means *all* stored data is household-visible — state this explicitly to users.
@@ -427,7 +504,9 @@ This is a **separate track ("Track P")** from the media increments. It must not 
 | **P5** | Multi-user / family | Identity from HA, per-user partitioning, explicit family sharing | Dedicated privacy/security review passed |
 | **P6** | Smart memory (opt-in) | Auto-learned prefs, semantic recall — opt-in + inspectable | Strong evidence of need; volume justifies |
 
-Coordination notes: **Inc 4** (media) introduces a *sleep timer* and "household" features — align timers/reminders ownership so they're not built twice (§9). Keep PCL tool descriptions and `assistant-capabilities.md` in lockstep when anything is exposed (the media side already treats that doc + the OpenAI Instructions as the source of truth for what ChatGPT may claim).
+**Track S — Satellite / whole-house communication (parallel design track; §6A).** A *separate* track from P0–P6, required **before** real household communication is exposed on satellites. Sequence: **S0** inventory satellite entities/rooms/pipelines/TTS-reachability/identity (after install) → **S1** `InteractionContext` capture → **S2** deterministic `ResponseRoutingPolicy` (text-to-source default) → **S3** privacy gating + confirmation flows → **S4** household announcements + room/person targeting. **Do not build satellite routing until specifically approved.** P0–P2 do **not** depend on Track S (the MVP is text-first to the source client — a degenerate routing case).
+
+Coordination notes: **Inc 4** (media) introduces a *sleep timer* and "household" features — align timers/reminders ownership so they're not built twice (§9, Appendix C§5). Keep PCL tool descriptions and `assistant-capabilities.md` in lockstep when anything is exposed (the media side already treats that doc + the OpenAI Instructions as the source of truth for what ChatGPT may claim).
 
 Each phase is independently shippable and abandonable. Never start a phase before its gate.
 
@@ -480,6 +559,52 @@ Each phase is independently shippable and abandonable. Never start a phase befor
 
 ---
 
+## 18. Final Analysis & Design Conclusion (designer's synthesis)
+
+This section is my own conclusion as the architect — taking the accepted decisions and the satellite input and resolving the remaining tensions into a single, buildable design. Where the inputs left a choice open, I make the call here.
+
+### 18.1 The one idea the whole design reduces to
+HomeBrain has **three concerns that were historically collapsed into one path** ("mic → resolver → ceiling"): *deterministic action*, *personal cognition/memory*, and *output delivery*. Every decision in this document is an instance of **pulling those three apart and giving each a single owner**:
+- **Action** → `mass-resolver` (deterministic, truthful, sole media-TTS owner).
+- **Cognition + memory** → `homebrain-companion` (stateful, private, the system of record).
+- **Delivery** → Home Assistant (entities, rooms, pipelines, notifications) — driven by a **policy**, not a default.
+
+If a future change blurs two of these again, it is wrong. That is the design's load-bearing invariant.
+
+### 18.2 Tensions I'm resolving, and the calls
+1. **Who decides routing — companion, HA, or the LLM?** **Conclusion: the companion decides; HA delivers; the LLM never decides.** Routing is a **pure, deterministic function** `route(InteractionContext, content_class, privacy_level) → [channel]`. It must be testable and predictable — the LLM may *phrase* a reply but must never choose *where private content is spoken*. This is the single most important refinement I'm asserting on top of the input: **routing and privacy gating are deterministic code, in the same bucket as truthfulness and persistence (§10).**
+2. **Companion needs topology it doesn't own.** Routing needs room/device maps that live in HA. **Conclusion:** the companion emits an **abstract channel intent** (e.g. `reply_source_text`, `announce_household_voice`, `notify_phone`, `silent`), and **HA resolves intent → concrete entities** and delivers. The companion never hard-codes entity IDs; HA never makes privacy decisions. Clean seam, and it survives new devices.
+3. **Does the satellite premise threaten the MVP?** **Conclusion: no — it simplifies it.** The MVP's default ("reply to the source client, text-first") is the **degenerate case** of `ResponseRoutingPolicy`. So the MVP needs *no routing engine at all*; the full policy is Track S. The satellite correction therefore **de-risks** the MVP rather than expanding it.
+4. **TTS-owner invariant vs. satellite voice.** **Conclusion:** the invariant is scoped to the **media zone** (resolver-owned). Satellite speech is a **distinct, HA-delivered** path the companion *requests* but never *implements* — consistent with C§4's "explicitly designed later." No contradiction.
+5. **Identity timing.** **Conclusion:** keep multi-user gated, but allow identity to arrive *earlier* **iff** satellites surface it reliably — and pair it with a **fail-safe**: when identity or `privacy_level` is unknown, route to the **least-disclosive** channel (text to source; never speak aloud). Privacy defaults conservative; capability earns disclosure.
+6. **Contract proliferation.** **Conclusion:** hold the line — **one external contract (`CommandResult`), one relay (F1-R)**. Internal models (`AssistantResult`/`NoteResult`/`ReminderResult`) are an implementation convenience that project to `chat_text`. Confirmation prompts and routing intents travel as ordinary `CommandResult` content/`actions[]`, not as a new wire type.
+
+### 18.3 The concluded architecture (one sentence each)
+- **`mass-resolver`** — unchanged deterministic media/speaker executor; sole media-TTS owner; `resolve→validate→execute→CommandResult`.
+- **`homebrain-companion`** — containerized sibling (modern Python), owns conversation/short-term context/long-term memory/personal data, reuses the resolver's lifecycle + `CommandResult` + F1-R relay, computes routing intent, calls `/command` for device actions.
+- **Home Assistant** — I/O, automation, timers/entities, notifications, **satellite entities + room/device metadata**, and **delivery executor** for routing intents.
+- **Contracts** — `CommandResult` at every external edge; the **F1-R hard return** for every ChatGPT-exposed tool; `InteractionContext` + a deterministic `ResponseRoutingPolicy` as the routing seam.
+- **Data** — local-first SQLite (+ filesystem blobs), audited, deletable, single-owner; nothing to the cloud.
+
+### 18.4 The invariants (the things that must never break)
+1. One external contract (`CommandResult`), one relay (F1-R), one media-TTS owner (resolver).
+2. **Output destination is always a policy decision; never hard-coded.** When uncertain, fail safe to least-disclosive (text-to-source, silent aloud).
+3. **Deterministic code owns** truthfulness, persistence, referent resolution, **routing, and privacy gating.** The **LLM owns language only.**
+4. Personal data is local-first, audited, deletable, and single-owned by the companion.
+5. Additive/reversible; **nothing exposed to ChatGPT until validated**; no second TTS path on the media zone; resolver/HA untouched until a gate is deliberately lifted.
+
+### 18.5 Recommended build sequence (the actual path)
+1. **Gate (not PCL work):** F1-R music stable **and** Speaker reconnect bug fixed.
+2. **P0 — Companion MVP:** containerized service + SQLite; notes, durable reminders, light decisions, short-term referents; `CommandResult` projection; **degenerate routing (text-to-source)**; audit + delete. Validate **over HTTP first**, then expose **one** tool to ChatGPT via the F1-R relay (sentinel-probe it), keeping `assistant-capabilities.md` in lockstep.
+3. **P1–P2:** HA delivery wiring for reminders (push/announce, privacy-gated); drafting (human sends); richer recall.
+4. **Track S (only when approved):** S0 inventory satellites → S1 `InteractionContext` → S2 deterministic `ResponseRoutingPolicy` → S3 privacy gating + confirmation → S4 household announcements + targeting.
+5. **Later gated:** receipts (meta → image → OCR), multi-user, semantic memory, cloud.
+
+### 18.6 Conclusion
+The design is **sound and buildable as specified**, and the satellite correction strengthens rather than complicates it — because the right abstraction (`InteractionContext` + a deterministic `ResponseRoutingPolicy`, with the companion deciding and HA delivering) makes "everything to the ceiling" just one configurable policy, and makes the MVP a trivial special case of it. The critical discipline to hold during implementation is **#18.4.3 — keep routing and privacy in deterministic code, never the LLM.** With that held, the system can grow from "notes and reminders, text-first" all the way to "whole-house, multi-room, identity-aware household communication" **without re-architecting** — only by enriching the policy and lifting gates in order. **Recommendation: approve the design; begin Track P at P0 once the two gates pass; keep Track S in design until satellites are installed and inventoried.**
+
+---
+
 ## Appendix A — Naming decision (CONFIRMED — see Appendix C §1)
 
 "Assistant" is overloaded (media voice tools). **Confirmed:** service name = **`homebrain-companion`**; concept name = **Personal / Communication Layer (PCL)**. Do **not** call the new layer just "assistant" — it collides with the existing media assistant/tooling terminology. (Rejected alternates: `homebrain-concierge`, `homebrain-pa`.)
@@ -505,9 +630,10 @@ These were reviewed and accepted by the user. They are binding for the PCL track
 - **Do not introduce a second external relay contract** unless there is a proven need.
 
 ### C§4 — TTS
-- The PCL **must not create a second TTS path**.
-- The **resolver remains the TTS owner**.
+- The PCL **must not create a second TTS path** on the **media zone**.
+- The **resolver remains the TTS owner** for the media/ceiling path.
 - The PCL **returns text**; any voice output must go through the **established path** (single owner) or be **explicitly designed later**.
+- **Satellite voice output is HA-delivered** (the companion asks HA to speak on a satellite; it never runs its own TTS) and is the "explicitly designed later" path — see C§7 / §6A.6.
 
 ### C§5 — Timers / reminders ownership
 - **Media sleep timer → resolver / media roadmap** (Inc 4).
@@ -520,6 +646,16 @@ These were reviewed and accepted by the user. They are binding for the PCL track
 - **Do not start implementation until (a) F1-R music is stable and (b) the Speaker reconnect bug is fixed.**
 - First implementation is a **small MVP only**: **notes + durable reminders + light decisions + short-term referents.**
 - **Receipts / images, semantic memory, multi-user, and cloud sync remain later gated phases.**
+
+### C§7 — Satellite / whole-house communication & routing (⟲ Added 2026-06-28)
+- Satellites are **general household communication endpoints**, not just media mics.
+- **Output destination is always a policy decision — never hard-coded.** Specifically: **do not** wire "satellite input always replies on the ceiling speakers." Use the **`ResponseRoutingPolicy`** (§6A.5).
+- **`InteractionContext`** (§6A.4: `client_type`, `source_device`, `source_room`, `user`, `reply_mode`, `privacy_level`, `target_device`, `target_room`, `target_person`, `conversation_id`) is captured per interaction and drives routing.
+- **Routing is deterministic local code, never the LLM** (the LLM must not decide where private content is spoken).
+- **Default routing:** mobile/web → that client, text-first; satellite → house voice route only when non-private/household/media; media → ceiling/media zone; private notes/receipts/reminders/personal answers → text to source or confirm-before-speaking; household announcements → selected satellites/whole-house **after confirmation**; timers/reminders → confirm to source, later notify/speak per policy.
+- **Fail-safe:** when `privacy_level` or `user` is unknown, default to the **least-disclosive** channel (text to source; do not speak aloud).
+- **Ownership:** HA owns satellite entities/routing primitives/pipelines/room-device metadata **and delivery**; `homebrain-companion` owns communication intent/memory/reminders/messages/follow-up **and computes the routing decision**; `mass-resolver` remains the deterministic media/speaker executor. The policy is a **shared channel vocabulary**.
+- **Satellite work is its own track (Track S)**; **do not build satellite routing until specifically approved**; **first step = inventory satellite capabilities/entities after install.** PCL MVP (text-first to source) does not depend on it.
 
 ## Appendix B — One-paragraph summary for a teammate
 
