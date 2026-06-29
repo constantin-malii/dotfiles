@@ -1,7 +1,11 @@
 # F1-R — ChatGPT Tool Result Relay (Design Addendum)
 
 **Date:** 2026-06-28
-**Status:** Design proposal only — **no implementation**. Stop for review.
+**Status:** **Phase-0 PASS (2026-06-28)** — Option **A+B** (script `stop`/`response_variable` return +
+verbatim agent instruction) is **proven** to relay `chat_text` to the OpenAI agent as a hard tool
+result. Next executable step: the **music-only re-migration plan**
+([plans/2026-06-28-F1-R-music-remigration.md](plans/2026-06-28-F1-R-music-remigration.md)). Option D
+(custom `llm.Tool`) is **not needed now** (kept as a documented fallback).
 **Parent:** [F1 — Synchronous Command Result Framework](2026-06-28-F1-synchronous-command-result-design.md)
 **Triggered by:** T11 Gate G1 failure — see the *Outcome* section of
 [plans/2026-06-28-F1-T11-T12-script-migration.md](plans/2026-06-28-F1-T11-T12-script-migration.md).
@@ -127,7 +131,43 @@ A small HA **custom integration** registers a first-class LLM tool whose handler
 3. If we fall to D, is **consolidating** the three scripts into one resolver-backed tool acceptable, or
    keep three named tools for ChatGPT's tool-selection clarity?
 
+## Phase-0 result — PASS (2026-06-28)
+
+A throwaway `script.f1r_probe` was created (and deleted afterward) to test Option A+B **without touching
+any production script**. It called `rest_command.resolver_command` with an **unknown** intent
+(`f1rprobe`, so the resolver logged the call with **no TTS**) and then **returned** a sentinel as its
+service response via `stop` + `response_variable`:
+
+```json
+[
+  {"action": "rest_command.resolver_command", "data": {"intent": "f1rprobe", "params": {}},
+   "response_variable": "r", "continue_on_error": true},
+  {"variables": {"probe_result": {"chat_text": "<SENTINEL>"}}},
+  {"stop": "probe done", "response_variable": "probe_result"}
+]
+```
+Exposed to the agent via WS `homeassistant/expose_entity` (`assistants:["conversation"]`). Prompt to
+`conversation.openai_conversation` (both tests): *"Run the F1R probe and report the exact diagnostic code
+it returns."*
+
+| Test | Script return | ChatGPT reply | Result |
+|---|---|---|---|
+| 1 — bare | `{chat_text:"Zphrqx-7741-Marmalade-Echo"}` | `The diagnostic code is Zphrqx-7741-Marmalade-Echo.` | sentinel surfaced **faithfully** (wrapped) |
+| 2 — + verbatim directive | `{chat_text:"Vqwerty-2208-Saffron-Relay", assistant_instruction:"reply verbatim"}` | `Vqwerty-2208-Saffron-Relay` | **exact match** |
+
+- **Resolver `/command` was invoked** both times — log: `req=4114d203 unknown intent 'f1rprobe'` and
+  `req=20fd31bd unknown intent 'f1rprobe'`.
+- **Contrast with T11:** the `set_conversation_response` sentinel was *never* echoed; the
+  `stop`/`response_variable` **return** is echoed (faithfully bare; **verbatim** with the directive).
+- **Verdict:** the script's **returned ServiceResponse becomes the OpenAI tool result** — Option A
+  works, and Option B (verbatim directive) yields exact fidelity. In the probe the directive was
+  carried *inside the tool return* (`assistant_instruction`) to avoid mutating the live agent config;
+  **production** will carry the one-line directive in the OpenAI agent's **Instructions**.
+- **Cleanup:** throwaway script **unexposed + deleted** (`GET` → 404), scripts reloaded, host helper
+  removed. **No production script modified**; no new production tool exposed; no model change.
+
+⟹ **Adopt A+B.** Proceed to the gated **music-only** re-migration; radio/find stay on the event path.
+
 ## Out of scope
-No implementation; no T12; no model change; no Inc 2. This document only proposes the mechanism and the
-verification order. On approval, the next artifact is an implementation plan that starts with the
-Phase-0 probe.
+No model change; no new tools; no Inc 2; radio/find not migrated. The next artifact is the music-only
+re-migration plan (design only until approved).

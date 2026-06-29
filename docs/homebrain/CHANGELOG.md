@@ -3,6 +3,24 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-06-28 — F1-R Phase-0 probe: hard tool-result relay PROVEN (PASS)
+
+- **Why:** T11 proved `set_conversation_response` is ignored by the OpenAI Conversation agent for
+  tool-invoked scripts. F1-R Phase-0 tested the alternative: a script that **returns** a value via
+  `stop` + `response_variable` (a hard tool result).
+- **Result — PASS.** A throwaway `script.f1r_probe` (calling `rest_command.resolver_command` with an
+  unknown, no-TTS intent, then returning a sentinel via `stop`/`response_variable`) was invoked by
+  ChatGPT. **Bare** return was surfaced faithfully (`The diagnostic code is Zphrqx-7741-Marmalade-Echo.`);
+  with a **verbatim directive** the reply was the exact sentinel (`Vqwerty-2208-Saffron-Relay`). Resolver
+  `/command` was confirmed invoked (`unknown intent 'f1rprobe'` logged twice). This is the clean inverse
+  of T11.
+- **Cleanup / safety:** throwaway script unexposed + deleted (GET → 404); helper artifacts removed. **No
+  production script modified** (`play_music`/`play_radio`/`find_stations` untouched); no new tool exposed;
+  no model change.
+- **Next:** gated **music-only** re-migration using the proven `stop`/`response_variable` return (radio
+  and find stay on the event path). See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
+  `plans/2026-06-28-F1-R-music-remigration.md`.
+
 ## 2026-06-28 — F1 T11 (`script.play_music` → `/command`) attempted and rolled back
 
 - **What:** migrated `script.play_music` from the fire-and-forget `mass_play_request` event to the
