@@ -54,6 +54,16 @@ class HaConnTest(unittest.TestCase):
         self.assertEqual(data["media_player_entity_id"], "")   # None entity renders to empty string
         self.assertEqual(data["message"], "hello")
 
+    def test_announce_propagates_send_failure(self):
+        h = self._ha()
+        def boom(domain, service, data):
+            raise BrokenPipeError(32, "Broken pipe")
+        h.call_service = boom
+        s = FakeSettings(tts_service="tts.speak",
+                         tts_data={"media_player_entity_id": "{entity}", "message": "{msg}"})
+        with self.assertRaises(BrokenPipeError):
+            h.announce("hello", s)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
