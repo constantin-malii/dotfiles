@@ -57,12 +57,14 @@ class RadioCapability(capability.Capability):
         radio_cfg = ctx.radio_cfg or {}
         d = config.radio_defaults(radio_cfg)
         ma = ctx.ma_factory()
+        rid = params.get("_rid", "")
         try:
-            ma.connect()
+            if getattr(ma, "s", None) is None:
+                ma.connect()
             cands, label = _candidates(ma, radio_cfg, params, d["find_internal"])
             mode = params.get("mode") or "play"
             dry_run = bool(params.get("dry_run"))
-            LOG.info("req=? radio mode=%s target=%r candidates=%d", mode, label, len(cands))
+            LOG.info("req=%s radio mode=%s target=%r candidates=%d", rid, mode, label, len(cands))
             return {"ma": ma, "mode": mode, "candidates": cands, "label": label,
                     "dry_run": dry_run, "find_speak": d["find_speak"]}
         except Exception:

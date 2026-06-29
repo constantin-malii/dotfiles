@@ -77,6 +77,8 @@ def serve(here):
 
     # Start HTTP server in a daemon thread before the event loop.
     http_secret = config.read_secret(here, ".http_secret")  # optional; None if absent
+    if not http_secret:
+        LOG.warning("SERVICE: /command has no shared secret (.http_secret); access limited to the %s bind only", s.http_host)
 
     def dispatch_fn(intent, params):
         return core.dispatch(ctx, intent, params)
@@ -113,8 +115,8 @@ def serve(here):
                 intent, params = call
                 LOG.info("SERVICE: event=%s -> intent=%s params=%r", ev.get("event_type"), intent, params)
                 try:
-                    # NOTE: on failure, dispatch may announce over this same HA socket; its
-                    # call_service response is a non-event frame and is skipped by the guard above.
+                    # NOTE: dispatch speaks via the Speaker's OWN HA connection (see make_ctx);
+                    # ctx.ha here is read-only for event subscription — do not announce on it.
                     core.dispatch(ctx, intent, params)
                 except Exception as e:
                     LOG.error("SERVICE: dispatch error: %r", e)

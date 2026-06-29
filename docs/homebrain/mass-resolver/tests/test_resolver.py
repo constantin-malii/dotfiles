@@ -18,7 +18,7 @@ class FakeSettings(object):
     provider_preference = ["filesystem_smb"]
     type_order = ["artist", "album", "track", "playlist"]
     dry_run = False
-    http_host = "0.0.0.0"
+    http_host = "192.168.122.1"
     http_port = 8770
 
 
@@ -85,7 +85,7 @@ class HttpConfigDefaultsTest(unittest.TestCase):
     def test_http_defaults_in_fake_settings(self):
         s = FakeSettings()
         self.assertEqual(s.http_port, 8770)
-        self.assertEqual(s.http_host, "0.0.0.0")
+        self.assertEqual(s.http_host, "192.168.122.1")
 
     def test_load_settings_http_defaults(self):
         import tempfile, shutil
@@ -94,7 +94,7 @@ class HttpConfigDefaultsTest(unittest.TestCase):
             import config
             s = config.load_settings(d)
             self.assertEqual(s.http_port, 8770)
-            self.assertEqual(s.http_host, "0.0.0.0")
+            self.assertEqual(s.http_host, "192.168.122.1")
         finally:
             shutil.rmtree(d, ignore_errors=True)
 
