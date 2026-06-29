@@ -197,6 +197,20 @@ This fixes the *swallow-prevents-reconnect* bug. It does **not** add send-acknow
 half-open socket that accepts a write but drops it silently would still lose one announce until the next
 send raises. Detecting that would need a read-ack round-trip — a separate, larger change.
 
+## Outcome — IMPLEMENTED & DEPLOYED (2026-06-29)
+- **Task 1** (`5617454`): `haconn.HA.announce()` logs + re-raises send failures; `test_haconn` adds
+  `test_announce_propagates_send_failure`. Per-task review: spec PASS, quality Approved.
+- **Task 2** (`41ecf01`): `test_speaker` adds reconnect-once-success and both-fail-no-loop tests
+  (real `haconn.HA`, patched `call_service`). Per-task review clean.
+- **Final whole-branch review:** ready to deploy, no findings.
+- **Deployed:** `haconn.py` copied to host (`.f1bak/haconn.py.bak` backup kept); tests ran on the host's
+  **Python 3.5.2** (`test_haconn` 5/5, `test_speaker` 6/6); temp `tests/` dir removed afterward. User ran
+  `sudo systemctl restart mass-resolver`. Post-restart: `ANNOUNCE via tts.speak` succeeds (0 failures),
+  playback + `/command` (200/401) + event fallback intact.
+- **Optional (not run):** the definitive live recovery test (restart HA to kill the Speaker socket, then
+  announce → confirm reconnect) was offered; the Python-3.5 unit/integration tests stand as the
+  guarantee. Available on request.
+
 ## Self-review
 - Root cause + fix localized to `haconn.HA.announce()` (log **and** re-raise); `Speaker.speak()`
   unchanged (its reconnect-once becomes effective). Tests cover: propagation (Task 1), reconnect-once

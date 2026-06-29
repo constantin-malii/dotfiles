@@ -20,18 +20,22 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
   `plans/2026-06-28-F1-R-music-remigration.md` (Outcome).
 
-## 2026-06-28 — Follow-up: Speaker WebSocket reconnect bug (found, recovered, fix planned)
+## 2026-06-28/29 — Speaker WebSocket reconnect bug FIXED & DEPLOYED
 
 - **Symptom:** after an HA restart mid-session, every resolver Piper announcement failed with
   `BrokenPipeError(32)`; successful music playback was unaffected (that path is Music Assistant, not the
   Speaker).
-- **Root cause:** `haconn.HA.announce()` catches and **swallows** the send exception, so
-  `Speaker.speak()`'s reconnect-once logic never fires and the dead WebSocket persists.
-- **Immediate recovery:** `sudo systemctl restart mass-resolver` re-established the socket; a no-match
-  announce was verified speaking again (`ANNOUNCE via tts.speak`).
-- **Permanent fix (planned, not yet implemented):** make `announce()` log **and re-raise** send/
-  connection failures so the reconnect-once heals automatically; tests for propagation, reconnect-once,
-  and no-infinite-loop. Plan: `plans/2026-06-28-speaker-reconnect-bugfix.md`.
+- **Root cause:** `haconn.HA.announce()` caught and **swallowed** the send exception, so
+  `Speaker.speak()`'s reconnect-once logic never fired and the dead WebSocket persisted.
+- **Permanent fix (implemented + deployed 2026-06-29):** `haconn.HA.announce()` now logs **and
+  re-raises** send/connection failures; `Speaker.speak()`'s existing reconnect-once then heals the
+  socket (and stops after one retry — no loop). Commits `5617454` (fix + `test_haconn`),
+  `41ecf01` (`test_speaker` reconnect/no-loop tests). Built subagent-driven (per-task + final review,
+  all clean).
+- **Validation:** unit/integration tests pass on the host's **Python 3.5.2** (`test_haconn` 5/5,
+  `test_speaker` 6/6); post-restart live check shows `ANNOUNCE via tts.speak` succeeding again
+  (0 failures), playback + `/command` (200/401) + event fallback all intact. Backup at
+  `~/mass-resolver/.f1bak/haconn.py.bak`. Plan: `plans/2026-06-28-speaker-reconnect-bugfix.md`.
 
 ## 2026-06-28 — F1-R Phase-0 probe: hard tool-result relay PROVEN (PASS)
 
