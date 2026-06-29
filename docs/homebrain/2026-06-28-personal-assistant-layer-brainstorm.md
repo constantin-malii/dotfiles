@@ -395,7 +395,7 @@ Applying the database-selection workflow to this profile (tiny volume; light rel
 
 **Goal:** prove the sibling-service shape + truthful memory at lowest privacy/operational risk, reusing the resolver's contracts and the F1-R relay.
 
-**Hard dependency (⟲ Reconciled):** ChatGPT exposure rides on the **F1-R relay being landed** (music re-migration currently pending execution). Until then, the MVP can be built and validated **over HTTP only** (like F1 validated `/command` before scripts) and exposed to ChatGPT *after* the relay path is live and the new tool is validated (carried "don't expose until validated" rule).
+**Hard dependency (⟲ Reconciled; locked — see Appendix C §6):** PCL implementation does **not start** until **(a) F1-R music is stable** and **(b) the Speaker WebSocket reconnect bug is fixed**. ChatGPT exposure additionally rides on the **F1-R relay being landed** (music re-migration currently pending execution). Until those gates pass, the MVP may be *designed* but not built; once building, it can be validated **over HTTP only** (like F1 validated `/command` before scripts) and exposed to ChatGPT *after* the relay path is live and the new tool is validated (carried "don't expose until validated" rule).
 
 **In scope (MVP):**
 - New containerized `homebrain-companion` sibling; `POST /companion` (LAN + shared secret); SQLite store; modern Python.
@@ -419,7 +419,7 @@ This is a **separate track ("Track P")** from the media increments. It must not 
 
 | Phase | Theme | Adds | Gate to enter |
 |---|---|---|---|
-| **P0** | Foundation (MVP) | Containerized companion, SQLite, notes, durable reminders, light decisions, short-term context, `CommandResult` projection, audit, forget | This doc approved; **F1-R relay landed** (for exposure); resolver/HA untouched |
+| **P0** | Foundation (MVP) | Containerized companion, SQLite, notes, durable reminders, light decisions, short-term context, `CommandResult` projection, audit, forget | This doc approved; **F1-R music stable** **and** **Speaker reconnect bug fixed**; **F1-R relay landed** (for exposure); resolver/HA untouched |
 | **P1** | Voice + HA delivery | One HA companion tool → `/companion` via F1-R relay; reminder firing via HA timer/automation + push + ceiling-announce | P0 stable; "don't change HA" lifted deliberately; new tool validated before exposure |
 | **P2** | Drafting + recall depth | Message drafting (human sends), richer recall, decision history | Notes/reminders trusted in daily use |
 | **P3** | Receipts (structured) | Receipt *meta* (no image), categories, retention policy | Retention/audit/delete proven on notes |
@@ -480,9 +480,46 @@ Each phase is independently shippable and abandonable. Never start a phase befor
 
 ---
 
-## Appendix A — Naming decision (open)
+## Appendix A — Naming decision (CONFIRMED — see Appendix C §1)
 
-"Assistant" is overloaded (media voice tools). Candidates for the new layer/service: **`homebrain-companion`** (used here), `homebrain-concierge`, `homebrain-pa`. Recommend `homebrain-companion`; flag for the user to confirm before any code/dir naming. The layer concept = **Personal / Communication Layer (PCL)**.
+"Assistant" is overloaded (media voice tools). **Confirmed:** service name = **`homebrain-companion`**; concept name = **Personal / Communication Layer (PCL)**. Do **not** call the new layer just "assistant" — it collides with the existing media assistant/tooling terminology. (Rejected alternates: `homebrain-concierge`, `homebrain-pa`.)
+
+## Appendix C — Accepted decisions (LOCKED, 2026-06-28)
+
+These were reviewed and accepted by the user. They are binding for the PCL track; supersede any looser wording earlier in this document. Changing one requires an explicit decision update here.
+
+### C§1 — Naming
+- Service name: **`homebrain-companion`**.
+- Concept name: **Personal / Communication Layer** ("**PCL**").
+- **Avoid bare "assistant"** for this layer — it collides with the existing media assistant / tooling terminology (`assistant-tooling-design.md`, `assistant-capabilities.md`).
+
+### C§2 — Architecture
+- **`homebrain-companion`** is a **separate, containerized sibling service**.
+- **`mass-resolver`** remains the **deterministic home/media command executor** (unchanged).
+- **Home Assistant** remains the **I/O, automation, timer/entity, and notification platform**.
+- **ChatGPT-facing tools must return via the proven F1-R hard-return mechanism** (script returns `{chat_text}` via `stop`+`response_variable` + the verbatim agent instruction). **Never `set_conversation_response`.**
+
+### C§3 — Contract
+- **`CommandResult` is the contract at the external / wire / ChatGPT boundary.**
+- The PCL **may** use internal domain models (e.g. **`AssistantResult`**, **`NoteResult`**, **`ReminderResult`**), but for any exposed tool these **project into `CommandResult.chat_text`** (and the rest of the `CommandResult` shape).
+- **Do not introduce a second external relay contract** unless there is a proven need.
+
+### C§4 — TTS
+- The PCL **must not create a second TTS path**.
+- The **resolver remains the TTS owner**.
+- The PCL **returns text**; any voice output must go through the **established path** (single owner) or be **explicitly designed later**.
+
+### C§5 — Timers / reminders ownership
+- **Media sleep timer → resolver / media roadmap** (Inc 4).
+- **Personal reminders / timers → `homebrain-companion`.**
+- **Home Assistant executes** timers, notifications, and entity actions.
+- **`homebrain-companion` owns** interpretation, context, **durable reminder records**, and follow-up state.
+
+### C§6 — Roadmap
+- PCL stays **Track P** (separate from media Inc 2–4; must not entangle them).
+- **Do not start implementation until (a) F1-R music is stable and (b) the Speaker reconnect bug is fixed.**
+- First implementation is a **small MVP only**: **notes + durable reminders + light decisions + short-term referents.**
+- **Receipts / images, semantic memory, multi-user, and cloud sync remain later gated phases.**
 
 ## Appendix B — One-paragraph summary for a teammate
 
