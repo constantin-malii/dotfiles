@@ -182,3 +182,43 @@ change (needs a restart), independent of the HA-script migration.
 - Constraints covered: resolver sole TTS owner + no script `tts.speak` (sequences contain none; only `set_conversation_response`) ✓; `rest_command.resolver_command` + `response_variable` + 30 s + `X-Resolver-Key` ✓ (timeout prerequisite called out); per-script backup→edit→readback→controlled→conversational→rollback, one at a time with stop/report ✓; validation matrices included verbatim ✓; rollback preserves `/command`+event adapter+`mass_sync_request`+`ceiling_play_radio` ✓; no new tools/model change/Inc 2 ✓; latency documented (fav ~2 s, RB ~3 s, 27 s outlier, 30 s margin) ✓; PLAYING-log deploy included but separated (Step P) ✓.
 - **Primary risk gated:** G1 verifies `chat_text` actually reaches ChatGPT for a script-tool call before committing to T12. If it fails → stop & escalate (no speculative fallback).
 - **No implementation performed** — this document is design only.
+
+---
+
+## Outcome — T11 EXECUTED, Gate G1 FAILED, ROLLED BACK (2026-06-28)
+
+Step P (PLAYING-log) and T11 (`script.play_music` migration) were executed on the host;
+T12 was **not** started. Result:
+
+- **Mechanically successful** — backup saved to `~/script_backups/play_music.json`; sequence
+  replaced with `rest_command.resolver_command` (intent=music) + `response_variable r` +
+  `set_conversation_response` from `chat_text`; alias/fields preserved; **no `tts.speak`**.
+- **Resolver behavior correct** — `play Rammstein` → `/command` → played (restored `PLAYING` line
+  present); `play My Way` → `/command` returned **HTTP 200** with the honest
+  `chat_text="My Way isn't in your local library yet."`, `ok:false`, **no playback**, honest Piper line.
+- **HA `response_variable` capture correct** — the script captured `r.content.chat_text` exactly
+  (already proven in T9; reconfirmed here).
+- **Gate G1 FAILED — the OpenAI Conversation agent ignores `set_conversation_response` for a
+  script invoked as a tool.** Evidence:
+  - `play My Way` → ChatGPT said `Playing "My Way."` (not the honest `chat_text`).
+  - **Sentinel test (decisive):** forced the script's `set_conversation_response` to a unique string
+    (`"Pineapple seven four one zero."`) and asked ChatGPT to play a guaranteed no-match. Resolver log
+    confirms the tool **was** invoked, yet ChatGPT replied `Playing Zzzqqx Nonexistent Track.` — it did
+    **not** echo the sentinel. ⟹ The G1 "pass" (`Playing Rammstein.`) was a **false positive**:
+    ChatGPT composes its own generic `"Playing <query>."` reply and never surfaces the tool's returned
+    conversation text. `set_conversation_response` is honored for the **Assist/sentence-trigger** agent,
+    **not** for an OpenAI tool-call return.
+- **Rolled back** — `script.play_music` restored from `~/script_backups/play_music.json` to the
+  original event-firing version (`mass_play_request`; no `rest_command`/`set_conversation_response`/
+  `tts.speak`). Verified: event path plays, direct `mass_play_request` plays, honest Piper feedback
+  intact, `/command` live + authenticated (200/401), event adapter live, `mass_sync_request` /
+  `play_radio` / `find_stations` untouched.
+- **Follow-up to watch (not a regression of this work):** the no-match Piper announce hit an
+  intermittent `BrokenPipeError` on the speaker socket twice on 2026-06-28 (it succeeded earlier the
+  same day). The `Speaker` reconnect-once path should heal it; monitor.
+
+**Conclusion:** the synchronous `/command` path and `CommandResult` are sound, but the **relay leg**
+(getting `chat_text` into ChatGPT's mouth via `set_conversation_response`) is **proven insufficient**
+on this HA + OpenAI integration. T12 is **not** attempted. Next step is the **F1-R** design addendum
+(`2026-06-28-F1-R-chatgpt-tool-result-relay-design.md`): deliver `chat_text` as the actual **tool
+result** rather than a conversation-response side effect.

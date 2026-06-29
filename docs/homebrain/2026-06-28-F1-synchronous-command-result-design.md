@@ -1,9 +1,24 @@
 # Foundation F1 — Synchronous Command Result Framework (Design)
 
 **Date:** 2026-06-28
-**Status:** Design only (pre-implementation) — **stop for review before the implementation plan**
+**Status:** Framework built & deployed (resolver `/command`, `CommandResult`, capability interface
+all live and validated). **Script migration BLOCKED at T11** — the ChatGPT relay leg is proven
+insufficient (see *§ Finding* below); superseded for that leg by the **F1-R** addendum.
 **Related:** [assistant-tooling-design.md](2026-06-27-assistant-tooling-design.md) (umbrella),
-[local-music-architecture.md](local-music-architecture.md), [assistant-capabilities.md](assistant-capabilities.md)
+[local-music-architecture.md](local-music-architecture.md), [assistant-capabilities.md](assistant-capabilities.md),
+[F1-R — ChatGPT Tool Result Relay](2026-06-28-F1-R-chatgpt-tool-result-relay-design.md),
+[T11/T12 migration plan + outcome](plans/2026-06-28-F1-T11-T12-script-migration.md)
+
+> ## Finding (2026-06-28) — the relay mechanism in §1/§4 does not hold
+> §1 and §4 (F1-C/F1-D) assume an HA script can relay `chat_text` to ChatGPT via
+> **`set_conversation_response`**. T11 disproved this for the **OpenAI Conversation agent**: when it
+> invokes a script **as a tool**, it **ignores** `set_conversation_response` and composes its own
+> generic `"Playing <query>."` reply (proven with a sentinel string — see the T11 outcome section of
+> the migration plan). The resolver side, the `/command` endpoint, `CommandResult`, and HA
+> `response_variable` **capture** are all correct and stay. Only the **relay** leg is wrong. The fix is
+> scoped in the **F1-R** addendum: deliver `chat_text` as the script's actual **tool result** (which
+> the agent must consume) instead of a conversation-response side effect. `script.play_music` was
+> **rolled back** to the event path; no capability is migrated until F1-R lands.
 
 ## Why F1
 
