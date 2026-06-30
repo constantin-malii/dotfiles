@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Dispatch registry + CommandResult routing. Python 3.5 safe.
 import logging, uuid
-import music, radio, status, capability, command_result as cr
+import music, radio, status, news, capability, command_result as cr
 
 LOG = logging.getLogger("resolver")
 
@@ -10,11 +10,11 @@ CAPS = {
     "music": music.MusicCapability(),
     "radio": radio.RadioCapability(),
     "status": status.StatusCapability(),
+    "news": news.NewsCapability(),
 }
 
 # Stub intents: name -> human-friendly label for "not available yet" message
 _STUBS = {
-    "news": "News",
     "acquire": "Acquire",
 }
 

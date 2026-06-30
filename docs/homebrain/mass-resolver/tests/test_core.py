@@ -3,6 +3,7 @@
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core
+import news, newsfeed
 
 
 class FakeSpeaker(object):
@@ -149,12 +150,12 @@ class CoreDispatchTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "invalid_input")
         self.assertEqual(spk.said, [])
 
-    # --- stub intent (news) ---
+    # --- stub intent (acquire) ---
     def test_stub_intent_not_implemented_speaks(self):
         ma = FakeMA()
         spk = FakeSpeaker()
         ctx = FakeCtx(ma, speaker=spk)
-        r = core.dispatch(ctx, "news", {"country": "Romania"})
+        r = core.dispatch(ctx, "acquire", {"query": "some song"})
         self.assertFalse(r["ok"])
         self.assertEqual(r["error"]["code"], "not_implemented")
         self.assertEqual(len(spk.said), 1)
@@ -182,6 +183,56 @@ class CoreDispatchTest(unittest.TestCase):
         ctx = core.Ctx(ma_factory=lambda: ma, ha=None, settings=FakeSettings(),
                        radio_cfg=RC, news_cfg={})
         self.assertIsNone(ctx.speaker)
+
+
+class NewsDispatchTest(unittest.TestCase):
+    NEWS_CFG = {"defaults": {"headline_count": 3, "feed_timeout": 4.0, "max_items_per_feed": 10},
+                "feeds": {"world": [{"name": "BBC World", "url": "http://bbc/world"}]},
+                "stations": {}}
+
+    def _ctx(self, news_cfg):
+        spk = FakeSpeaker()
+        ctx = core.Ctx(ma_factory=lambda: None, ha=None, settings=FakeSettings(),
+                       radio_cfg=RC, news_cfg=news_cfg, speaker=spk)
+        return ctx, spk
+
+    def test_news_registered_in_caps_not_stubs(self):
+        self.assertIn("news", core.CAPS)
+        self.assertIsInstance(core.CAPS["news"], news.NewsCapability)
+        self.assertNotIn("news", core._STUBS)
+
+    def test_dispatch_news_success_speaks_once(self):
+        ctx, spk = self._ctx(self.NEWS_CFG)
+        orig = newsfeed.fetch_feed
+        newsfeed.fetch_feed = lambda feed, t, m: [{"title": "Alpha", "link": "", "source": "BBC World"},
+                                                  {"title": "Bravo", "link": "", "source": "BBC World"}]
+        try:
+            r = core.dispatch(ctx, "news", {})
+        finally:
+            newsfeed.fetch_feed = orig
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["intent"], "news")
+        self.assertEqual(len(spk.said), 1)                       # headlines spoken once
+        self.assertIn("headlines", spk.said[0].lower())
+
+    def test_dispatch_news_unavailable_silent(self):
+        ctx, spk = self._ctx(self.NEWS_CFG)
+        orig = newsfeed.fetch_feed
+        newsfeed.fetch_feed = lambda feed, t, m: []              # all feeds empty
+        try:
+            r = core.dispatch(ctx, "news", {})
+        finally:
+            newsfeed.fetch_feed = orig
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "unavailable")
+        self.assertEqual(spk.said, [])                           # failures never speak
+
+    def test_dispatch_news_unknown_bucket_not_found_silent(self):
+        ctx, spk = self._ctx(self.NEWS_CFG)
+        r = core.dispatch(ctx, "news", {"country": "Romania"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "not_found")
+        self.assertEqual(spk.said, [])
 
 
 if __name__ == "__main__":

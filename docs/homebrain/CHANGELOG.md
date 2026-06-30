@@ -3,6 +3,44 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-06-29 — Inc 2A News headlines: deployed, `script.news` created + exposed, validated
+
+- **What:** shipped **Inc 2A — spoken news headlines**. New resolver `news` capability fetches a curated
+  public RSS feed (Python 3.5 stdlib `urllib`+`xml.etree`; no API key, no new deps), parses headlines,
+  returns a synchronous `CommandResult`; the resolver speaks the headlines once via Piper and ChatGPT
+  relays the `chat_text`. New HA `script.news` (hard return `{chat_text}`) **exposed to ChatGPT**.
+- **Resolver (repo, branch `homebrain/inc2a-news-headlines`):** new `newsfeed.py` (RSS/Atom fetch+parse
+  behind a mockable seam; `<!DOCTYPE`/`<!ENTITY` rejection + 2 MB read cap; never raises), new
+  `NewsCapability` (`resolve→validate→execute`) in `news.py` (replaced the stub), wired into
+  `core.CAPS["news"]`, removed from `_STUBS`; `news.json` seeded (defaults + `world`→BBC World). 189 unit
+  tests pass; network fully mocked. Whole-branch review: ready to merge.
+- **G3 host reachability (read-only):** host (Python 3.5.2) reached
+  `http://feeds.bbci.co.uk/news/world/rss.xml`, 41 titles parsed, `<!DOCTYPE`/`<!ENTITY` guard clean.
+- **G4 deploy (host):** deployed `core.py`,`news.py`,`newsfeed.py`,`news.json` to `~/mass-resolver/`
+  (backup `.inc2-bak/20260630T034433Z/`; checksums match; `py_compile` clean; `news` in `CAPS`, not in
+  `_STUBS`). Service restarted (user-run sudo), active, 0 tracebacks. `/command` 401/200. `intent=news` →
+  `ok=true`, "Top world headlines: 1)…2)…3)", `count=3`, Piper spoke once; `country=romania` →
+  `not_found`, `spoken_text=null` (silent). No-regression of music/radio/find/status.
+- **G6 HA script:** `script.news` (alias `Ceiling: News Headlines (resolver)`, mode single, **no
+  fields**) created; hard return `{chat_text}` via `stop`+`response_variable`; **no `tts.speak`**, **no
+  `set_conversation_response`**, no `media_player`/MA. `return_response=true` → exactly `{chat_text}`,
+  matching `/command`. Existing 4 scripts SHA-unchanged.
+- **G8 exposure + validation (2026-06-29):** exposed **only** `script.news` to `conversation`
+  (`homeassistant/expose_entity`); exposure delta **12 → 13**, added `script.news`, removed none, no
+  `media_player.*`/MA exposed. OpenAI Instructions updated (News capability bullet + READING THE NEWS
+  routing; removed the obsolete "cannot read the news" clause; verbatim-relay rule preserved; model
+  unchanged). Conversational validation via `conversation.openai_conversation`: "What are the news
+  headlines?" / "Read me the news." / "What's the world news?" each called `script.news` (3 NEWS
+  dispatches; announce +3 → Piper once per prompt) and relayed the real BBC headlines (no fabrication;
+  ChatGPT lightly reformats — accepted cosmetic behavior). No-regression: status/find/play-music/
+  play-radio all routed correctly, **0** news mis-routes; restored to idle. Exposed set verified **13**.
+- **Inc 2B (news-station playback): deferred** — `play_radio` already plays news stations by
+  genre/country; no RadioBrowser duplication.
+- **Rollback:** un-expose `script.news` + revert the News docs/Instructions additions; delete
+  `script.news`+reload if the script is wrong; restore `.inc2-bak/20260630T034433Z/` + restart (gated) if
+  `/command news` fails. `mass_sync_request`, event adapter, existing scripts, gpt-4o-mini unchanged.
+- See `2026-06-29-inc2a-news-headlines-design.md` and `plans/2026-06-29-inc2a-news-headlines.md`.
+
 ## 2026-06-29 — Inc 4A Phase 9 §2a–§2b: `script.media_status` exposed to ChatGPT
 
 - **What:** added a `description` to **`script.media_status`** and **exposed it to the `conversation`
