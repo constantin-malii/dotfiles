@@ -77,11 +77,11 @@ def fetch_feed(feed, timeout, max_items):
         return []
     try:
         raw = _http_get(url, timeout)
+        out = []
+        for it in parse(raw)[:max_items]:
+            out.append({"title": it["title"], "link": it.get("link", ""), "source": name})
+        return out
     except Exception as e:
         LOG.error("newsfeed fetch failed name=%s: %r",
                   name.encode("ascii", "replace").decode("ascii"), e)
         return []
-    out = []
-    for it in parse(raw)[:max_items]:
-        out.append({"title": it["title"], "link": it.get("link", ""), "source": name})
-    return out
