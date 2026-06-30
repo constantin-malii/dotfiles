@@ -30,7 +30,7 @@ and this repo doc is the human source of truth we keep them in sync with:
 
 ## Currently exposed to ChatGPT (verified 2026-06-29)
 
-**12 entities** are exposed to the conversation assistant (verified live via
+**13 entities** are exposed to the conversation assistant (verified live via
 `homeassistant/expose_entity/list`):
 
 | Tool (entity) | What it does |
@@ -39,6 +39,7 @@ and this repo doc is the human source of truth we keep them in sync with:
 | `script.play_radio` | Play radio by **name / country / genre / language** (resolver: favorites-first → RadioBrowser) |
 | `script.find_stations` | **Find/list** stations by genre/country; speaks the top 3 |
 | `script.media_status` | **What's playing** — song/station + volume on the ceiling speakers; **read-only & silent** (resolver `status` intent → hard-return `{chat_text}`) |
+| `script.news` | **Spoken news headlines** — top world headlines from a curated public RSS feed (resolver `news` intent → hard-return `{chat_text}`); the resolver speaks them once via Piper. v1 = world/English only, default 3 headlines, no fields |
 | `script.ceiling_pause` / `ceiling_resume` / `ceiling_stop` | Transport |
 | `script.ceiling_next` / `ceiling_previous` | Skip within a local queue |
 | `script.ceiling_volume_up` / `ceiling_volume_down` | **Relative** volume change (±%, default 10) |
@@ -65,6 +66,19 @@ when available. It is **read-only** (no playback/transport/config side effects) 
 status prompts call the tool and relay the real now-playing/volume (no fabrication; silent); ChatGPT may
 lightly re-case/rephrase the text (substance correct — same accepted cosmetic behavior as F1-R radio).
 
+**News headlines — ACTIVE (Inc 2A, exposed 2026-06-29):** `script.news` answers "read me the news" /
+"what are the headlines" / "what's the world news" by calling the resolver **`news`** intent and relaying
+its **`chat_text`** (e.g. `Top world headlines: 1) ... 2) ... 3) ...`). The resolver fetches a curated
+public RSS feed (Python 3.5 stdlib `urllib`+`xml.etree`; no API key, no new deps), parses headlines, and
+**speaks them once via Piper** (`spoken_text`); ChatGPT relays the `chat_text`. **v1 scope:** world /
+English headlines only, source **BBC World** (`http://feeds.bbci.co.uk/news/world/rss.xml`), **default 3
+headlines** (configurable in `news.json`), **no fields** (no country/topic param). Honest failure: if the
+feed is unreachable/empty it returns `Sorry, I couldn't get the news right now.` (**silent** —
+`spoken_text=null`; failures never speak); an explicit unsupported topic/country returns a silent honest
+`not_found` ("I don't have <X> news set up yet."). **Inc 2B (news-station playback) is deferred** — see
+the roadmap note above (radio already plays news stations by genre/country). **Conversationally validated
+2026-06-29** (see the validation log).
+
 ## Honest failure feedback (Inc 0)
 
 When `play_music` can't find a match in the **local** library, the resolver speaks the truth on the
@@ -75,10 +89,15 @@ ceiling speakers ("Sorry, I couldn't find X in the local library") via local Pip
 
 | Capability | Increment |
 |---|---|
-| **News** headlines (spoken) and news stations | Inc 2 |
 | **Search & acquire** a song/artist (Lidarr) | Inc 3 |
-| Sleep timer, shuffle favorites (**"what's playing"/status is now ACTIVE** — `script.media_status`) | Inc 4 |
+| Sleep timer, shuffle favorites (**"what's playing"/status is now ACTIVE** — `script.media_status`; **spoken news headlines now ACTIVE** — `script.news`) | Inc 4 |
 | Streaming services (Tidal/Qobuz/Spotify), YouTube Music | later / disabled |
+
+**Inc 2B — news-station playback: deferred.** Playing a *news radio station* is **not a separate tool**:
+`play_radio` already plays stations by **genre** (e.g. "news") and **country**, so "play news radio" /
+"play Romanian news radio" is already covered by the existing radio surface. Inc 2B is therefore
+deferred — it would duplicate RadioBrowser logic — and only revisited if a concrete gap radio can't meet
+is found.
 
 Music is **local-only** today. If asked for something not in the library, say it isn't available
 locally yet and that acquisition is on the roadmap.
@@ -91,6 +110,9 @@ locally yet and that acquisition is on the roadmap.
 - **Status / now-playing:** for "what's playing", "what song/station is on", "what volume is it", or
   "is anything playing", call `script.media_status` and **relay its `chat_text`**. Do **not** guess or
   invent the song, station, or volume; if it says nothing is playing, say that.
+- **News:** for "read me the news", "what are the news headlines", "what's the world news", call
+  `script.news` and **relay its `chat_text`** verbatim. Do **not** invent or summarize headlines; the
+  speakers read them aloud. (v1 is world/English only — no country/topic parameter.)
 - **Transport / volume:** use the `ceiling_*` tools; never use a raw media_player service.
 - **Don't invent content.** If nothing matches, the speaker announces the miss — don't report success.
 - **Capability questions:** answer from the "currently exposed" + "not available yet" lists above.
@@ -194,6 +216,7 @@ WHAT YOU CAN DO
 - Control playback on the ceiling speakers: pause, resume, stop, skip to next or previous track,
   and turn the volume up or down.
 - Tell you what is currently playing on the ceiling speakers, including the song or station and volume.
+- Read out the latest world news headlines.
 - Tell the local weather.
 - For other, non-home questions, answer briefly from general knowledge.
 
@@ -221,6 +244,12 @@ CHECKING WHAT'S PLAYING
   the current volume is, ALWAYS use the status tool. Relay exactly what it returns. Do NOT guess or
   invent the song, station, or volume. If the tool says nothing is playing, say that.
 
+READING THE NEWS
+- When the user asks to hear the news, the news headlines, or the world news (for example "read me the
+  news", "what are the news headlines", "what's the world news"), ALWAYS use the news tool. Relay exactly
+  what it returns — the speakers read the headlines aloud. Do NOT invent, summarize, or add headlines. If
+  it says it couldn't get the news, say that. (News is world headlines only for now.)
+
 WHICH SOURCE TO USE (in order of preference)
 1. The household's personal music library first.
 2. Radio — for a station by name, or a country, genre, or language request.
@@ -231,8 +260,8 @@ WHAT YOU CANNOT DO
 - You control ONLY the ceiling speakers. You have no access to TVs, video, soundbars, thermostats,
   phones, or any other device. If asked to control anything else, say you can only control the
   ceiling speakers.
-- You cannot download or add new music; play Spotify, Tidal, or other streaming services; or read or
-  play the news. If asked for any of these, say it's not available yet and is planned.
+- You cannot download or add new music, or play Spotify, Tidal, or other streaming services. If asked
+  for any of these, say it's not available yet and is planned.
 - For an exact volume level (e.g. "set the volume to 40"), tell the user to say that directly — the
   system handles that phrase.
 

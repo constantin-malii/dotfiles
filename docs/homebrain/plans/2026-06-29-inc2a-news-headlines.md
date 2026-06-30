@@ -992,3 +992,46 @@ Inc 2B (news-station playback — deferred); Inc 3/Lidarr; Inc 4B; YTM; RadioBro
 - **Type consistency:** `fetch_feed(feed, timeout, max_items)`, `_merge(per_feed, cap)`, `_spoken(bucket, items)`, `_chat(bucket, items)`, `resolve` return keys (`bucket_key`/`requested_label`/`feeds`/`headline_count`/`feed_timeout`/`max_items`) are used identically across Tasks 3–6 and the tests. `not_found` `chat_text` is verbatim-label ("I don't have Romania news set up yet.") consistently in Task 3 impl + tests + G5.
 - Repo tests never touch the network (seam patched / fixtures) ✓. Inc 2B deferred ✓. BBC World only live feed ✓. Failures silent (`spoken_text=None`) ✓.
 - **XML safety (stdlib-only, no `defusedxml`):** `parse` rejects `<!DOCTYPE`/`<!ENTITY` (Task 1, with a billion-laughs test) + `_http_get` size cap `_MAX_FEED_BYTES=2000000` (Task 2). Numeric-underscore 3.6-syntax trap called out ✓.
+
+---
+
+## Execution outcome — Inc 2A COMPLETE & exposed (2026-06-29)
+
+**Branch:** `homebrain/inc2a-news-headlines` (off `main` @ `dc3c6e5`), 7 commits `5fdc256..e6b65f9`. Not pushed.
+
+**Repo (Tasks 1–6, subagent-driven TDD).** `newsfeed.py` (parse RSS/Atom + `_http_get` seam, never raises,
+`<!DOCTYPE`/`<!ENTITY` reject + 2 MB cap), `NewsCapability` (`resolve`/`validate`/`execute` + `_merge`/
+`_spoken`/`_chat`) in `news.py`, wired into `core.CAPS["news"]`, removed from `_STUBS`, `news.json` seeded.
+Each task passed an independent spec+quality review (one fix: Task 2 never-raise wrap). **Full suite 189
+tests OK; network fully mocked.** Whole-branch review (Opus): **ready to merge**, all 8 binding
+constraints PASS, no Critical/Important. Minor findings left as recorded.
+
+**G3 — host reachability (read-only).** Host `homebrain`/Python 3.5.2 reached the BBC world feed over
+plain HTTP (31 KB, 41 titles), `<!DOCTYPE`/`<!ENTITY` guard clean. No host change.
+
+**G4 — deploy + restart (host).** Backup `~/mass-resolver/.inc2-bak/20260630T034433Z/`
+(core.py,news.py,news.json). Deployed `core.py`,`news.py`,`newsfeed.py`,`news.json` (4 SHA match);
+`py_compile` clean; `news in CAPS`, not in `_STUBS`. Service restarted (user-run sudo), active, 0
+tracebacks. `/command` 401/200. `intent=news` → `ok=true`, `chat_text` "Top world headlines: …",
+`count=3 feeds_ok=1`, Piper spoke once (announce +1). `country=romania` → `not_found`,
+`spoken_text=null` (silent). No-regression music(dry)/radio(dry)/find/status OK.
+
+**G6 — HA script (not exposed at the time).** `script.news` created (alias `Ceiling: News Headlines
+(resolver)`, mode single, **no fields**); hard return `{chat_text}` via `stop`+`response_variable`; **no
+`tts.speak` / `set_conversation_response` / `media_player` / MA**. `return_response=true` → exactly
+`{chat_text}`, equal to `/command`. Existing 4 scripts SHA-unchanged.
+
+**G8 — exposure + Instructions + conversational validation.** Exposed **only** `script.news` to
+`conversation`: delta **12 → 13**, added `script.news`, removed none, no `media_player.*`/MA exposed.
+OpenAI Instructions updated (News capability bullet + READING THE NEWS routing; removed obsolete "cannot
+read the news" clause; verbatim-relay rule preserved; model unchanged — user-pasted in HA UI). Three news
+prompts each routed to `script.news` (NEWS dispatches +3; announce +3 → Piper once each) and relayed the
+real BBC headlines (no fabrication; accepted cosmetic re-phrasing). No-regression: status/find/play-music/
+play-radio routed correctly, **0** news mis-routes; restored to idle. Exposed set verified **13**.
+
+**Docs (uncommitted at report time):** `assistant-capabilities.md` (table +`script.news`, News moved to
+active, routing rule, v1 scope, 2B-deferred note, prompt block), `CHANGELOG.md`, this plan.
+
+**Rollback.** Un-expose `script.news` + revert News docs/Instructions; delete `script.news`+reload if the
+script is wrong; restore `.inc2-bak/20260630T034433Z/` + (gated) restart if `/command news` fails.
+`mass_sync_request`, event adapter, existing scripts, gpt-4o-mini unchanged. **Inc 2B deferred.**
