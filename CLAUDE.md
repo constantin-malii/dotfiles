@@ -5,6 +5,21 @@ This is the **dotfiles repo** — shell config, tool configs, Claude Code files,
 dotfiles maintenance (shell, install.sh, tools); the HomeBrain section below is a pointer, not a
 duplicate of its docs.
 
+## Worktree discipline
+
+**Make every repository change in an isolated git worktree — never edit files, commit, or run
+mutating git commands directly on `main`.**
+
+- Before starting any change, create/enter a worktree: use the **EnterWorktree** tool, or the
+  fallback `git worktree add .claude/worktrees/<name> -b <branch> <base>`. Worktrees live under
+  `.claude/worktrees/` (untracked — they never pollute git status).
+- **Base it on the up-to-date default branch.** Keep `main` pushed so the worktree's default base
+  (`origin/main`) is current; if `main` is ever ahead of `origin/main`, branch from local `HEAD`.
+- Commit on the worktree branch, then integrate via merge or PR, then remove the worktree. Keep
+  `main` clean.
+- Applies to all tracked files (shell config, tool configs, `claude/`, `docs/`, install scripts).
+  Scratchpad/throwaway files outside the repo are not repository changes and are exempt.
+
 ## HomeBrain work
 
 HomeBrain = the Home Assistant / Music Assistant / ceiling-speaker stack documented under
