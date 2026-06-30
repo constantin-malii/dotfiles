@@ -54,5 +54,38 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(newsfeed.parse(bomb), [])
 
 
+class FetchFeedTest(unittest.TestCase):
+    def setUp(self):
+        self._orig = newsfeed._http_get
+
+    def tearDown(self):
+        newsfeed._http_get = self._orig
+
+    def test_success_attaches_source(self):
+        newsfeed._http_get = lambda url, timeout: RSS
+        items = newsfeed.fetch_feed({"name": "BBC World", "url": "http://x"}, 4.0, 10)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["source"], "BBC World")
+        self.assertEqual(items[0]["title"], "Headline One & Two")
+
+    def test_network_error_returns_empty(self):
+        def boom(url, timeout):
+            raise IOError("timed out")
+        newsfeed._http_get = boom
+        self.assertEqual(newsfeed.fetch_feed({"name": "BBC", "url": "http://x"}, 4.0, 10), [])
+
+    def test_max_items_truncates(self):
+        newsfeed._http_get = lambda url, timeout: RSS
+        items = newsfeed.fetch_feed({"name": "BBC", "url": "http://x"}, 4.0, 1)
+        self.assertEqual(len(items), 1)
+
+    def test_missing_url_returns_empty(self):
+        self.assertEqual(newsfeed.fetch_feed({"name": "BBC"}, 4.0, 10), [])
+
+    def test_unparseable_body_returns_empty(self):
+        newsfeed._http_get = lambda url, timeout: b"garbage <<<"
+        self.assertEqual(newsfeed.fetch_feed({"name": "BBC", "url": "http://x"}, 4.0, 10), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

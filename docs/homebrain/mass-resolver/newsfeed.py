@@ -52,3 +52,36 @@ def parse(xml_bytes):
             link = le.get("href") or ""
         items.append({"title": title, "link": link.strip()})
     return items
+
+
+# Cap the feed read so an oversized/malicious payload can't exhaust memory.
+# NB: 2000000 (no underscores) -- numeric underscores are a Python 3.6+ syntax error; host is 3.5.2.
+_MAX_FEED_BYTES = 2000000
+
+
+def _http_get(url, timeout):
+    """Network seam: fetch raw bytes for a feed URL (size-capped). Patched in tests; only network call."""
+    resp = urlopen(url, timeout=timeout)
+    try:
+        return resp.read(_MAX_FEED_BYTES)
+    finally:
+        resp.close()
+
+
+def fetch_feed(feed, timeout, max_items):
+    """Fetch + parse one feed -> [{title, link, source}]. [] on any failure; never raises."""
+    feed = feed or {}
+    name = feed.get("name") or "?"
+    url = feed.get("url")
+    if not url:
+        return []
+    try:
+        raw = _http_get(url, timeout)
+    except Exception as e:
+        LOG.error("newsfeed fetch failed name=%s: %r",
+                  name.encode("ascii", "replace").decode("ascii"), e)
+        return []
+    out = []
+    for it in parse(raw)[:max_items]:
+        out.append({"title": it["title"], "link": it.get("link", ""), "source": name})
+    return out
