@@ -66,5 +66,31 @@ class ResolveValidateTest(unittest.TestCase):
         self.assertEqual(d["max_items_per_feed"], 10)
 
 
+class MergeTest(unittest.TestCase):
+    def _items(self, *titles):
+        return [{"title": t, "link": "", "source": "s"} for t in titles]
+
+    def test_roundrobin_interleaves_feeds(self):
+        a = self._items("A1", "A2")
+        b = self._items("B1", "B2")
+        merged = news._merge([a, b], 4)
+        self.assertEqual([m["title"] for m in merged], ["A1", "B1", "A2", "B2"])
+
+    def test_dedupes_by_title_case_insensitive(self):
+        a = self._items("Same", "A2")
+        b = self._items("same", "B2")
+        merged = news._merge([a, b], 4)
+        self.assertEqual([m["title"] for m in merged], ["Same", "A2", "B2"])
+
+    def test_caps_at_count(self):
+        a = self._items("A1", "A2", "A3", "A4")
+        merged = news._merge([a], 2)
+        self.assertEqual(len(merged), 2)
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(news._merge([], 3), [])
+        self.assertEqual(news._merge([[]], 3), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

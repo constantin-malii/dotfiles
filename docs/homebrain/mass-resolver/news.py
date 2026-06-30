@@ -16,6 +16,28 @@ def _defaults(news_cfg):
     return d
 
 
+def _merge(per_feed, cap):
+    """Round-robin across per-feed lists, dedupe by lowercased title, cap at `cap`."""
+    seen = set()
+    out = []
+    i = 0
+    more = True
+    while more and len(out) < cap:
+        more = False
+        for lst in per_feed:
+            if i < len(lst):
+                more = True
+                it = lst[i]
+                key = (it.get("title") or "").strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(it)
+                    if len(out) >= cap:
+                        break
+        i += 1
+    return out
+
+
 class NewsCapability(capability.Capability):
     name = "news"
 
