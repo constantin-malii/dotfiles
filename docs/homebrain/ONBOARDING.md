@@ -1,6 +1,27 @@
 # Homebrain / Home Assistant — Agent Onboarding
 
-> **START HERE.** This is the primary entry point for any agent working on the homebrain Home Assistant / Music Assistant / ceiling-speaker stack. Read §1–§7 to be productive in ~15 minutes; read §8–§13 before touching the Music-Assistant playback problem (it has a long investigation history — don't re-run dead ends). Authoritative deep doc: [`music-assistant-audio-architecture.md`](./music-assistant-audio-architecture.md). Latest running status lives in the agent memory log (see §14).
+> **START HERE.** This is the primary entry point for any agent working on the homebrain Home Assistant / Music Assistant / ceiling-speaker stack. Read §1–§7 to be productive in ~15 minutes; read §8–§13 before touching the Music-Assistant playback problem (it has a long investigation history — don't re-run dead ends). Authoritative deep doc: [`music-assistant-audio-architecture.md`](./music-assistant-audio-architecture.md). **The current production architecture (resolver + Inc 0–1 + F1-R) is summarized in the _Resolver / Inc 0–1 / F1-R current state_ section immediately below — read that first; §8–§13 are YTM-playback history, not today's exposed capabilities.** Latest running status lives in the agent memory log (see §14).
+
+---
+
+## Resolver / Inc 0–1 / F1-R current state
+
+> **Current production reality — read before the YTM/playback-lock history in §8–§13.** That history is about **YTM track** playback (still unexposed); it does **not** describe today's exposed capabilities.
+
+A host-side **`mass-resolver`** service (Python 3.5, on the host `costea@192.168.1.68`) is the brain behind the ChatGPT-exposed media tools. It reaches Music Assistant + HA over the host↔VM NAT network and exposes an **authenticated HTTP `/command`** endpoint on the internal interface the HA VM can reach (`192.168.122.1:8770`; `X-Resolver-Key` shared secret in a 0600 file — never logged/committed). HA calls it via `rest_command.resolver_command`.
+
+- **Increments:** Inc 0 (local music play) ✅, Inc 1 (radio play + station find) ✅, and **Foundation F1 + F1-R** (synchronous results) ✅ — all complete.
+- **Contract:** every capability returns a **`CommandResult`** (`ok` / `spoken_text` / `chat_text` / `metadata` / `error{code,reason}`) via a **`resolve → validate → execute`** interface.
+- **Exposed ChatGPT tools (all synchronous — F1-R "hard tool return"):**
+  - `script.play_music` — play from the **local** music library (MA `filesystem_smb`).
+  - `script.play_radio` — radio (favorites-first → RadioBrowser; by station/genre/country/language).
+  - `script.find_stations` — list stations (genre/country).
+  - Each calls `rest_command.resolver_command`, captures `response_variable`, and **returns `{chat_text: r.content.chat_text}` via `stop` + `response_variable`** so the OpenAI agent relays the real outcome. The agent carries one instruction: *"When a tool returns a chat_text field, relay that text verbatim."*
+- **TTS ownership:** the **resolver is the sole TTS owner** (Piper speaks `spoken_text`). The scripts do **NOT** call `tts.speak` and do **NOT** use `set_conversation_response` (proven ignored by the OpenAI agent for tool-called scripts — see the F1-R addendum). Play success is silent (the stream is the confirmation); no-match and find speak once.
+- **Dual-path kept:** the **event adapter** (`mass_play_request` / `mass_radio_request`) remains live as a fallback; **`mass_sync_request`** (Lidarr) is **untouched**.
+- **Rollback:** per-script backups at `~/script_backups/*.preF1R.json`; restoring one reverts just that script to its event path while `/command` and the event path stay available. `gpt-4o-mini` unchanged; no new tools beyond the three above.
+
+Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
 ---
 
@@ -53,7 +74,8 @@
 - **Config entries:** Music Assistant `01KVPNW1JFHJG30NANAPVARHY8`; OpenAI Conversation `01KVRQW1ERJGJDRPC4MEF7206A`.
 - **Assist pipelines:** default/preferred **"Home Assistant"** `01kvpdchwfeh0wa8p7d4bcywj4` (deterministic, STT=faster-whisper, TTS off); **"ChatGPT"** `01kvs55xvmsz0yy27hj7bkaygg` (OpenAI, opt-in).
 - **Conversation agents:** `conversation.home_assistant`, `conversation.openai_conversation` (gpt-4o-mini).
-- **Helper scripts** (`script.ceiling_*`): `play_radio`, `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS, **not** LLM-exposed), `play_music` (search-then-play).
+- **ChatGPT-exposed media tools (resolver-backed — F1-R hard tool return):** `script.play_music` (local library), `script.play_radio` (radio), `script.find_stations` (station list). See the **Resolver / Inc 0–1 / F1-R current state** section.
+- **Local ceiling control / fast-phrase layer (`script.ceiling_*`):** `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS primitive, **not** LLM-exposed), plus the legacy `ceiling_play_radio` (kept for the deterministic sentence-trigger layer; **un-exposed** to ChatGPT).
 - **Automations:** `automation.voice_ceiling_speakers` (phone voice handler — don't modify casually); `automation.ma_auto_reload_integration_after_restart` (A1); `automation.ma_health_probe_auto_reload` (A2a).
 
 ---
@@ -61,8 +83,9 @@
 ## 5. What works (reliable)
 
 - ✅ **Ceiling speaker zone** — radio plays instantly and reliably.
+- ✅ **Local music + radio via the resolver (synchronous, F1-R)** — `script.play_music` (local library), `script.play_radio`, `script.find_stations`; ChatGPT relays the real `chat_text`. See the **Resolver / Inc 0–1 / F1-R current state** section.
 - ✅ **Phone voice control (Phase 2)** — Companion app → Whisper STT → `automation.voice_ceiling_speakers` → ceiling. **Text replies only** (Piper TTS disabled in pipeline). Generic spoken-number volume parsing.
-- ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; can run the 7 ceiling scripts + read `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
+- ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; runs the exposed resolver media tools (`play_music`/`play_radio`/`find_stations`) and the ceiling control scripts, and reads `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
 - ✅ **Ceiling TTS announcements** — `tts.speak` (tts.piper) → `media_player.ceiling_speakers` (`script.ceiling_announce`). MA announcements **resume prior playback** afterward (so no "stop" confirmation).
 - ✅ **A1 + A2a self-healing** — HA↔MA connection drops intermittently (internal Docker DNS); these auto-reload the config entry to recover (validated).
 - ✅ **YTM auth + search** — after refreshing the cookie via the **incognito method** (extract from a private window, close it without logging out). Search resolves `ytmusic://` URIs for track/artist/album/playlist. Artist/album/playlist queries reliable; multi-word **track-name** queries often return 0 (use simpler terms or artist).
@@ -168,7 +191,7 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 1. ✅ **DONE — live debug trace (2026-06-24): REFUTED H1/H1b.** VERBOSE SlimProto trace of 6/6 clean radio play→stop cycles: every stop → `idle` via `STMf`. The clean stop path works; the wedge is NOT here.
 2. ✅ **DONE — interrupted-state experiment (2026-06-24): ROOT CAUSE FOUND.** All 6 interrupt-during-resolution conditions reproduced "previous holder appears stuck"; **no** persistent state mismatch. Root = **slow YTM resolution holds the playback lock for its full duration**; overlapping commands block 30 s. See `research-playback-lock.md` §7.
 3. **Upstream issue — DRAFTED, awaiting review/submit (2026-06-24).** No matching upstream issue exists (confirmed). Code path confirmed in source (`@handle_play_action` wraps `play_index`→`_load_item`→`get_stream_details` in the PLAYBACK lock). Draft ready: [`upstream-issue-draft.md`](./upstream-issue-draft.md). **Do not submit without user approval.** Suggested fix: resolve the stream **outside** the lock (lock only the hand-off) or fast-reject/cancel an in-progress lock holder.
-4. **Local workaround for safe assistant exposure (if/when pursued):** (C) use `media_pause` not `media_stop` for interrupts — `pause()` is NOT lock-decorated, so it avoids the 30 s wait (caveat: auto-converts to a locked stop after ~30 s paused). (B) an HA-script serializer that rejects/queues overlapping commands while a YTM play is starting ("starting music, please wait"). Pre-resolve/warm-cache (A) is NOT feasible (no resolve-without-play; search doesn't warm the cache). Local MA patch (E) feasible but a maintenance burden — prefer upstream. Detail in `research-playback-lock.md` §8.
+4. **Local workaround — SHELVED (2026-06-24).** Built `ytm_guard.py` (single-flight serializer + pause-interject, 7/7 unit tests) but the **live HA/MA test FAILED** (19 new "stuck"). Root cause (`research-playback-lock.md` §8b): for YTM the **PLAYBACK lock is held for the ENTIRE `play_media` call** (never returns in bounded time; held past audio-start), so **no safe moment exists to stop/switch during YTM startup**. Senior re-analysis raised a single-track lever (smaller critical section → bounded lock-hold); the narrow test (§8c) could not confirm it — `play_media` for one track didn't return in 150 s and the track never played (YTM degraded/rate-limited). Per decision rule → **shelved**. Single-track lock hypothesis is *unproven, not refuted*; revisit only if YTM playback reliability is first restored, then re-run `scratchpad/narrow_single_track.py`. Validated facts still hold: `pause` lock-free, `stop` wedges during resolution (§8a). **RADIO is healthy and needs no guard.** YTM stays unexposed to the LLM (today's degradation reinforces it). Artifacts kept (rollback = delete `ytm_guard.py`, `test_ytm_guard.py`).
 3. **Universal Player lock internals** — read MA's `controllers/players/controller.py` stop path + `providers/squeezelite/player.py` to confirm the lock is only released in `finally` when the child converges, and why `players/cmd/stop` doesn't clear a wedged child.
 4. **Alternate player backend (lower priority)** — a different transport could sidestep the SlimProto stop quirk, but note the **macvtap/NAT constraint**: only the host can fetch the NAT-IP stream, so a LAN fetch-player (Cast/DLNA) hits the publish-IP conflict.
 
@@ -186,7 +209,7 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 | Decision | Rationale |
 |---|---|
 | **YTM not exposed to the LLM** | Playback isn't reliable (stop-wedge + cold-start latency). Exposing it would let the assistant hang the speakers. Gate: only expose once playback is proven reliable. |
-| **Radio is the only exposed playback capability** | Radio plays instantly and reliably (no YTM resolution / wedge sensitivity), so it's safe for assistant/voice use. |
+| **Exposed playback = local library + radio (resolver / F1-R)** | `play_music` (local files via MA `filesystem_smb`), `play_radio`, and `find_stations` are exposed through the synchronous resolver `/command` path. **YTM track playback stays unexposed** (stop-wedge + cold-start latency — §8–§13). |
 | **Phone-pipeline TTS disabled** | Piper crashes the pipeline, and TTS proxy URLs resolve to the NAT IP `192.168.122.10` which the **phone can't reach** (macvtap split). Spoken replies on the phone would fail; text replies are reliable. |
 | **LLM exposure restricted to helper scripts (+ weather)** | Entity exposure is shared by all conversation agents; exposing raw `media_player`/TV/etc. would re-enable broken built-in intents and widen the LLM's reach. Purpose-built `script.ceiling_*` are a safe, minimal, bounded action surface. `expose_new_entities` turned off. |
 | **Ceiling TTS via explicit `tts.speak`, not the pipeline** | The pipeline TTS is off (Piper); explicit `tts.speak` to `media_player.ceiling_speakers` works because the **host** can fetch the NAT-IP TTS URL. `script.ceiling_announce` is the reusable primitive (kept un-exposed to the LLM). |
@@ -239,6 +262,7 @@ Reliable playback of **track, artist, album, playlist, genre** from YouTube Musi
 
 - **Deep docs (authoritative):** `D:\repos\dotfiles\docs\homebrain\`
   - `music-assistant-audio-architecture.md` — master (architecture, voice, LLM, TTS, YTM investigation, http_profile, A1/A2a, change log).
+  - **Resolver / Inc / F1-R:** `2026-06-28-F1-synchronous-command-result-design.md` (F1 design), `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` (F1-R addendum), `plans/2026-06-28-F1-R-music-remigration.md` (music migration), `plans/2026-06-29-F1-R-radio-find-migration.md` (radio/find migration), `assistant-capabilities.md`, `local-music-architecture.md`, `CHANGELOG.md`.
   - `haos-vm-deployment.md`, `homebrain-architecture.md`, `migration-inventory.md`, **this `ONBOARDING.md`**.
 - **Agent memory (running project log, latest status):** `~/.claude/projects/C--Users-ConstantinMalii/memory/homebrain-ha-vm-project.md` — detailed chronology + every finding.
 - **Scratchpad (test outputs, config snapshots):** session scratchpad dir; e.g. `ma_cfg_before_*.json`, `phase3_exposure_snapshot_*.json`.
@@ -252,4 +276,8 @@ Reliable playback of **track, artist, album, playlist, genre** from YouTube Musi
 - **Scope discipline** — change only what's asked; snapshot before changing settings; roll back if a change doesn't deliver.
 - **Don't expose YTM (or broad entities) to the LLM** until playback is proven reliable. Keep exposure minimal.
 - **Git:** secret-scan first; **no Claude attribution** in commits/PRs; commit only when asked; keep documentation commits separate from implementation.
+- **No service restarts without explicit approval** — resolver / MA / HA / Squeezelite restarts are user-run; never restart unprompted.
+- **No HA script changes without explicit approval** — don't edit or migrate `script.*` configs unless asked.
+- **No new ChatGPT exposure without explicit approval** — entity/tool exposure is shared across agents; don't expose anything new unprompted.
+- **Don't stage unrelated files** — commit only the files for the change at hand; leave pre-existing/unrelated working-tree changes (and others' in-progress files) alone.
 - **Secrets:** never write tokens/cookies to repo, docs, memory, logs, or artifacts.

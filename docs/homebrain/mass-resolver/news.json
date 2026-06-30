@@ -1,0 +1,9 @@
+{
+  "defaults": { "headline_count": 3, "feed_timeout": 4.0, "max_items_per_feed": 10 },
+  "feeds": {
+    "world": [
+      { "name": "BBC World", "url": "http://feeds.bbci.co.uk/news/world/rss.xml" }
+    ]
+  },
+  "stations": {}
+}

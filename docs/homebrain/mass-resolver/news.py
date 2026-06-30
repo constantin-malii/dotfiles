@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+# News capability: spoken headlines from curated RSS feeds. Python 3.5 safe.
+import logging
+import capability
+import command_result as cr
+import newsfeed
+
+LOG = logging.getLogger("resolver")
+
+_DEFAULTS = {"headline_count": 3, "feed_timeout": 4.0, "max_items_per_feed": 10}
+
+
+def _defaults(news_cfg):
+    d = dict(_DEFAULTS)
+    d.update((news_cfg or {}).get("defaults", {}))
+    return d
+
+
+def _merge(per_feed, cap):
+    """Round-robin across per-feed lists, dedupe by lowercased title, cap at `cap`."""
+    seen = set()
+    out = []
+    i = 0
+    more = True
+    while more and len(out) < cap:
+        more = False
+        for lst in per_feed:
+            if i < len(lst):
+                more = True
+                it = lst[i]
+                key = (it.get("title") or "").strip().lower()
+                if key and key not in seen:
+                    seen.add(key)
+                    out.append(it)
+                    if len(out) >= cap:
+                        break
+        i += 1
+    return out
+
+
+def _spoken(bucket, items):
+    titles = [it["title"] for it in items]
+    return "Here are the top " + bucket + " headlines. " + ". ".join(titles) + "."
+
+
+def _chat(bucket, items):
+    parts = []
+    n = 1
+    for it in items:
+        parts.append("%d) %s" % (n, it["title"]))
+        n += 1
+    return "Top " + bucket + " headlines: " + " ".join(parts)
+
+
+class NewsCapability(capability.Capability):
+    name = "news"
+
+    def resolve(self, ctx, params):
+        news_cfg = ctx.news_cfg or {}
+        feeds_cfg = news_cfg.get("feeds", {}) or {}
+        d = _defaults(news_cfg)
+        label = params.get("topic") or params.get("country")
+        if label is not None:
+            label = str(label).strip()
+        if not label:
+            bucket_key = "world"
+            requested_label = None
+        else:
+            key = label.lower()
+            if key in feeds_cfg:
+                bucket_key = key
+                requested_label = None
+            else:
+                bucket_key = None
+                requested_label = label
+        if bucket_key:
+            feeds = feeds_cfg.get(bucket_key) or []
+        else:
+            feeds = []
+        return {"bucket_key": bucket_key, "requested_label": requested_label,
+                "feeds": feeds, "headline_count": d["headline_count"],
+                "feed_timeout": d["feed_timeout"], "max_items": d["max_items_per_feed"]}
+
+    def validate(self, ctx, resolved):
+        if resolved.get("bucket_key") is None:
+            lbl = resolved.get("requested_label") or "that"
+            return {"code": "not_found", "reason": "bucket not configured",
+                    "chat_text": "I don't have " + lbl + " news set up yet.",
+                    "spoken_text": None, "metadata": {"requested": lbl.lower()}}
+        if not resolved.get("feeds"):
+            return {"code": "not_found", "reason": "bucket not configured",
+                    "chat_text": "I don't have that news set up yet.",
+                    "spoken_text": None, "metadata": {"requested": resolved.get("bucket_key")}}
+        return None
+
+    def execute(self, ctx, resolved, rid):
+        bucket = resolved["bucket_key"]
+        cap = resolved["headline_count"]
+        timeout = resolved["feed_timeout"]
+        max_items = resolved["max_items"]
+        per_feed = []
+        feeds_ok = 0
+        feeds_failed = 0
+        for f in resolved["feeds"]:
+            items = newsfeed.fetch_feed(f, timeout, max_items)
+            if items:
+                feeds_ok += 1
+                per_feed.append(items)
+            else:
+                feeds_failed += 1
+        merged = _merge(per_feed, cap)
+        if not merged:
+            LOG.error("req=%s NEWS no headlines bucket=%s ok=%d failed=%d",
+                      rid, bucket, feeds_ok, feeds_failed)
+            return cr.err(self.name, rid, "unavailable", "no headlines (feeds failed/empty)",
+                          "Sorry, I couldn't get the news right now.", spoken_text=None,
+                          metadata={"bucket": bucket, "count": 0, "items": [],
+                                    "feeds_ok": feeds_ok, "feeds_failed": feeds_failed})
+        LOG.info("req=%s NEWS bucket=%s count=%d ok=%d failed=%d",
+                 rid, bucket, len(merged), feeds_ok, feeds_failed)
+        md = {"bucket": bucket, "count": len(merged), "items": merged,
+              "feeds_ok": feeds_ok, "feeds_failed": feeds_failed}
+        return cr.ok(self.name, rid, _chat(bucket, merged),
+                     spoken_text=_spoken(bucket, merged), metadata=md)

@@ -1,0 +1,26 @@
+{
+  "favorites": [
+    {"name": "101 SMOOTH JAZZ", "uri": "library://radio/2", "country": "us", "language": "en", "genres": ["jazz", "smooth jazz", "relax"]},
+    {"name": "Café del Mar", "uri": "library://radio/15", "country": "es", "language": "en", "genres": ["chillout", "lounge", "relax"]},
+    {"name": "Classic FM Relax", "uri": "library://radio/14", "country": "gb", "language": "en", "genres": ["classical", "relax"]},
+    {"name": "Deep House Radio - Bucharest Romania", "uri": "library://radio/5", "country": "ro", "language": "ro", "genres": ["dance", "house", "electronic"]},
+    {"name": "Europa Plus", "uri": "library://radio/3", "country": "ru", "language": "ru", "genres": ["pop", "hits"]},
+    {"name": "Hit FM (UKraine) - 128kb/s", "uri": "library://radio/1", "country": "ua", "language": "uk", "genres": ["pop", "hits"]},
+    {"name": "Kiss FM 106.5", "uri": "library://radio/11", "country": "ua", "language": "uk", "genres": ["pop", "dance"]},
+    {"name": "Люкс FМ 103.1", "uri": "library://radio/12", "country": "ua", "language": "uk", "genres": ["pop"]},
+    {"name": "Mega Hits", "uri": "library://radio/16", "country": "pt", "language": "pt", "genres": ["pop", "hits"]},
+    {"name": "Наше Радио", "uri": "library://radio/9", "country": "ru", "language": "ru", "genres": ["rock"]},
+    {"name": "Nashe Radio", "uri": "library://radio/13", "country": "ru", "language": "ru", "genres": ["rock"]},
+    {"name": "Радио Родных Дорог", "uri": "library://radio/17", "country": "ru", "language": "ru", "genres": ["folk", "retro"]},
+    {"name": "Radio Romania Actualității", "uri": "library://radio/10", "country": "ro", "language": "ro", "genres": ["news", "talk"]},
+    {"name": "Радио Русские Песни", "uri": "library://radio/4", "country": "ru", "language": "ru", "genres": ["folk", "retro"]},
+    {"name": "Ретро ФМ", "uri": "library://radio/8", "country": "ru", "language": "ru", "genres": ["retro", "oldies"]},
+    {"name": "Русское Радио", "uri": "library://radio/7", "country": "ru", "language": "ru", "genres": ["pop", "hits"]},
+    {"name": "Спокойное радио", "uri": "library://radio/6", "country": "ru", "language": "ru", "genres": ["relax", "ambient"]}
+  ],
+  "aliases": {"hit fm": "Hit FM (UKraine) - 128kb/s", "nashe": "Nashe Radio", "retro fm": "Ретро ФМ", "russian songs": "Радио Русские Песни"},
+  "country_codes": {"romania": "ro", "romanian": "ro", "russia": "ru", "russian": "ru", "ukraine": "ua", "ukrainian": "ua", "usa": "us", "america": "us", "american": "us", "uk": "gb", "england": "gb", "british": "gb", "germany": "de", "german": "de", "france": "fr", "french": "fr", "spain": "es", "portugal": "pt", "moldova": "md"},
+  "languages": {"russian": "ru", "romanian": "ro", "english": "en", "ukrainian": "uk", "french": "fr", "german": "de", "spanish": "es", "portuguese": "pt"},
+  "genre_synonyms": {"jazz": ["jazz", "smooth jazz"], "country": ["country"], "news": ["news", "talk", "actualitati"], "pop": ["pop", "top 40", "hits"], "rock": ["rock"], "relax": ["relax", "chillout", "ambient", "lounge"], "retro": ["retro", "oldies", "80s", "90s"], "dance": ["dance", "house", "electronic"], "classical": ["classical", "classic"]},
+  "defaults": {"find_internal": 5, "find_speak": 3, "fallback_browse_limit": 10}
+}
