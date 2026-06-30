@@ -20,7 +20,7 @@ The proposed **Personal / Communication Layer (PCL)** is a different animal from
 
 **Contract recommendation (⟲ Reconciled — changed):** Do **not** fork the wire contract. The ChatGPT relay is built entirely on `CommandResult.chat_text`/`spoken_text`, so **anything the PCL exposes to ChatGPT must emit a `CommandResult`-compatible payload and use the F1-R relay verbatim.** Keep a richer **internal** `AssistantResult` model for conversation/memory, but **project it down to a `CommandResult`-shaped payload at the LLM edge.** (First draft proposed a parallel contract; reading F1-R showed the relay *is* the contract.)
 
-**MVP recommendation:** The first safe slice is **notes + durable reminders + light decisions, local SQLite, exposed to ChatGPT via the F1-R relay**, with audit + delete from day one. **Hard dependency:** the PCL's ChatGPT exposure rides on the **F1-R relay being landed** (currently approved-design, music re-migration pending). No receipts/images, no cloud, no multi-user, no semantic memory in the MVP.
+**MVP recommendation:** The first safe slice is **notes only — create / recall / forget — on local SQLite, validated over HTTP and exposed to ChatGPT via the F1-R relay only after a sentinel-probe**, with audit + delete from day one. (Durable reminders move to P1; light decisions and short-term referents move to P2 — see §15.) **Gate status (2026-06-29):** the two prerequisite gates are now **met** (F1-R closed/accepted complete; Speaker reconnect bug fixed/deployed — CHANGELOG 2026-06-28/29) and the **F1-R relay is landed**, so **PCL P0 is unblocked**. No receipts/images, no cloud, no multi-user, no semantic memory in the MVP.
 
 The rest of this document argues these positions with trade-offs, the security model, and a phased roadmap with an explicit "do not build yet" list — slotted against the existing Inc/F1 roadmap.
 
@@ -62,7 +62,7 @@ The rest of this document argues these positions with trade-offs, the security m
 - **Voice I/O constraints:** phone gets **text replies only** — TTS URLs resolve to the NAT IP `192.168.122.10`, which the **phone/LAN cannot reach** (macvtap split); only the **host** can fetch them, so ceiling-speaker TTS works but phone TTS does not.
 - **Exposure discipline:** only a small set of purpose-built `script.*` are exposed to the conversation agents (+ `weather`). `expose_new_entities` is off. Rule: **nothing is exposed to ChatGPT until validated.**
 - **Host runtime:** the resolver runs on Ubuntu 16.04 / **Python 3.5.2** (no f-strings; "Python 3.5-safe" is a carried constraint). HAOS-side code (if any) runs in HAOS's own Python.
-- **Roadmap state:** Inc 0 (foundation) ✅, Inc 1 (radio) ✅, **F1** (CommandResult framework) live, **F1-R** relay proven (music-only re-migration = design approved, *pending execution*), Inc 2 News, Inc 3 Acquire, **Inc 4 Status + household (sleep timer, shuffle)** — note Inc 4 brushes against PCL territory (§13).
+- **Roadmap state (⟲ updated 2026-06-29):** Inc 0 (foundation) ✅, Inc 1 (radio) ✅, **F1** (CommandResult framework) ✅, **F1-R** relay ✅ **closed/accepted complete** (all three media scripts — `play_music`/`play_radio`/`find_stations` — relay `chat_text` via `stop`+`response_variable`; CHANGELOG 2026-06-28/29), **Inc 4A Status / now-playing ✅ shipped 2026-06-29** (`script.media_status`), Inc 2 News, Inc 3 Acquire — note the Status/household line brushes against PCL territory (§13).
 
 **What the resolver is good at and should stay good at:** turning a clear intent into a verified action with a truthful result, and being the single TTS owner. That purity is an asset. The PCL must not pollute it.
 
@@ -302,6 +302,9 @@ Every interaction carries context that the routing decision consumes:
 | `conversation_id` | session linkage for short-term context (§8.1) |
 
 ### 6A.5 `ResponseRoutingPolicy` (concept)
+
+> **Scope (⟲ 2026-06-29):** `ResponseRoutingPolicy` decides **where a response is delivered** (output side). It is **separate** from the **`InteractionAudioPolicy`** (§6B), which decides whether to **pause/duck same-room media when an interaction *starts*** (input side). Do not conflate them or fold one into the other — `ResponseRoutingPolicy` gains **no** `media_interruption` field.
+
 Given an `InteractionContext` **plus the result's content class/privacy**, the policy **chooses one (or more) output channel(s)** from: **text** (to the source client) · **source-device audio** (the satellite that asked) · **ceiling speakers / media zone** · **push notification** · **dashboard** · **silent result**.
 
 **Default routing (policy-driven — explicitly NOT hard-coded):**
@@ -352,10 +355,30 @@ When inputs conflict, the policy resolves them in this **fixed order** (earlier 
 - **Keep multi-user identity a later gated phase** (§11) **unless the satellites already provide reliable user identity** (e.g. per-device or voice ID surfaced by HA) — in which case identity may arrive earlier from satellite metadata, still behind a privacy review.
 
 ### 6A.8 Roadmap impact
-- **PCL MVP is unchanged** (notes / durable reminders / light decisions / short-term referents) and is **text-first to the initiating client** — which *needs no routing engine*, so the MVP is unaffected by satellite work.
+- **PCL MVP** (now **notes-only** — see §14/§15) is **text-first to the initiating client** — which *needs no routing engine*, so the MVP is unaffected by satellite work.
 - **Satellite integration is a required, separate design track ("Track S")** that must land **before real household communication is exposed** on satellites.
 - **Do not build satellite routing yet unless specifically approved.**
 - **First step (Track S):** **inventory satellite capabilities/entities after they are installed** — entities, room mapping, assist-pipeline binding, per-device TTS reachability (recall the ceiling path depends on the host fetching NAT-IP TTS URLs; satellites may differ), and whether they expose reliable user identity.
+
+---
+
+## 6B. Interaction Audio Policy — deterministic media interruption (⟲ Added 2026-06-29)
+
+**Premise.** When a satellite interaction *starts* in a room where music is playing, the system should **pause or strongly duck that room's media** for the duration of the interaction and the assistant's response — and **not** resume automatically. This is an **input-side / interaction-lifecycle** concern, distinct from `ResponseRoutingPolicy` (which decides *where the answer goes*, an output-side concern). **It is a separate `InteractionAudioPolicy`, never a field of `ResponseRoutingPolicy`.**
+
+**Ownership (boundary).** The `InteractionAudioPolicy` lives in the **deterministic media-interaction layer — `mass-resolver` (executor) + Home Assistant (lifecycle events, room/device metadata) — never in PCL business/memory logic and never in LLM discretion.** PCL **may** supply `InteractionContext` (`source_room`, `source_device`, an interaction phase) but **must not** pause/duck/resume media itself. The resolver already owns volume/pause/resume and is the sole media-TTS owner, so it is the natural owner of the duck/restore mechanics and of the **ephemeral pre-interaction snapshot** (in-memory, per media zone, keyed by interaction id; **not** persisted in the companion's SQLite store and **never** in ChatGPT memory). On resolver restart mid-duck, **fail safe — do not auto-restore from a stale snapshot.**
+
+**Behavior (the locked policy — see Appendix C§8):**
+- On `interaction_start` in a room that maps to a *playing* media zone: **snapshot {playback_state, absolute_volume}**, then **duck (lower volume) or pause** — that zone only.
+- **Hold** through the interaction and the assistant's response. **No auto-resume by default.**
+- **Resume only on an explicit user command** ("resume music", "continue playing", "you can resume"), detected deterministically by the **existing fast local sentence-trigger layer** (it already handles "resume"), or via the resolver `resume` capability when the phrase reaches ChatGPT — either path runs the **same deterministic restore** of the snapshot volume/state and clears the duck flag. Timeout-based auto-resume **MAY** be considered later but **MUST NOT** be the default.
+- **Other rooms are never affected.** **Fail safe:** if room↔satellite↔media-zone mapping or current media state is unknown, **do not manipulate media.**
+
+**Concrete constraints (tie-ins to known state):**
+- **Use pause or volume-duck, never `media_stop`** — `media_stop` triggers the open stop-wedge / playback-lock (ONBOARDING §6/§8). Note ONBOARDING §11 also warns a long *pause* auto-converts to a locked stop after ~30 s, so **volume-duck is the safer hold for long interactions; reserve pause for short ones.**
+- **Reconcile with MA auto-resume.** `script.ceiling_announce` and MA announcements **auto-resume prior playback** (ONBOARDING §5, §6) — which **conflicts** with "no auto-resume." Track S must ensure interaction-ducking does **not** ride the auto-resuming announce path, or must suppress that auto-resume for an interaction hold.
+
+**P0 scope = boundary + hooks only.** P0 defines the policy *name, owner, invariants, and hook points* (interaction-lifecycle signal, room→zone map as Track S data, snapshot-owner rule, explicit-resume routing) and writes **no ducking/pause/resume mechanics and no HA lifecycle wiring**. The full mechanics are **Track S step S2.5** (§15), gated on satellites being installed and inventoried (the room→media-zone map depends on it).
 
 ---
 
@@ -369,6 +392,7 @@ Any companion tool exposed to ChatGPT MUST:
 2. **Return `{chat_text: …}` via `stop`+`response_variable`** (NOT `set_conversation_response` — F1-R proved the agent ignores it).
 3. Rely on the existing one-line agent Instruction ("relay `chat_text` verbatim").
 4. Emit a `CommandResult`-shaped payload (so `chat_text`/`spoken_text`/`error` semantics carry over unchanged).
+5. **Surface `chat_text` ONLY to the LLM (⟲ Added 2026-06-29).** The HA relay script returns exactly `{chat_text: r.content.chat_text}` — internal `CommandResult` fields (`metadata`, `routing_decision`, `actions[]`, `request_id`, `error.reason`) and any internal routing metadata **must not** be returned to the conversation agent. **Sentinel-probe** each tool before exposure (a value the model would not invent, relayed verbatim) to confirm no internal field leaks.
 
 This means the PCL gets **truthful-by-construction** ChatGPT text for free, the same way music/radio do — no new relay mechanism, no `set_conversation_response`.
 
@@ -479,6 +503,7 @@ The PCL holds the most sensitive data in HomeBrain. Security is a first-class dr
 7. **Authn between services:** `/companion` LAN-bound + shared-secret, same as `/command`. Don't expose it unauthenticated even on the LAN.
 8. **Multi-user is a security boundary, not just a feature** (below).
 9. **Aloud-output is privacy-gated (⟲ §6A.7).** Receipts, private notes, and sensitive reminders are **not spoken on shared zones (ceiling/satellites) by default**; whole-house announcements **require confirmation**. `privacy_level` on the `InteractionContext` (§6A.4) governs this, enforced by the `ResponseRoutingPolicy` (§6A.5).
+10. **The companion is the sole system of record for PCL memory; ChatGPT-native memory/personalization is NOT used for PCL state (⟲ Added 2026-06-29).** Keep any OpenAI-side conversation memory off/ignored for PCL data — relying on it would split the source of truth, evade the audit log, and push personal data outside the house. Only the current turn + minimal context is ever sent to OpenAI (cf. principle 2). The durable store (§8.2) is authoritative; recall comes from it, never from the LLM's own memory.
 
 ### Family / multi-user (⟲ Reconciled)
 - Early phases: **single shared context** (whoever talks to the home). Simplest; means *all* stored data is household-visible — state this explicitly to users.
@@ -615,21 +640,20 @@ Same discipline: a **structured envelope** carries everything the server needs t
 
 **Goal:** prove the sibling-service shape + truthful memory at lowest privacy/operational risk, reusing the resolver's contracts and the F1-R relay.
 
-**Hard dependency (⟲ Reconciled; locked — see Appendix C §6):** PCL implementation does **not start** until **(a) F1-R music is stable** and **(b) the Speaker WebSocket reconnect bug is fixed**. ChatGPT exposure additionally rides on the **F1-R relay being landed** (music re-migration currently pending execution). Until those gates pass, the MVP may be *designed* but not built; once building, it can be validated **over HTTP only** (like F1 validated `/command` before scripts) and exposed to ChatGPT *after* the relay path is live and the new tool is validated (carried "don't expose until validated" rule).
+**Hard dependency (⟲ Reconciled; locked — see Appendix C §6) — GATES MET (2026-06-29):** the two prerequisite gates are now **satisfied** — **(a) F1-R is closed/accepted complete** and **(b) the Speaker WebSocket reconnect bug is fixed and deployed** (CHANGELOG 2026-06-28/29) — and the **F1-R relay is landed** (all three media scripts relay `chat_text`). **PCL P0 is therefore unblocked.** It can now be validated **over HTTP only** (like F1 validated `/command` before scripts) and exposed to ChatGPT *after* the HTTP path is validated and the new tool is sentinel-probed (carried "don't expose until validated" rule).
 
-**In scope (MVP):**
+**In scope (MVP — notes only):**
 - New containerized `homebrain-companion` sibling; `POST /companion` (LAN + shared secret); SQLite store; modern Python.
-- **Notes:** create / recall (tag/keyword/recency) / forget.
-- **Durable reminders:** create with **confirmed absolute time**; simplest reliable firing (poll + push/ceiling-announce); list/complete.
-- **Light decisions:** record + recall (enables "save that decision").
-- **Short-term context** for the canonical flows: numbered-list referents ("the second one") via deterministic resolution against cached `metadata.stations[]`; "save that decision" snapshotting.
-- **`CommandResult`-shaped results** (honest-by-construction) + the F1-R relay for any ChatGPT exposure.
+- **Notes:** create / recall (tag/keyword/recency) / forget. `owner` field carried from day one (forward-compat; single-shared for now).
+- **`CommandResult`-shaped results** (honest-by-construction) + the F1-R relay (`chat_text` only) for the single notes tool, exposed **only after** HTTP validation + a sentinel-probe.
 - **Audit log** + `forget` from day one.
-- Read-back via the existing ChatGPT-text path (no new TTS; no HA script changes until validated).
+- Read-back via the existing ChatGPT-text path (no new TTS; no HA script changes).
 
-**Explicitly out of MVP:** receipts (esp. images) / OCR; cloud storage; multi-user/per-person privacy (single-shared only; `owner` field present for later); semantic/vector recall; auto-learned preferences/silent memory; new HA automations/YAML; message *sending* (draft-only); any change to `script.play_music`/`play_radio`/`find_stations` or the resolver.
+> **Deferred out of P0 (re-sequenced 2026-06-29):** durable **reminders → P1** (they pull in time-parsing + HA firing/delivery); light **decisions + short-term referents → P2** (they depend on a stable conversation id — Q1 — and on intercepting the resolver find-flow). Stripping P0 to notes proves the novel risk — a stateful, private, durable, *truthful*, deletable, audited store — with zero external dependencies.
 
-**Definition of done:** "take a note…", "remind me…", "help me compare X / save that decision", "what notes about Y", and "play the second one" (delegated) all work — and every confirmation ChatGPT relays is *true* (verified against store/resolver via `CommandResult`), with an audit trail and a working delete. No second TTS path; resolver remains sole TTS owner.
+**Explicitly out of MVP:** durable reminders (→P1); light decisions + short-term referents (→P2); **media-interruption mechanics — P0 defines only the boundary/hooks (§6B); Track S builds the mechanics**; receipts (esp. images) / OCR; cloud storage; multi-user/per-person privacy (single-shared only; `owner` field present for later); semantic/vector recall; auto-learned preferences/silent memory; new HA automations/YAML; message *sending* (draft-only); any change to `script.play_music`/`play_radio`/`find_stations`/`media_status` or the resolver.
+
+**Definition of done (notes-only):** "take a note…" and "what notes about Y" work end-to-end, "forget that note" really deletes, and **every confirmation ChatGPT relays is *true*** (verified against the store via `CommandResult`), with an audit trail. Validated over HTTP first; the single notes tool is exposed only after a sentinel-probe shows `chat_text`-only relay. No second TTS path; resolver remains sole TTS owner. (Reminders/decisions/referents have their own DoD in P1/P2.)
 
 ---
 
@@ -639,15 +663,15 @@ This is a **separate track ("Track P")** from the media increments. It must not 
 
 | Phase | Theme | Adds | Gate to enter |
 |---|---|---|---|
-| **P0** | Foundation (MVP) | Containerized companion, SQLite, notes, durable reminders, light decisions, short-term context, `CommandResult` projection, audit, forget | This doc approved; **F1-R music stable** **and** **Speaker reconnect bug fixed**; **F1-R relay landed** (for exposure); resolver/HA untouched |
-| **P1** | Voice + HA delivery | One HA companion tool → `/companion` via F1-R relay; reminder firing via HA timer/automation + push + ceiling-announce | P0 stable; "don't change HA" lifted deliberately; new tool validated before exposure |
-| **P2** | Drafting + recall depth | Message drafting (human sends), richer recall, decision history | Notes/reminders trusted in daily use |
+| **P0** | Foundation (MVP) | Containerized companion, SQLite, **notes only (create/recall/forget)**, `owner` field, `CommandResult` projection, audit; HTTP-validated then **one notes tool** exposed via F1-R relay after sentinel-probe | This doc approved; **prerequisite gates already met** (F1-R closed + Speaker reconnect fixed/deployed, F1-R relay landed — CHANGELOG 2026-06-28/29); host confirmed able to run the service; resolver/HA untouched |
+| **P1** | Durable reminders + HA delivery | Durable reminder records (confirmed absolute time, list/complete); firing via HA timer/automation + push + ceiling-announce (privacy-gated) | P0 stable; "don't change HA" lifted deliberately; conversation-id (Q1) + firing-path (Q2) resolved |
+| **P2** | Decisions + referents + drafting | Light decisions (record/recall, "save that decision"); short-term referents ("play the second one") via deterministic resolution; message drafting (human sends); richer recall | Reminders trusted in daily use; conversation-id confirmed stable |
 | **P3** | Receipts (structured) | Receipt *meta* (no image), categories, retention policy | Retention/audit/delete proven on notes |
 | **P4** | Receipts (images) + OCR | Local blob storage, restricted dir, optional OCR | P3 stable; explicit privacy review |
 | **P5** | Multi-user / family | Identity from HA, per-user partitioning, explicit family sharing | Dedicated privacy/security review passed |
 | **P6** | Smart memory (opt-in) | Auto-learned prefs, semantic recall — opt-in + inspectable | Strong evidence of need; volume justifies |
 
-**Track S — Satellite / whole-house communication (parallel design track; §6A).** A *separate* track from P0–P6, required **before** real household communication is exposed on satellites. Sequence: **S0** inventory satellite entities/rooms/pipelines/TTS-reachability/identity (after install) → **S1** `InteractionContext` capture → **S2** deterministic `ResponseRoutingPolicy` (text-to-source default) → **S3** privacy gating + confirmation flows → **S4** household announcements + room/person targeting. **Do not build satellite routing until specifically approved.** P0–P2 do **not** depend on Track S (the MVP is text-first to the source client — a degenerate routing case).
+**Track S — Satellite / whole-house communication (parallel design track; §6A).** A *separate* track from P0–P6, required **before** real household communication is exposed on satellites. Sequence: **S0** inventory satellite entities/rooms/pipelines/TTS-reachability/identity (after install) → **S1** `InteractionContext` capture → **S2** deterministic `ResponseRoutingPolicy` (text-to-source default) → **S2.5** deterministic **`InteractionAudioPolicy`** (media interruption: duck/pause same-room media on interaction start, hold through response, **no auto-resume**, explicit-resume only, preserve prior volume/state, other rooms untouched, fail-safe on unknown mapping; pause/duck never `media_stop`; reconcile MA auto-resume — §6B / C§8) → **S3** privacy gating + confirmation flows → **S4** household announcements + room/person targeting. **Do not build satellite routing until specifically approved.** P0–P2 do **not** depend on Track S (the MVP is text-first to the source client — a degenerate routing case).
 
 Coordination notes: **Inc 4** (media) introduces a *sleep timer* and "household" features — align timers/reminders ownership so they're not built twice (§9, Appendix C§5). Keep PCL tool descriptions and `assistant-capabilities.md` in lockstep when anything is exposed (the media side already treats that doc + the OpenAI Instructions as the source of truth for what ChatGPT may claim).
 
@@ -679,6 +703,13 @@ Each phase is independently shippable and abandonable. Never start a phase befor
 - **Silent memory creep.** Auto-learning erodes trust if invisible. Mitigation: explicit-save only until P6, then opt-in + inspectable.
 - **Coupling temptation.** Pressure to "just add modules to the resolver." Mitigation: §4 verdict — reuse patterns, not the process/store/perimeter; and the Python 3.5 host makes in-resolver a poor data home anyway.
 - **Roadmap entanglement.** PCL work must not stall Inc 2–4. Mitigation: separate Track P; PCL depends on F1-R but the media increments don't depend on PCL.
+
+### Rollback (PCL phases) (⟲ Added 2026-06-29)
+PCL work is additive and reversible at every phase; each phase reverts independently without touching the others.
+- **P0 (notes store, not exposed):** stop/remove the container — the LAN port closes, nothing was exposed to ChatGPT, and no HA/resolver change was made, so blast radius is zero. Data is a single SQLite file: keep timestamped copies; a bad schema migration rolls back by restoring the previous DB-file copy (deletion of any blob is real).
+- **P0 exposure sub-gate (one notes tool):** un-expose the companion tool (the established `homeassistant/expose_entity` un-expose pattern) and restore the HA relay script from its backup — this reverts the surface while the companion keeps running internally. Exposure rollback is independent of data rollback.
+- **P1+ (HA delivery wiring):** per-automation/script backups, same discipline as F1-R's `*.preF1R.json`; the reminder-firing automation can be disabled without touching the companion.
+- **Invariant:** resolver and HA stay untouched until a gate is deliberately lifted, so every phase has a clean, independent revert.
 
 ### Non-goals (now)
 - Replacing or modifying `mass-resolver`, its TTS ownership, or `script.play_music`/`play_radio`/`find_stations`.
@@ -737,10 +768,10 @@ If a future change blurs two of these again, it is wrong. That is the design's l
 5. Additive/reversible; **nothing exposed to ChatGPT until validated**; no second TTS path on the media zone; resolver/HA untouched until a gate is deliberately lifted.
 
 ### 18.5 Recommended build sequence (the actual path)
-1. **Gate (not PCL work):** F1-R music stable **and** Speaker reconnect bug fixed.
-2. **P0 — Companion MVP:** containerized service + SQLite; notes, durable reminders, light decisions, short-term referents; `CommandResult` projection; **degenerate routing (text-to-source)**; audit + delete. Validate **over HTTP first**, then expose **one** tool to ChatGPT via the F1-R relay (sentinel-probe it), keeping `assistant-capabilities.md` in lockstep.
-3. **P1–P2:** HA delivery wiring for reminders (push/announce, privacy-gated); drafting (human sends); richer recall.
-4. **Track S (only when approved):** S0 inventory satellites → S1 `InteractionContext` → S2 deterministic `ResponseRoutingPolicy` → S3 privacy gating + confirmation → S4 household announcements + targeting.
+1. **Gate (not PCL work) — MET (2026-06-29):** F1-R music stable **and** Speaker reconnect bug fixed (CHANGELOG 2026-06-28/29).
+2. **P0 — Companion MVP (notes only):** containerized service + SQLite; **notes (create/recall/forget)** + `owner` field; `CommandResult` projection; **degenerate routing (text-to-source)**; audit + delete. Validate **over HTTP first**, then expose **one notes tool** to ChatGPT via the F1-R relay (sentinel-probe it), keeping `assistant-capabilities.md` in lockstep. **Reminders → P1; decisions/referents → P2.**
+3. **P1:** durable reminders + HA delivery wiring (push/announce, privacy-gated firing). **P2:** light decisions + short-term referents ("save that decision", "play the second one"); drafting (human sends); richer recall.
+4. **Track S (only when approved):** S0 inventory satellites → S1 `InteractionContext` → S2 deterministic `ResponseRoutingPolicy` → **S2.5 deterministic `InteractionAudioPolicy` (media interruption; §6B / C§8)** → S3 privacy gating + confirmation → S4 household announcements + targeting.
 5. **Later gated:** receipts (meta → image → OCR), multi-user, semantic memory, cloud.
 
 ### 18.6 Conclusion
@@ -786,8 +817,8 @@ These were reviewed and accepted by the user. They are binding for the PCL track
 
 ### C§6 — Roadmap
 - PCL stays **Track P** (separate from media Inc 2–4; must not entangle them).
-- **Do not start implementation until (a) F1-R music is stable and (b) the Speaker reconnect bug is fixed.**
-- First implementation is a **small MVP only**: **notes + durable reminders + light decisions + short-term referents.**
+- **Prerequisite gates (a) F1-R music stable and (b) Speaker reconnect bug fixed are MET (2026-06-29; CHANGELOG 2026-06-28/29) — PCL P0 is unblocked.**
+- First implementation is a **notes-only MVP** (create / recall / forget), validated over HTTP and exposed to ChatGPT only after a sentinel-probe. **Durable reminders move to P1; light decisions + short-term referents move to P2.** *(Narrowed 2026-06-29 — explicit decision update per this appendix's amendment rule.)*
 - **Receipts / images, semantic memory, multi-user, and cloud sync remain later gated phases.**
 
 ### C§7 — Satellite / whole-house communication & routing (⟲ Added 2026-06-28)
@@ -799,7 +830,19 @@ These were reviewed and accepted by the user. They are binding for the PCL track
 - **Fail-safe:** when `privacy_level` or `user` is unknown, default to the **least-disclosive** channel (text to source; do not speak aloud).
 - **Ownership:** HA owns satellite entities/routing primitives/pipelines/room-device metadata **and delivery**; `homebrain-companion` owns communication intent/memory/reminders/messages/follow-up **and computes the routing decision**; `mass-resolver` remains the deterministic media/speaker executor. The policy is a **shared channel vocabulary**.
 - **Satellite work is its own track (Track S)**; **do not build satellite routing until specifically approved**; **first step = inventory satellite capabilities/entities after install.** PCL MVP (text-first to source) does not depend on it.
+- **The deterministic media-interruption `InteractionAudioPolicy` (C§8) is part of Track S (step S2.5)** — it depends on satellite room context + a room→media-zone map, so it is **design-only until satellites are installed and inventoried**. PCL P0 defines only its boundary/hooks (§6B), never the mechanics.
+
+### C§8 — Deterministic media interruption / Interaction Audio Policy (⟲ Added 2026-06-29)
+- When a satellite interaction starts in a room where music is playing: **same-room media ducks or pauses on interaction start.**
+- The media is **held paused/ducked through the interaction and the assistant's response.**
+- **No auto-resume by default.** **Resume only on an explicit user command** ("resume music" / "continue playing" / "you can resume"). Timeout-based auto-resume MAY be added later but MUST NOT be the default.
+- **Preserve the pre-interaction volume + playback state** so restore is accurate.
+- **Unrelated rooms are never touched.**
+- **Unknown room/satellite/media mapping ⇒ no media manipulation (fail safe).**
+- **Mechanics are deterministic code in the resolver/HA media-interaction layer — never PCL business/memory logic, never LLM discretion.** This is a **separate `InteractionAudioPolicy`, not a field of `ResponseRoutingPolicy`** (§6B).
+- **Use pause/volume-duck, never `media_stop`** (avoids the stop-wedge; ONBOARDING §6/§8/§11).
+- **PCL P0 defines only the boundary/hooks; full mechanics = Track S step S2.5.** PCL P0–P2 do not depend on it.
 
 ## Appendix B — One-paragraph summary for a teammate
 
-> HomeBrain's `mass-resolver` is pure, deterministic, the sole TTS owner, and pinned to Python 3.5.2; the new Personal/Communication Layer is stateful and privacy-heavy, so it should be a **separate, containerized sibling service** (`homebrain-companion`) with its own **SQLite** store — not bolted onto the resolver and not built in Home Assistant. It **reuses** the resolver's proven contracts: the `resolve→validate→execute→CommandResult` lifecycle, the `CommandResult` wire shape, the LAN shared-secret ingress, and especially the **F1-R relay** (script returns `{chat_text}` via `stop`+`response_variable`; never `set_conversation_response`). HA stays the voice/timer/notification I/O layer; the resolver stays deterministic actions + TTS; the companion owns conversation, short-term context, and long-term memory, and calls `/command` for device actions ("play the second one"). **MVP = notes + durable reminders + light decisions + short-term referents, local-only, audit + delete**, exposed to ChatGPT only after F1-R lands; receipts (esp. images), cloud, multi-user, and semantic memory are gated later phases on a **separate Track P** that must not entangle media Inc 2–4.
+> HomeBrain's `mass-resolver` is pure, deterministic, the sole TTS owner, and pinned to Python 3.5.2; the new Personal/Communication Layer is stateful and privacy-heavy, so it should be a **separate, containerized sibling service** (`homebrain-companion`) with its own **SQLite** store — not bolted onto the resolver and not built in Home Assistant. It **reuses** the resolver's proven contracts: the `resolve→validate→execute→CommandResult` lifecycle, the `CommandResult` wire shape, the LAN shared-secret ingress, and especially the **F1-R relay** (script returns `{chat_text}` via `stop`+`response_variable`; never `set_conversation_response`). HA stays the voice/timer/notification I/O layer; the resolver stays deterministic actions + TTS; the companion owns conversation, short-term context, and long-term memory, and calls `/command` for device actions ("play the second one"). **MVP = notes only (create/recall/forget), local-only, audit + delete**, exposed to ChatGPT only after the F1-R relay + a sentinel-probe (durable reminders → P1; light decisions/referents → P2); receipts (esp. images), cloud, multi-user, and semantic memory are gated later phases on a **separate Track P** that must not entangle media Inc 2–4.
