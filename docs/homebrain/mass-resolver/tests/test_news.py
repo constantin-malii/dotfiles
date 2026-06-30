@@ -92,5 +92,60 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(news._merge([[]], 3), [])
 
 
+def _mk(*titles):
+    return [{"title": t, "link": "http://l/" + t, "source": "BBC World"} for t in titles]
+
+TWO_FEED_CFG = {"defaults": {"headline_count": 4, "feed_timeout": 4.0, "max_items_per_feed": 10},
+                "feeds": {"world": [{"name": "F1", "url": "http://f1"},
+                                    {"name": "F2", "url": "http://f2"}]},
+                "stations": {}}
+
+
+class ExecuteTest(unittest.TestCase):
+    def test_single_feed_success_shape(self):
+        r = run(CFG, {}, {"http://bbc/world": _mk("Alpha", "Bravo", "Charlie", "Delta")})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["intent"], "news")
+        self.assertEqual(r["spoken_text"], "Here are the top world headlines. Alpha. Bravo. Charlie.")
+        self.assertEqual(r["chat_text"], "Top world headlines: 1) Alpha 2) Bravo 3) Charlie")
+        self.assertEqual(r["metadata"]["bucket"], "world")
+        self.assertEqual(r["metadata"]["count"], 3)              # capped at headline_count=3
+        self.assertEqual(r["metadata"]["feeds_ok"], 1)
+        self.assertEqual(r["metadata"]["feeds_failed"], 0)
+        self.assertEqual(r["metadata"]["items"][0]["source"], "BBC World")
+
+    def test_multi_feed_merge_roundrobin(self):
+        r = run(TWO_FEED_CFG, {}, {"http://f1": _mk("A1", "A2"), "http://f2": _mk("B1", "B2")})
+        self.assertTrue(r["ok"])
+        self.assertEqual([it["title"] for it in r["metadata"]["items"]], ["A1", "B1", "A2", "B2"])
+        self.assertEqual(r["metadata"]["feeds_ok"], 2)
+
+    def test_graceful_degrade_one_feed_fails(self):
+        # F1 returns nothing (failed/empty); F2 yields -> still success.
+        r = run(TWO_FEED_CFG, {}, {"http://f2": _mk("B1", "B2")})
+        self.assertTrue(r["ok"])
+        self.assertEqual([it["title"] for it in r["metadata"]["items"]], ["B1", "B2"])
+        self.assertEqual(r["metadata"]["feeds_ok"], 1)
+        self.assertEqual(r["metadata"]["feeds_failed"], 1)
+
+    def test_all_empty_unavailable_silent(self):
+        r = run(CFG, {}, {})                                    # fetch returns [] for every url
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "unavailable")
+        self.assertEqual(r["chat_text"], "Sorry, I couldn't get the news right now.")
+        self.assertIsNone(r["spoken_text"])
+        self.assertEqual(r["metadata"]["count"], 0)
+        self.assertEqual(r["metadata"]["feeds_ok"], 0)
+        self.assertEqual(r["metadata"]["feeds_failed"], 1)
+
+    def test_headline_count_one(self):
+        cfg = {"defaults": {"headline_count": 1, "feed_timeout": 4.0, "max_items_per_feed": 10},
+               "feeds": {"world": [{"name": "BBC", "url": "http://bbc/world"}]}, "stations": {}}
+        r = run(cfg, {}, {"http://bbc/world": _mk("Only", "Two", "Three")})
+        self.assertEqual(r["spoken_text"], "Here are the top world headlines. Only.")
+        self.assertEqual(r["chat_text"], "Top world headlines: 1) Only")
+        self.assertEqual(r["metadata"]["count"], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

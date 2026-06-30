@@ -38,6 +38,20 @@ def _merge(per_feed, cap):
     return out
 
 
+def _spoken(bucket, items):
+    titles = [it["title"] for it in items]
+    return "Here are the top " + bucket + " headlines. " + ". ".join(titles) + "."
+
+
+def _chat(bucket, items):
+    parts = []
+    n = 1
+    for it in items:
+        parts.append("%d) %s" % (n, it["title"]))
+        n += 1
+    return "Top " + bucket + " headlines: " + " ".join(parts)
+
+
 class NewsCapability(capability.Capability):
     name = "news"
 
@@ -80,4 +94,31 @@ class NewsCapability(capability.Capability):
         return None
 
     def execute(self, ctx, resolved, rid):
-        raise NotImplementedError("execute lands in Task 5")
+        bucket = resolved["bucket_key"]
+        cap = resolved["headline_count"]
+        timeout = resolved["feed_timeout"]
+        max_items = resolved["max_items"]
+        per_feed = []
+        feeds_ok = 0
+        feeds_failed = 0
+        for f in resolved["feeds"]:
+            items = newsfeed.fetch_feed(f, timeout, max_items)
+            if items:
+                feeds_ok += 1
+                per_feed.append(items)
+            else:
+                feeds_failed += 1
+        merged = _merge(per_feed, cap)
+        if not merged:
+            LOG.error("req=%s NEWS no headlines bucket=%s ok=%d failed=%d",
+                      rid, bucket, feeds_ok, feeds_failed)
+            return cr.err(self.name, rid, "unavailable", "no headlines (feeds failed/empty)",
+                          "Sorry, I couldn't get the news right now.", spoken_text=None,
+                          metadata={"bucket": bucket, "count": 0, "items": [],
+                                    "feeds_ok": feeds_ok, "feeds_failed": feeds_failed})
+        LOG.info("req=%s NEWS bucket=%s count=%d ok=%d failed=%d",
+                 rid, bucket, len(merged), feeds_ok, feeds_failed)
+        md = {"bucket": bucket, "count": len(merged), "items": merged,
+              "feeds_ok": feeds_ok, "feeds_failed": feeds_failed}
+        return cr.ok(self.name, rid, _chat(bucket, merged),
+                     spoken_text=_spoken(bucket, merged), metadata=md)
