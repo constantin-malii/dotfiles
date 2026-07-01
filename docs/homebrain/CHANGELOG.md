@@ -105,6 +105,19 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - See `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` and
   `plans/2026-06-28-F1-R-music-remigration.md` (Outcome).
 
+## 2026-07-01 — Power-outage recovery: `/command` bind race (fixed by restart; durable fix planned)
+
+- **Incident:** after a power outage + host cold boot, ChatGPT reported it couldn't reach music/radio.
+- **Root cause:** `mass-resolver` started before libvirt's bridge IP `192.168.122.1` was assigned, so the
+  `/command` HTTP bind failed (`OSError 99`) and — being one-shot — the resolver ran **event-only**
+  thereafter. MA/HA/VM/event path were all healthy; only `/command` (which all three ChatGPT tools use)
+  was down.
+- **Recovery:** `sudo systemctl restart mass-resolver` (bridge was up by then) → `/command` re-bound on
+  `192.168.122.1:8770`; verified 200 (good key) / 401 (no key). Service restored.
+- **Durable fix planned (not yet implemented):** retry the `/command` bind with backoff so it self-heals
+  after a reboot (mirrors the event-connection reconnect). Plan:
+  `plans/2026-07-01-command-bind-retry-bugfix.md`. Interim runbook added to `ONBOARDING.md` §7.
+
 ## 2026-06-29 — F1 / F1-R CLOSEOUT (accepted complete)
 
 - **Marked F1/F1-R DONE** in the umbrella roadmap (`2026-06-27-assistant-tooling-design.md` §7) with a
