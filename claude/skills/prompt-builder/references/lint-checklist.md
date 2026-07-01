@@ -94,7 +94,20 @@ The generated prompt must pass all rules before it is shown (dogfooding).
 
 ## Coverage note
 
-Structural concerns (7–14) are explicit section checks and are expected to be caught
-reliably. Mechanical concerns (1–6) rely on inspection here and are hardened toward reliable
-detection once the deterministic `prompt_lint.py` script lands (Increment 3). Until then, the
-lint report should state that mechanical checks were performed by inspection.
+A deterministic script, `prompt_lint.py` (deployed to `~/.claude/scripts/`), now backstops
+the mechanically checkable subset. Run it as part of Stage 3; see SKILL.md for usage.
+
+Deterministic coverage (`prompt_lint.py`):
+- unbalanced code fences
+- corrupted / broken markdown tables (concern for a corrupted table cell), outside fences
+- placeholder markers `TODO` / `TBD` / `FIXME` / `XXX` (relates to stale content, concern 6)
+- required-section presence and non-emptiness (concerns 10, 11, 12, 13, 14) in prompt mode
+- trailing-hyphen and connective-before-break signals (partial coverage of concerns 1, 2, 3)
+
+Judgment-based, still handled by the checklist above (LLM inspection):
+- broken commands (4), broken file paths (5), stale copied instructions (6) beyond marker
+  words, contradictions (7), ambiguous optional choices (9), and the parts of truncation and
+  incomplete-sentence detection (1, 2) that need meaning.
+
+The lint report should note which concerns were confirmed by `prompt_lint.py` and which were
+verified by inspection.

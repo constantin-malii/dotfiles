@@ -77,11 +77,38 @@ For each defect file:
   `prompt_lint.py` script lands (Increment 3); record them as inspection-based and do not
   claim perfect detection for them yet.
 
+## Deterministic lint (prompt_lint.py)
+
+The deterministic script `prompt_lint.py` (Increment 3) covers the mechanically checkable
+subset: unbalanced code fences, broken markdown tables outside fences, placeholder markers
+outside fences and inline code, required-section presence and non-emptiness in prompt mode,
+and trailing-hyphen / connective-before-break signals.
+
+How to run it as part of the eval:
+
+```bash
+# Structural check across the corpus and skill files (expect clean):
+python ~/.claude/scripts/prompt_lint.py claude/skills/prompt-builder
+
+# Prompt-mode check on a golden example's embedded prompt (expect clean):
+awk '/^```/{f=!f; next} f' claude/skills/prompt-builder/examples/golden/research-only.md \
+  | python ~/.claude/scripts/prompt_lint.py --stdin --prompt
+```
+
+Recorded run (2026-07-01, Python 3.12):
+- File-mode on the full skill dir (`SKILL.md`, references, examples): clean, 0 issues.
+- Prompt-mode on all four golden embedded prompts: clean, 0 issues each.
+- Prompt-mode on a synthetic bad prompt (only ROLE + GOAL, GOAL ending on a connective):
+  11 findings — 10 missing required sections plus 1 dangling line. Detection confirmed.
+- Unit behaviour confirmed: unbalanced fence flagged; a broken table INSIDE a fence not
+  flagged; placeholder in prose flagged; the same placeholder inside backticks not flagged.
+
 ## Results
 
-Record dated runs here. No automated run has been executed yet; this table is seeded empty
-on purpose and is filled when the eval is run.
+The deterministic portion has been run (see above). The golden and defect eval procedures
+below also require the judgment-based LLM lint pass; that combined run is recorded here.
 
-| Date | Golden passed / total | Defect concerns detected / tagged | Notes |
-|---|---|---|---|
-| (pending) | | | first run to be recorded when eval is executed |
+| Date | Scope | Result |
+|---|---|---|
+| 2026-07-01 | Deterministic lint (prompt_lint.py) across corpus + skill | Clean; detection confirmed on synthetic bad inputs |
+| (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |

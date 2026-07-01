@@ -86,6 +86,27 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
 6. Record what was checked, what was repaired, and what was flagged. This becomes the lint
    report in Stage 4.
 
+### Deterministic backstop: prompt_lint.py
+
+A deterministic, local-only script covers the mechanically checkable subset of the lint
+rules (fence balance, table structure, truncation and dangling-line signals, placeholder
+markers, and required-section presence). It does **not** replace the checklist above — the
+judgment-based concerns still require your review — but run it as a fast backstop.
+
+Deployed to `~/.claude/scripts/prompt_lint.py` by `install.sh`. Usage:
+
+```bash
+# Check the generated dispatch prompt (pipe the raw prompt text on stdin):
+printf '%s\n' "$PROMPT_TEXT" | python ~/.claude/scripts/prompt_lint.py --stdin --prompt
+
+# Check markdown docs or the skill's own corpus (structural checks, outside fences):
+python ~/.claude/scripts/prompt_lint.py path/to/file.md
+python ~/.claude/scripts/prompt_lint.py claude/skills/prompt-builder/examples
+```
+
+Exit code 0 means clean; 1 means issues were found (each printed as `location: [check]
+message`). Fold any real findings into the repairs before Stage 4.
+
 **Do not proceed to Stage 4 until every lint rule has been run.**
 
 ## Step 4: Output
