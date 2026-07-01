@@ -5,7 +5,7 @@
 > file points to them and never duplicates them. When an item ships, mark it Done here and record
 > the operational detail in `CHANGELOG.md`.
 
-**Last refined:** 2026-06-29. Taxonomy = 10 tracks (locked). Item schema = 14 fields (locked).
+**Last refined:** 2026-07-01. Taxonomy = 10 tracks (locked). Item schema = 14 fields (locked).
 
 **Layout:** §2 is the **compact board** (navigation only). §5 is the **extended item index** — the
 working backlog, every item with all 14 fields as explicit columns.
@@ -29,11 +29,9 @@ working backlog, every item with all 14 fields as explicit columns.
 - `INF-01` Adopt parallel-agent operating model + maintain this `BACKLOG.md` *(INF)*
 
 ### 🔵 Ready / Next *(all read-only / design / decision; no live gate)*
-- `HA-01` HA device & entity inventory (read-only) — highest unblock leverage *(HA)*
-- `SA-01` Smoke/CO sensor inventory + escalation design *(SA)*
-- `SA-02` Water/leak sensor inventory + escalation design *(SA)*
 - `AU-01` Interaction Audio Policy design (media-zone ducking) *(AU)*
 - `RQ-03` Music-source / Inc 3 direction decision *(RQ)*
+- `RQ-06` Z-Wave coordinator adoption decision *(RQ)*
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
 - `NL-02` Prompt / `assistant-capabilities.md` lockstep discipline *(NL)*
 - `MR-05` Tidy verbose RadioBrowser station names *(MR)*
@@ -41,25 +39,26 @@ working backlog, every item with all 14 fields as explicit columns.
 ### 🟡 Later
 - `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
 - `P1` reminders · `P2` decisions/referents · `P3` HA delivery · `P4` drafting/recall · `P5` receipts · `P6` multi-user · `P7` semantic memory
-- `HA-02` plugs/switches · `HA-03` vacuum · `HA-04` cameras · `HA-05` routines · `HA-06` device health
+- `HA-02` plugs/switches · `HA-03` vacuum · `HA-04` cameras · `HA-05` routines · `HA-06` device health · `HA-08` garage door (Meross) · `HA-09` ecobee climate
 - `SA-03` smoke/CO alerting · `SA-04` water/leak alerting · `SA-05` security/camera detection
 - `DV-01` home status · `DV-02` needs-attention · `DV-03` dashboards · `DV-04` energy
 - `AU-02` resume-restore · `AU-03` ducking impl
 - `NL-01` NL device control · `NL-03` gpt-4o eval
-- `INF-03` soundbar · `INF-04` `/hassio` panel · `INF-06` Lidarr/Beets/Plex · `INF-07` backup target
+- `INF-03` soundbar · `INF-04` `/hassio` panel · `INF-06` Lidarr/Beets/Plex · `INF-07` backup target · `INF-08` UPS + NUT resilience
 - `S1`–`S4` satellite routing *(after S0)* · `RQ-04` hardware volume buttons
 
 ### 🔴 Blocked
-- `S0` satellite inventory — **hardware install**
+- `S0` satellite inventory — **hardware install** *(reSpeaker incoming — move to Ready once installed)*
 - `MR-Inc3` Acquire/Lidarr — **`RQ-03`** music-source decision
 - `RQ-02` upstream MA lock issue — YTM reliability + approval
 - `INF-05` HAOS upgrade / host modernization — backups + risk plan
 
 ### ✅ Done *(detail in `CHANGELOG.md`)*
 - `MR-Inc0` foundation · `MR-Inc1` radio · `F1`/`F1-R` CommandResult + relay · `BUG-Speaker` reconnect fix · `MR-Inc4A` status · **`MR-Inc2A` News (deployed + exposed + validated)**
+- `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)*
 
 ### 🔬 Research / Purchasing
-- `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `RQ-05` device purchasing list · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
+- `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
 
 ---
 
@@ -142,12 +141,15 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### HA — Home Assistant Devices
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `HA-01` | **Device & entity inventory** | HA | ready | documentation/research | P1 | HA | — | none (read-only) | new inventory doc | none (read-only HA queries) | n/a | enumerate entities, exposed entities, rooms/areas, devices, integrations, battery/offline, candidate gaps | new |
-| `HA-02` | Smart plugs / switches control | HA | later | repo-code→HA-live | P2 | device | HA-01 + NL-01 | shared conversation surface | resolver/HA cap + script | exposure | delete script + un-expose | new |
-| `HA-03` | Vacuum control | HA | later | repo-code→HA-live | later | device | HA-01 | shared conversation surface | resolver/HA cap + script | exposure | delete script + un-expose | new |
-| `HA-04` | Cameras (view / snapshot) | HA | later | design→HA-live | later | device | HA-01; privacy | privacy-sensitive surface | design doc → HA script | exposure (strict) | delete script + un-expose | new |
+| `HA-01` | **Device & entity inventory** | HA | done | documentation/research | P1 | HA | — | none (read-only) | new inventory doc | none (read-only HA queries) | n/a | done | ha-device-inventory.md |
+| `HA-02` | Smart plugs / switches control | HA | later | repo-code→HA-live | P2 | device | HA-07 + NL-01 · Kasa HS220 dimmer (`light`, no energy) | shared conversation surface | resolver/HA cap + script | exposure | delete script + un-expose | new |
+| `HA-03` | Vacuum control | HA | later | repo-code→HA-live | later | device | HA-07 · iRobot Roomba Combo (`roomba` local push, no maps) | shared conversation surface | resolver/HA cap + script | exposure | delete script + un-expose | new |
+| `HA-04` | Cameras (view / snapshot) | HA | later | design→HA-live | later | device | HA-07; privacy · Reolink (local path) | privacy-sensitive surface | design doc → HA script | exposure (strict) | delete script + un-expose | new |
 | `HA-05` | Routines / automations exposure | HA | later | design | later | HA | HA-01 | HA-config surface | design doc | HA change | revert HA change | new |
 | `HA-06` | Device health / battery / offline read-model | HA | later | design→repo-code | P2 | HA | HA-01 | none (read-only model) | design doc → cap | read-only | `git revert` | new |
+| `HA-07` | Existing device integration architecture | HA | done | documentation/research | P1 | HA | HA-01, SA-01/02 | none (research) | device-integration roadmap doc | none | n/a | done | device-integration-architecture-roadmap.md |
+| `HA-08` | Garage door (Meross MSG100) — access-sensitive | HA | later | design→HA-live | later | device | HA-07 | access/security-sensitive surface | design doc → HA script | exposure (strict) | delete script + un-expose | design local HomeKit-Controller `cover` path (strict, state-checked/confirmation-gated) | device-integration-architecture-roadmap.md |
+| `HA-09` | ecobee climate entity — cloud-dependent | HA | later | design→HA-live | later | device | HA-07 | cloud dependency | design doc → HA config | exposure | revert HA config | add `climate` via cloud `ecobee` (HA-01 saw ecobee only as MA `media_player`, no `climate`) | device-integration-architecture-roadmap.md |
 
 ### NL — Natural-Language Control Surface
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -159,10 +161,10 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### SA — Safety / Alerts *(stricter gates — §8)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `SA-01` | **Smoke/CO** inventory + escalation design (life-safety) | SA | ready | research/design | P1 | HA/device | HA-01 | none (design) | new design doc | none | n/a | inventory sensors + design escalation + disable plan | new |
-| `SA-02` | **Water/leak** inventory + escalation design (property) | SA | ready | research/design | P1 | HA/device | HA-01 | none (design) | new design doc | none | n/a | inventory sensors + design escalation + disable plan | new |
-| `SA-03` | Smoke/CO alerting + escalation (impl) | SA | later | design→HA-live | later | HA/device | SA-01 | **life-safety (strictest)** | HA automations/scripts | **exposure (strictest)** | **disable switch + one-step disable/rollback (mandatory)** | new |
-| `SA-04` | Water/leak alerting + escalation (impl) | SA | later | design→HA-live | later | HA/device | SA-02 | **property (strict)** | HA automations/scripts | **exposure (strict)** | **disable switch + one-step disable/rollback (mandatory)** | new |
+| `SA-01` | **Smoke/CO** inventory + escalation design (life-safety) | SA | done | research/design | P1 | HA/device | HA-01 | none (design) | new design doc | none | n/a | done | 2026-06-30-sa-01-02-safety-alerts-design.md |
+| `SA-02` | **Water/leak** inventory + escalation design (property) | SA | done | research/design | P1 | HA/device | HA-01 | none (design) | new design doc | none | n/a | done | 2026-06-30-sa-01-02-safety-alerts-design.md |
+| `SA-03` | Smoke/CO alerting + escalation (impl) | SA | later | design→HA-live | later | HA/device | SA-01 + HA-07 + Z-Wave coordinator (RQ-06) | **life-safety (strictest)** | HA automations/scripts | **exposure (strictest)** | **disable switch + one-step disable/rollback (mandatory)** | new |
+| `SA-04` | Water/leak alerting + escalation (impl) | SA | later | design→HA-live | later | HA/device | SA-02 + HA-07 + leak-sensor ownership/purchase + likely Z-Wave coordinator | **property (strict)** | HA automations/scripts | **exposure (strict)** | **disable switch + one-step disable/rollback (mandatory)** | new |
 | `SA-05` | Security alerts / camera person-detection | SA | later | design | later | HA/device | HA-04, SA-01/02 | privacy + safety | design doc | exposure (strict) | revert exposure | new |
 
 > **SA gate (all SA-live items):** disable switch + tested false-pos/false-neg validation + confirmation
@@ -175,7 +177,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `DV-01` | "What's on / running / open?" home status | DV | later | design | P2 | HA | HA-01 | none (read-only) | design doc | read-only | n/a | read-model design | new |
 | `DV-02` | "What needs attention?" household status | DV | later | design | P2 | HA | HA-01, HA-06 | none (read-only) | design doc | read-only | n/a | read-model design | new |
 | `DV-03` | Dashboards (household view) | DV | later | HA-live | later | HA | HA-01 | HA-config surface | HA Lovelace config | HA change | revert dashboard | new |
-| `DV-04` | Energy monitoring | DV | later | design | later | HA | HA-01 (plugs) | none (read-only) | design doc | read-only | n/a | research | new |
+| `DV-04` | Energy monitoring | DV | later | design | later | HA | metering hardware (HS220 has no energy monitoring) | none (read-only) | design doc | read-only | n/a | research | new |
 
 ### S — Satellites / Room Routing *(design/inventory-first; build only when approved + installed)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -186,7 +188,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `AU-01` | Audio policy design (media-zone ducking) | AU | ready | design | P1 | resolver/HA | **HA-01** (rooms/zones); **S0** (satellite map) | none (design) | new design doc | none | n/a | design media-zone ducking now; multi-room waits on S0 | new |
+| `AU-01` | Audio policy design (media-zone ducking) | AU | ready | design | P1 | resolver/HA | **HA-07** (roadmap area/room implications, usable now); **S0** (satellite map) | none (design) | new design doc | none | n/a | design media-zone ducking now; multi-room waits on S0 | new |
 | `AU-02` | Explicit "resume music" restore behavior | AU | later | design→repo-code | P2 | resolver/HA | AU-01 | media path | `core.py`/`music.py`+tests | resolver + HA | restore `.bak/` | new |
 | `AU-03` | Ducking implementation | AU | later | repo-code→HA-live | later | resolver/HA | AU-01/02 | media path + HA | resolver modules + HA | host + HA | restore `.bak/` + revert HA | new |
 
@@ -200,6 +202,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `INF-05` | HAOS upgrade / host modernization | INF | blocked | host-live | later | process | backups | **high (VM/host)** | none (host/VM) | host change (high risk) | restore VM snapshot/backup | haos-vm §12 |
 | `INF-06` | Lidarr auto-sync · Beets · Plex Music add | INF | later | host-live | P2 | process | — | host data/services | none (host) | host change | revert host config | local-music §7 |
 | `INF-07` | Companion backup target (local-only) | INF | later | process | P2 | process | P0 | none (local-only) | backup script/config | none | revert config | PCL Q5 |
+| `INF-08` | UPS + NUT resilience (host + router/network + future coordinator) | INF | later | design→host-live | later | process | device roadmap; UPS ownership unknown | none (design) | design doc → NUT config | none (host-live at impl) | revert doc/config | confirm UPS ownership + design NUT approach | device-integration-architecture-roadmap.md |
 
 ### RQ — Backlog / Research / Purchasing
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -208,7 +211,8 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `RQ-02` | File upstream MA lock issue | RQ | blocked | research | later | process | YTM reliability + approval | none (external) | `upstream-issue-draft.md` | none | retract issue if needed | upstream-issue-draft |
 | `RQ-03` | **Music-source decision** (local/Tidal/Qobuz/Soulseek/YTM) | RQ | research | research | P2 | resolver | — | none (decision) | decision record | none | n/a | decide → **unblocks MR-Inc3** | tooling §10 |
 | `RQ-04` | Hardware volume buttons → ceiling (Tasker) | RQ | later | research→repo-code | later | device | resolver HTTP (exists) | phone-side only | Tasker profile + resolver HTTP | phone-side | remove Tasker profile | tooling §11 |
-| `RQ-05` | Device purchasing list | RQ | research | device-purchase | P2 | device | HA-01, SA-01/02 | none (procurement) | buy-list doc | none | n/a | build buy-list from inventories | new |
+| `RQ-05` | Device purchasing list | RQ | done | device-purchase | P2 | device | HA-01, SA-01/02 | none (procurement) | buy-list doc | none | n/a | done — purchase-gap analysis now lives in the `HA-07` roadmap (§11; gaps derived after existing-device mapping) | device-integration-architecture-roadmap.md |
+| `RQ-06` | Z-Wave coordinator adoption decision | RQ | ready | research→device-purchase | P2 | device/process | — | none (decision) | decision record | none | n/a | decide Z-Wave coordinator — strongly indicated (owned Zooz ZEN55 stranded without one; gates SA-03 smoke/CO telemetry + future Z-Wave leak sensors). Decision/backlog item, **not** a purchase order | device-integration-architecture-roadmap.md |
 
 ---
 
@@ -243,8 +247,8 @@ stream, no live gate held**:
 | # | Track | Why first | Type |
 |---|---|---|---|
 | 1 | `INF-01` Operating model + this `BACKLOG.md` | Establishes the rules everything runs under. | documentation |
-| 2 | `HA-01` **Device & entity inventory** | Biggest uncertainty-reducer; **unblocks HA-02/03/04, SA-01/02, DV-01/02, AU-01, RQ-05**. Pure read-only. | documentation/research |
-| 3 | `SA-01` + `SA-02` **Safety inventory + escalation design** | Life-safety + property; one read-only inventory yields both designs; strict gates defined up front. | research/design |
+| 2 | `HA-01` **Device & entity inventory** — ✅ done | Biggest uncertainty-reducer; **unblocked HA-02/03/04, SA-01/02, DV-01/02, AU-01, RQ-05** (RQ-05 now fulfilled by `HA-07`). Pure read-only. | documentation/research |
+| 3 | `SA-01` + `SA-02` **Safety inventory + escalation design** — ✅ done | Life-safety + property; one read-only inventory yields both designs; strict gates defined up front. | research/design |
 | 4 | `AU-01` **Audio policy design** (media-zone) | Daily voice usability; deterministic; design-only (multi-room waits on S0). | design |
 | 5 | `RQ-03` **Music-source / Inc 3 decision** | Ends YTM-vs-local-vs-streaming ambiguity; **unblocks MR-Inc3**. | research/decision |
 
@@ -313,14 +317,14 @@ the gate** — it remains free for the next live increment (likely `MR-Inc3` onc
 Ready-to-dispatch per-track agent prompts. Each runs **read-only / design** unless it claims the gate
 (§10). Standard report format = §12.
 
-- **`HA-01` — Device & entity inventory** (read-only):
+- **`HA-01` — Device & entity inventory** (read-only) — ✅ dispatched & complete (`ha-device-inventory.md`):
   > "Read-only HA inventory. Do not change/expose/restart anything. Enumerate via HA REST/WS: all
   > entities (by domain), which entities are exposed to `conversation`, all areas/rooms and
   > device→area mapping, all integrations/config-entries, and every entity reporting battery level or
   > `unavailable`/offline. Produce a structured inventory doc + a candidate device-gap list. Output a
   > Markdown report; touch no files outside a new inventory doc draft."
 
-- **`SA-01` + `SA-02` — Safety inventory + escalation design** (design/research):
+- **`SA-01` + `SA-02` — Safety inventory + escalation design** (design/research) — ✅ dispatched & complete (`2026-06-30-sa-01-02-safety-alerts-design.md`):
   > "Read-only. Using HA-01's inventory, identify existing smoke/CO and water/leak sensors (or their
   > absence). Design alert + escalation flows separately for smoke/CO (life-safety) and water/leak
   > (property): triggers, severity, confirmation, delivery channels, and a mandatory disable/rollback
