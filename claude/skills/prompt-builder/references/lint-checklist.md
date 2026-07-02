@@ -15,13 +15,26 @@ final emitted text (Stage 4's final-output hygiene pass). Formatting and output 
 reintroduce truncation/corruption or a contradiction that was not in the draft, so linting only
 the draft is not sufficient — the bytes you actually present must pass.
 
+**The visible-text read is authoritative; the deterministic script is only a backstop.**
+`prompt_lint.py` catches trailing-hyphen, connective-before-break, and a few known-term
+prefixes, but it does **not** catch arbitrary mid-word truncation (`HomeBrai`, `Assistan`) or
+mashed words (`wantrain`, `t mode`). So a clean `prompt_lint.py` run does **not** mean the output
+is clean. You must read the exact emitted text yourself. **If the visible output is corrupted,
+STOP and re-render — never emit it, and never let the lint report claim "clean".** A lint report
+that says "clean" over corrupted visible text is itself a defect.
+
 ---
 
 ## Mechanical concerns (repair inline)
 
 ### 1. Truncated words
-- **Detect:** any word cut mid-token, or a line ending mid-word without punctuation.
-- **Repair:** restore the full word from context.
+- **Detect:** any word cut mid-token, whether at a line end or mid-line — `HomeBrai` for
+  `HomeBrain`, `Assistan` for `Assistant`, `repositor` for `repository`, `duri` for `during`,
+  `chang` for `change` — and mashed/merged words where a boundary was lost (`wantrain`,
+  `t mode`, `aon`). On the final emitted text this must be caught by reading it, not only by the
+  deterministic script, which does not detect most mid-word cuts.
+- **Repair:** restore the full word from context. If corruption is in the *visible* final
+  output, STOP and re-render rather than emitting; do not report clean.
 
 ### 2. Incomplete sentences
 - **Detect:** a sentence with no verb, or one that ends without terminal punctuation where a
@@ -144,6 +157,9 @@ Deterministic coverage (`prompt_lint.py`):
 - placeholder markers `TODO` / `TBD` / `FIXME` / `XXX` (relates to stale content, concern 6)
 - required-section presence and non-emptiness (concerns 10, 11, 12, 13, 14) in prompt mode
 - trailing-hyphen and connective-before-break signals (partial coverage of concerns 1, 2, 3)
+- known-term mid-word truncations (e.g. `HomeBrai` -> `HomeBrain`, `worktre` -> `worktree`) —
+  a targeted backstop for concern 1 only; it does not catch arbitrary mid-word cuts or mashed
+  words, so the Stage 4 visible-text read remains authoritative
 - write-safety contradictions (the concern 7 sub-case, prompt mode only): flags
   research-only-plus-write, no-worktree-plus-write, no-main-edit-plus-write-without-worktree,
   and any explicit waiver of the worktree requirement. Write grants are detected from a range of

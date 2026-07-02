@@ -22,7 +22,9 @@ file (default)
       - write-safety contradictions (concern 7 sub-case): a file write granted under a
         research-only, no-worktree, or no-main-edit stance (conservative — requires an
         affirmative write grant to fire)
-      - the same truncation / dangling signals
+      - the same truncation / dangling signals, plus known-term mid-word truncations
+        (e.g. "HomeBrai" -> "HomeBrain"). NOTE: this catches only a subset of truncation; it is
+        a backstop, not a substitute for reading the final emitted text.
 
 Input
 -----
@@ -91,6 +93,13 @@ WRITE_PHRASE_RE = re.compile(
 # allowed-files bullets name a path ("- shell/.bash_profile"), not a verb, so this stays quiet.
 ALLOWED_WRITE_BULLET_RE = re.compile(r"^[\s\-*>]*(?:write|edit|create|modify|overwrite|delete)\b",
                                      re.I)
+
+# Known project terms. A token that is a near-complete prefix of one of these (missing only the
+# last 1-2 characters) is almost certainly a mid-word truncation (e.g. "HomeBrai" -> "HomeBrain",
+# "worktre" -> "worktree", "repositor" -> "repository"). This is a targeted backstop only; it
+# does NOT catch arbitrary mid-word truncation — the Stage 4 manual read is authoritative.
+KNOWN_TERMS = ("HomeBrain", "worktree", "Assistant", "repository", "origin", "prompt-builder")
+WORD_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z]+")
 
 # Words that should not end a complete line/paragraph. Kept conservative to avoid flagging
 # ordinary soft-wrapped prose (where the sentence continues on the next non-blank line).
@@ -270,6 +279,30 @@ def _write_safety_findings(text, lines, bodies):
     return findings
 
 
+def _known_term_truncations(lines):
+    """Flag a token that is a near-complete prefix of a known term (missing only its last 1-2
+    characters) — a strong mid-word-truncation signal. Conservative: requires the token to be at
+    least 5 chars and the gap to the full term to be 1-2 chars, so short prefixes like 'Home' or
+    'work' (which are also ordinary words) are never flagged."""
+    findings = []
+    terms = [(t, t.lower()) for t in KNOWN_TERMS]
+    for idx, line in enumerate(lines):
+        for m in WORD_TOKEN_RE.finditer(line):
+            tok = m.group(0)
+            low = tok.lower()
+            if len(tok) < 5:
+                continue
+            for term, term_low in terms:
+                if low == term_low:
+                    break  # exact term, fine
+                if term_low.startswith(low) and 1 <= (len(term_low) - len(low)) <= 2:
+                    findings.append((idx + 1, "truncation",
+                                     "'%s' looks like a truncation of '%s' (mid-word cut)"
+                                     % (tok, term)))
+                    break
+    return findings
+
+
 def lint_prompt(text):
     """Prompt mode: the whole input is a dispatch prompt. Check section presence,
     non-emptiness, write-safety contradictions, and truncation signals."""
@@ -289,6 +322,7 @@ def lint_prompt(text):
 
     findings.extend(_write_safety_findings(text, lines, bodies))
     findings.extend(_truncation_findings(lines, flags=None))
+    findings.extend(_known_term_truncations(lines))
     return findings
 
 
