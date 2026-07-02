@@ -32,6 +32,7 @@ examples for the classes real data did not cover.
 | `defects/research-worktree-write-final-output-regression.md` | REAL (regression) | 1, 2, 3, 4, 7 (write-safety), 8, 10, 11 |
 | `defects/emitted-output-truncation-regression.md` | REAL (regression) | 1, 2, 3 (visible-output corruption emitted while write-safety was correct) |
 | `defects/emitted-output-regeneration-corruption-regression.md` | REAL (regression) | 1, 2, 3 (corruption from regenerating the prompt instead of emitting the linted file verbatim) |
+| `defects/relay-corruption-postemit-regression.md` | REAL (regression) | Delivery integrity — relay/display corruption after emission (file clean by hash, transcript corrupted; not a content-lint concern) |
 
 ## Concern coverage matrix
 
@@ -53,6 +54,12 @@ Every one of the 14 lint concerns is exercised by at least one defect example.
 | 12 | missing verification | missing-sections |
 | 13 | missing stop conditions | missing-sections |
 | 14 | missing definition of done | missing-sections |
+
+Beyond the 14 content concerns, one **delivery-integrity** concern is tracked separately:
+
+| Concern | Covered by |
+|---|---|
+| Relay/display corruption (post-emission; not lintable) | relay-corruption-postemit-regression |
 
 ## Golden eval procedure
 
@@ -175,6 +182,20 @@ the lint report falsely claimed clean):
   corruptions (`research-oires`, `checkmended`, `variantnt`, …) are caught by the verbatim-emit +
   read discipline, not the script. Note: `prompt_lint.py --prompt <file>` lints a file directly.
 
+Relay/display-corruption investigation + mitigation (2026-07-02, Python 3.12):
+- A clean-session run emitted a prompt that appeared corrupted in the transcript while claiming
+  clean. The raw linted file was inspected directly: SHA-256 verified, byte count 5901, **zero**
+  occurrences of every reported corruption fragment, pure printable ASCII, all key terms intact.
+  The corruption was **not in the file** — it was introduced by the display/relay layer *after*
+  emission, which the skill and `prompt_lint.py` cannot see or repair.
+- Conclusion: this is not a content-lint defect and cannot be caught deterministically (the script
+  only ever sees the clean file). The mitigation is **verifiability, not detection**: Stage 4 now
+  treats the output file as the authoritative artifact and reports its **path + byte count +
+  SHA-256**, claims cleanliness only of that file (never the transcript), and prefers file delivery
+  (inline text labelled a non-authoritative convenience copy) for long prompts. If the caller's
+  rendered copy does not match the hash, the file is authoritative. Captured as
+  `relay-corruption-postemit-regression`.
+
 ## Results
 
 The deterministic portion has been run (see above). The golden and defect eval procedures
@@ -188,4 +209,5 @@ below also require the judgment-based LLM lint pass; that combined run is record
 | 2026-07-01 | Final-output regression (research-only + worktree + write, emitted with truncation) | Deterministic: flagged (truncation + dangling + write-safety, worktree does not rescue). Added Stage 4 final-output hygiene pass (lint the emitted text, not a draft). Clean-session test: builder stops-and-asks, no truncation |
 | 2026-07-02 | Visible-output regression (correct write-safety, corrupted emitted text) | Hardened Stage 4: read the exact visible text; clean prompt_lint does not authorize emission; STOP + re-render on any corruption; lint report cannot claim clean over corrupted output. Added known-term truncation heuristic (flags HomeBrai). Goldens clean |
 | 2026-07-02 | Regeneration-corruption regression (lint clean but visible prompt corrupted) | Root cause: prompt regenerated after linting. Stage 4 now mandates verbatim-from-file emit (write to file → lint the file → read the file → cat it); lint report valid only for the exact emitted bytes. Fixture added; clean-session test re-run |
+| 2026-07-02 | Relay/display corruption identified as post-emission (not in file) | Raw linted file verified clean by SHA-256; corruption is downstream of the skill. Mitigation added: Stage 4 reports artifact path + byte count + SHA-256, claims cleanliness only of the file (never the transcript), prefers file delivery for long prompts. Fixture `relay-corruption-postemit-regression` added |
 | (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |
