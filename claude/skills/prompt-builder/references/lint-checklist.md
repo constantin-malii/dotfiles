@@ -55,21 +55,27 @@ The generated prompt must pass all rules before it is shown (dogfooding).
   (`core < mode < repo-safe < live-gated < homebrain`).
 
 - **High-value sub-case — write-safety contradiction (research/scope vs. write).** A prompt
-  that permits a file write while framing itself as read-only or as not touching `main`. Watch
-  for all of these:
+  that permits a file write while framing itself as read-only or as not touching `main`. This
+  admits **no** "optional" or "single-file" loophole. Watch for all of these:
   - `research-only` (or a "research agent" role) **plus** any write, create, edit, commit, or
-    mutation permission in Allowed Files / Systems or Required Steps;
+    mutation permission — including an "optional" or "single" one — in Allowed Files / Systems
+    or Required Steps;
   - "do not edit `main` directly" **plus** an allowed repository write, with no worktree
-    required (a write in the `main` checkout edits `main`);
-  - "do not create branches or worktrees" **plus** an allowed repository write;
-  - a "read-only" Allowed Files / Systems list **plus** a write exception (a "single
-    working-tree write", "working tree only, no git actions", etc.).
+    required (a write in the `main` checkout edits `main`, committed or not);
+  - "do not create branches or worktrees", **or** any statement that the worktree requirement is
+    waived, **plus** an allowed repository write;
+  - a "read-only" Allowed Files / Systems list **plus** a write exception — a "Write (optional…",
+    a "single working-tree doc", a "single optional uncommitted working-tree file", "working
+    tree only, no git actions", etc.;
+  - a claim that "task authorization" permits the write, used to justify a research-only or
+    no-worktree write (authorization does not override profile safety unless the prompt is
+    represented as `implementation` + `repo-safe`, or a claimed `live-gated` action).
 - **Repair (write-safety):** apply the **Write-safety consistency** repair policy in
-  `profiles.md`, in order: (1) default research/acquisition/decision tasks to chat-only with no
-  file writes; (2) if a durable file is truly required, switch the mode to `implementation`,
-  add `repo-safe`, and require a worktree before writing; (3) if no write was authorized, flag
-  and ask rather than inventing a writable deliverable; (4) never keep both — a working-tree
-  write exception alongside "no worktree / no main edit" is never a valid output.
+  `profiles.md`, in order: (1) default to chat-only with no file writes; (2) if a durable file
+  is requested, **STOP and ask** whether to switch to `implementation` + `repo-safe` with a
+  worktree — do not invent a writable deliverable; (3) never allow an optional working-tree
+  write under research-only or a no-worktree stance — a write exception alongside "no worktree /
+  no main edit", optional or not, committed or not, is never a valid output.
 
 ### 8. Unsafe git or environment rules
 - **Detect:** branching or committing without a base-state check; editing `main` directly;
@@ -131,8 +137,11 @@ Deterministic coverage (`prompt_lint.py`):
 - placeholder markers `TODO` / `TBD` / `FIXME` / `XXX` (relates to stale content, concern 6)
 - required-section presence and non-emptiness (concerns 10, 11, 12, 13, 14) in prompt mode
 - trailing-hyphen and connective-before-break signals (partial coverage of concerns 1, 2, 3)
-- write-safety contradictions (the concern 7 sub-case, prompt mode only): conservatively flags
-  research-only-plus-write, no-worktree-plus-write, and no-main-edit-plus-write-without-worktree
+- write-safety contradictions (the concern 7 sub-case, prompt mode only): flags
+  research-only-plus-write, no-worktree-plus-write, no-main-edit-plus-write-without-worktree,
+  and any explicit waiver of the worktree requirement. Write grants are detected from a range of
+  phrasings (a "Write:" / "Write (optional" allowed-files bullet, "working tree only",
+  "working-tree doc", "single/optional uncommitted working-tree file", "write exception")
 
 Judgment-based, still handled by the checklist above (LLM inspection):
 - broken commands (4), broken file paths (5), stale copied instructions (6) beyond marker
