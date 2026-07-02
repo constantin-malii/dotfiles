@@ -131,14 +131,21 @@ and admit no "optional" or "single-file" loophole.
    "single optional uncommitted working-tree file", or an explicit "the worktree requirement was
    waived" is never acceptable. A write in the `main` checkout **is** an edit to `main`, whether
    or not it is committed; the only safe way to write is inside a worktree.
-4. **Task authorization does not override profile safety rules.** "The task authorizes a write"
+4. **A worktree does not rescue a research-only write.** Adding a `git worktree add` step to a
+   `research-only` prompt does **not** make an optional doc write valid. The worktree makes an
+   **implementation** write safe; it does not change the mode. `research-only` + worktree +
+   write is just as forbidden as `research-only` + write — the fix is to change the **mode** to
+   `implementation` + `repo-safe`, never to bolt a worktree onto a research-only prompt.
+5. **Task authorization does not override profile safety rules.** "The task authorizes a write"
    or "authorized to create the doc" does not license a research-only or no-worktree write. An
    authorization only counts if it explicitly authorizes a write/live action **and** the prompt
    is represented as `implementation` + `repo-safe` (or a claimed `live-gated` action).
 
 Concretely, a generated prompt must **never** simultaneously:
 
-- be `research-only` **and** allow any file write, creation, edit, commit, or mutation;
+- be `research-only` **and** allow any file write, creation, edit, commit, or mutation — even if
+  it also adds a worktree step (the worktree does not convert a research-only write into a valid
+  one; change the mode to `implementation` instead);
 - say "do not edit `main` directly" **and** allow a repository write without requiring a worktree;
 - say "do not create branches or worktrees" (or waive the worktree requirement) **and** allow a
   repository write;
@@ -156,4 +163,7 @@ Concretely, a generated prompt must **never** simultaneously:
    then write). Only produce the writable shape once that switch is confirmed.
 3. **Never allow an optional working-tree write under research-only or a no-worktree stance.**
    A "single working-tree write exception" alongside "no worktree / no main edit" — optional or
-   not, committed or not — is never a valid output.
+   not, committed or not — is never a valid output. **And never "fix" it by adding a worktree
+   while keeping `research-only`** — `research-only` + worktree + optional write is not a valid
+   final prompt. The only valid outputs are (a) chat-only/no writes, or (b) a mode switch to
+   `implementation` + `repo-safe` + worktree, made only after the user confirms it.

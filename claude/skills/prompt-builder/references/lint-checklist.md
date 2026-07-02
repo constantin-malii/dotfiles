@@ -10,6 +10,11 @@ Two outcomes are possible per concern:
 
 The generated prompt must pass all rules before it is shown (dogfooding).
 
+**Run this checklist twice:** once on the assembled draft (Stage 3), and again on the exact
+final emitted text (Stage 4's final-output hygiene pass). Formatting and output assembly can
+reintroduce truncation/corruption or a contradiction that was not in the draft, so linting only
+the draft is not sufficient — the bytes you actually present must pass.
+
 ---
 
 ## Mechanical concerns (repair inline)
@@ -64,6 +69,8 @@ The generated prompt must pass all rules before it is shown (dogfooding).
     required (a write in the `main` checkout edits `main`, committed or not);
   - "do not create branches or worktrees", **or** any statement that the worktree requirement is
     waived, **plus** an allowed repository write;
+  - `research-only` **plus** a write **plus** a worktree step — a worktree does not rescue a
+    research-only write; the mode itself must change to `implementation` + `repo-safe`;
   - a "read-only" Allowed Files / Systems list **plus** a write exception — a "Write (optional…",
     a "single working-tree doc", a "single optional uncommitted working-tree file", "working
     tree only, no git actions", etc.;

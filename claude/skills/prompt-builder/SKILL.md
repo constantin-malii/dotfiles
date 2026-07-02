@@ -119,16 +119,37 @@ message`). Fold any real findings into the repairs before Stage 4.
 ## Step 4: Output
 
 1. Read `references/output-schema.md`.
-2. Emit the final dispatch prompt inside a single fenced block, using the twelve sections in
-   the fixed order.
-3. After the fenced block, emit the short lint report: concerns checked, repairs made, and
-   any items flagged for the user.
-4. Present both to the user. If the lint report flagged an unknown required input, ask for
+2. Assemble the final dispatch prompt inside a single fenced block, using the twelve sections
+   in the fixed order.
+3. **Final-output hygiene pass (mandatory — run on the EXACT text you are about to emit, not a
+   draft).** After assembling and formatting the fenced block, lint that final text before you
+   show it:
+   - Pipe the exact assembled prompt through the deterministic backstop:
+     `printf '%s\n' "$FINAL_PROMPT" | python ~/.claude/scripts/prompt_lint.py --stdin --prompt`
+   - Re-run the mechanical checklist over the emitted text (truncated words, incomplete
+     sentences, dangling fragments, broken commands/paths) — formatting and assembly can
+     introduce corruption that was not in the draft.
+   - Re-run the **Write-safety consistency** invariant over the emitted text. If the final
+     prompt is `research-only` and grants any write — including an "optional" doc write, and
+     **even if it also adds a worktree step** — it fails. Do not emit it.
+   - If any check fires: repair the final text and lint again, or (for a write-safety
+     contradiction) **STOP and ask** whether to switch to `implementation` + `repo-safe` with a
+     worktree. Never emit a prompt that has not passed this pass on its final text.
+4. After the fenced block, emit the short lint report: concerns checked, repairs made, and any
+   items flagged for the user. State that the final-output hygiene pass was run on the emitted
+   text (not a draft) and its result.
+5. Present both to the user. If the lint report flagged an unknown required input, ask for
    it before treating the prompt as final.
 
 ## Rules
 
 - Stage 3 is never optional. A prompt that has not been linted is not a finished prompt.
+- The lint target is the **final emitted text**, not a scratchpad draft. Stage 3 checks the
+  draft; Stage 4's final-output hygiene pass re-checks the exact bytes you present. Both are
+  mandatory.
+- `research-only` means zero repository writes. If a write is needed, STOP and ask to switch to
+  `implementation` + `repo-safe` + worktree — never emit `research-only` + write, with or
+  without a worktree.
 - Never invent scope, paths, or authorizations. When unsure, flag and ask.
 - The final prompt must itself satisfy every lint rule (dogfooding).
 - Do not add AI or Claude attribution to any generated prompt.
