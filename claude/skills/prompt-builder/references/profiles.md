@@ -23,12 +23,16 @@ implies `repo-safe` and `live-gated`, so selecting it pulls both in automaticall
 
 The agent investigates and reports; it does not change anything.
 
-- **Allowed Files / Systems:** read-only access; no writes.
+- **Allowed Files / Systems:** read-only access; no writes. Never grant a write, edit, create,
+  or "single working-tree exception" here — a research-only prompt that permits any file write
+  is self-contradictory (see **Write-safety consistency** below).
 - **Forbidden Actions:** no file edits, no file creation, no mutating commands, no commits,
   no pushes, no service or state changes.
 - **Verification:** cite sources and read-backs; confirm claims against the files or systems
   actually read.
-- **Definition of Done:** findings delivered with evidence; no side effects.
+- **Definition of Done:** findings delivered with evidence; no side effects. If a durable
+  written note seems necessary, that is an implementation task, not research-only — switch the
+  mode rather than carving out a write exception. The default deliverable is the answer in chat.
 - **Expected Final Report:** the findings, the sources, and open questions.
 
 ## Mode: implementation
@@ -103,3 +107,38 @@ HomeBrain rules verbatim.
   - Include a secret scan when writing docs or config-like content (no tokens, keys, or
     cookies committed).
 - **Live gate:** keep it FREE unless the task explicitly claims it.
+
+---
+
+## Write-safety consistency (cross-cutting invariant)
+
+This invariant applies to every profile and is the highest-value contradiction to catch,
+because it silently permits an unsafe edit. **A generated prompt must never combine a file
+write with a stance that forbids the only safe way to make that write.** Concretely, the
+prompt must not simultaneously:
+
+- be `research-only` **and** allow any file write, file creation, edit, commit, or mutation;
+- say "do not edit `main` directly" **and** allow a repository write without also requiring a
+  worktree/branch process (a write in the `main` checkout *is* an edit to `main`);
+- say "do not create branches or worktrees" **and** allow a repository write;
+- present a "read-only" Allowed Files / Systems list **and** attach a write exception
+  (a "single working-tree write", a "no-git write", etc.) — a working-tree write with no
+  worktree still edits the checked-out branch.
+
+These read as reasonable in isolation but cannot all hold: writing a file in the main checkout
+edits `main`, and a working-tree-only carve-out does not change that.
+
+### Repair policy (in order)
+
+1. **Default for research/acquisition/decision tasks: chat-only, no file writes.** Deliver the
+   recommendation or findings in the reply. Remove the write exception; keep the read-only
+   Allowed Files / Systems list.
+2. **If a durable written artifact is genuinely required, change the shape, not just the
+   permission.** Switch the mode to `implementation`, add the `repo-safe` overlay, and require
+   a worktree before any write (base-state check → `git worktree add …` → then write). The
+   prompt then permits the write *because* it now mandates a safe process for it.
+3. **If the user has not authorized a write, flag and ask — do not invent a writable
+   deliverable.** State that the task as written is read-only and ask whether a durable file is
+   wanted before switching modes.
+4. **Never resolve the contradiction by keeping both.** A "single working-tree write exception"
+   alongside "no worktree / no main edit" is never a valid output.

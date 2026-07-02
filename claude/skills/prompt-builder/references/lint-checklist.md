@@ -54,11 +54,31 @@ The generated prompt must pass all rules before it is shown (dogfooding).
 - **Repair:** resolve in favour of the higher-precedence profile layer
   (`core < mode < repo-safe < live-gated < homebrain`).
 
+- **High-value sub-case — write-safety contradiction (research/scope vs. write).** A prompt
+  that permits a file write while framing itself as read-only or as not touching `main`. Watch
+  for all of these:
+  - `research-only` (or a "research agent" role) **plus** any write, create, edit, commit, or
+    mutation permission in Allowed Files / Systems or Required Steps;
+  - "do not edit `main` directly" **plus** an allowed repository write, with no worktree
+    required (a write in the `main` checkout edits `main`);
+  - "do not create branches or worktrees" **plus** an allowed repository write;
+  - a "read-only" Allowed Files / Systems list **plus** a write exception (a "single
+    working-tree write", "working tree only, no git actions", etc.).
+- **Repair (write-safety):** apply the **Write-safety consistency** repair policy in
+  `profiles.md`, in order: (1) default research/acquisition/decision tasks to chat-only with no
+  file writes; (2) if a durable file is truly required, switch the mode to `implementation`,
+  add `repo-safe`, and require a worktree before writing; (3) if no write was authorized, flag
+  and ask rather than inventing a writable deliverable; (4) never keep both — a working-tree
+  write exception alongside "no worktree / no main edit" is never a valid output.
+
 ### 8. Unsafe git or environment rules
 - **Detect:** branching or committing without a base-state check; editing `main` directly;
-  destructive commands without a guard; assuming a branch or base that was not verified.
+  destructive commands without a guard; assuming a branch or base that was not verified. Also
+  fires when a repository write is permitted while worktrees/branches are forbidden or `main`
+  edits are forbidden with no worktree required (the write-safety sub-case of concern 7).
 - **Repair:** insert the base-safety check (local `main` equals `origin/main`, else STOP) and
-  the worktree requirement from the repo-safe overlay.
+  the worktree requirement from the repo-safe overlay. When the unsafe rule is a write permitted
+  without a safe process, apply the **Write-safety consistency** repair policy (concern 7).
 
 ### 9. Ambiguous optional choices
 - **Detect:** an instruction offering options without a decision rule ("optionally do X",
@@ -66,15 +86,23 @@ The generated prompt must pass all rules before it is shown (dogfooding).
 - **Repair:** make the choice explicit, or state the exact condition under which each option
   applies.
 
-### 10. Missing allowed-file scope
-- **Detect:** the Allowed Files / Systems section is absent or empty.
+### 10. Missing or invalid allowed-file scope
+- **Detect:** the Allowed Files / Systems section is absent or empty; or it is invalid for the
+  mode — for example a `research-only` prompt whose Allowed Files grants a write, or a
+  "read-only" list carrying a write exception (the write-safety sub-case of concern 7).
 - **Repair:** fill it from the profile and scope; **flag** and ask only if it cannot be
-  reasonably inferred.
+  reasonably inferred. If the invalidity is a write under a read-only/research stance, apply the
+  **Write-safety consistency** repair policy (concern 7): default to a read-only list, or switch
+  to `implementation` + `repo-safe` if a durable write is genuinely required.
 
-### 11. Missing forbidden actions
+### 11. Missing forbidden actions (or forbidden/allowed conflict)
 - **Detect:** the Forbidden Actions section is absent or empty, or omits the active profile's
-  hard rules.
-- **Repair:** add the profile's forbidden actions.
+  hard rules; **or** a Forbidden Action directly conflicts with an Allowed Files / Systems or
+  Required Steps permission — e.g. "do not edit `main` directly" / "do not create worktrees"
+  while a repository write is allowed (the write-safety sub-case of concern 7).
+- **Repair:** add the profile's forbidden actions. When a forbidden action conflicts with an
+  allowed write, apply the **Write-safety consistency** repair policy (concern 7) rather than
+  leaving both in place.
 
 ### 12. Missing verification
 - **Detect:** the Verification section is absent or empty, or (for repo work) omits a
@@ -103,11 +131,13 @@ Deterministic coverage (`prompt_lint.py`):
 - placeholder markers `TODO` / `TBD` / `FIXME` / `XXX` (relates to stale content, concern 6)
 - required-section presence and non-emptiness (concerns 10, 11, 12, 13, 14) in prompt mode
 - trailing-hyphen and connective-before-break signals (partial coverage of concerns 1, 2, 3)
+- write-safety contradictions (the concern 7 sub-case, prompt mode only): conservatively flags
+  research-only-plus-write, no-worktree-plus-write, and no-main-edit-plus-write-without-worktree
 
 Judgment-based, still handled by the checklist above (LLM inspection):
 - broken commands (4), broken file paths (5), stale copied instructions (6) beyond marker
-  words, contradictions (7), ambiguous optional choices (9), and the parts of truncation and
-  incomplete-sentence detection (1, 2) that need meaning.
+  words, contradictions (7) beyond the write-safety sub-case, ambiguous optional choices (9),
+  and the parts of truncation and incomplete-sentence detection (1, 2) that need meaning.
 
 The lint report should note which concerns were confirmed by `prompt_lint.py` and which were
 verified by inspection.

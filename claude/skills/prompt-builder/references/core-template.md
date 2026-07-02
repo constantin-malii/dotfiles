@@ -60,9 +60,14 @@ when it is a likely temptation.
 
 **Good content:** Explicit paths or globs the agent may write, and which systems (git, a
 service, an API) it may act on. Infer from the profile and scope; ask only when genuinely
-ambiguous. This section must be present and non-empty.
+ambiguous. This section must be present and non-empty. It must be consistent with the mode and
+the git posture: a `research-only` prompt lists read-only access only; never attach a write
+exception ("single working-tree write", "read-only except …") to a list that also forbids
+worktrees or `main` edits. If a durable write is genuinely required, switch to `implementation`
++ `repo-safe` and require a worktree — see **Write-safety consistency** in `profiles.md`.
 
-**Prevents:** Missing allowed-file scope; edits landing in the wrong place.
+**Prevents:** Missing allowed-file scope; edits landing in the wrong place; a read-only or
+no-worktree prompt that still permits a file write (the write-safety contradiction).
 
 ## 7. Forbidden Actions
 
@@ -70,9 +75,13 @@ ambiguous. This section must be present and non-empty.
 
 **Good content:** A bulleted list. Always include the profile's forbidden actions (see
 `profiles.md`). Be specific: "do not edit main directly", not "be careful with git". This
-section must be present and non-empty.
+section must be present and non-empty. Every forbidden action must be compatible with the
+Allowed Files / Systems and Required Steps: if you forbid editing `main` or creating worktrees,
+you cannot also permit a repository write. Resolve the conflict via the **Write-safety
+consistency** policy in `profiles.md`, not by leaving both.
 
-**Prevents:** Missing forbidden actions; unsafe git or environment behaviour.
+**Prevents:** Missing forbidden actions; unsafe git or environment behaviour; a forbidden
+action that contradicts an allowed write.
 
 ## 8. Required Steps
 
