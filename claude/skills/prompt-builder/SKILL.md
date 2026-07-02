@@ -83,6 +83,11 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
    guessing.
 5. Resolve contradictions in favour of the higher-precedence profile layer, and confirm no
    unsafe git or environment rule survived (for example, branching without a base check).
+   In particular, enforce the **Write-safety consistency** invariant (see `profiles.md` and
+   lint concern 7): never output a prompt that permits a file write while framing itself as
+   research-only, forbidding `main` edits, or forbidding worktrees. Default research/decision
+   tasks to chat-only/no-write; if a durable file is truly required, switch to
+   `implementation` + `repo-safe` and require a worktree before writing.
 6. Record what was checked, what was repaired, and what was flagged. This becomes the lint
    report in Stage 4.
 

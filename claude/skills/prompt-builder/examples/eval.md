@@ -27,6 +27,7 @@ examples for the classes real data did not cover.
 | `defects/missing-sections.md` | SYNTHETIC | 10, 11, 12, 13, 14 |
 | `defects/ambiguous-broken-stale.md` | SYNTHETIC | 4, 5, 6, 9 |
 | `defects/contradiction.md` | SYNTHETIC | 7 |
+| `defects/research-write-worktree-contradiction.md` | REAL (trimmed) | 7 (write-safety sub-case), 8, 10, 11 |
 
 ## Concern coverage matrix
 
@@ -40,11 +41,11 @@ Every one of the 14 lint concerns is exercised by at least one defect example.
 | 4 | broken commands | ambiguous-broken-stale |
 | 5 | broken file paths | ambiguous-broken-stale |
 | 6 | stale copied instructions | ambiguous-broken-stale |
-| 7 | contradictions | contradiction |
-| 8 | unsafe git or environment rules | unsafe-git |
+| 7 | contradictions | contradiction; research-write-worktree-contradiction (write-safety sub-case) |
+| 8 | unsafe git or environment rules | unsafe-git; research-write-worktree-contradiction |
 | 9 | ambiguous optional choices | ambiguous-broken-stale |
-| 10 | missing allowed-file scope | missing-sections |
-| 11 | missing forbidden actions | missing-sections |
+| 10 | missing/invalid allowed-file scope | missing-sections; research-write-worktree-contradiction |
+| 11 | missing forbidden actions / forbidden-allowed conflict | missing-sections; research-write-worktree-contradiction |
 | 12 | missing verification | missing-sections |
 | 13 | missing stop conditions | missing-sections |
 | 14 | missing definition of done | missing-sections |
@@ -82,7 +83,12 @@ For each defect file:
 The deterministic script `prompt_lint.py` (Increment 3) covers the mechanically checkable
 subset: unbalanced code fences, broken markdown tables outside fences, placeholder markers
 outside fences and inline code, required-section presence and non-emptiness in prompt mode,
-and trailing-hyphen / connective-before-break signals.
+trailing-hyphen / connective-before-break signals, and (prompt mode) the write-safety
+contradiction sub-case of concern 7 — a file write granted under a research-only,
+no-worktree, or no-main-edit stance. The write-safety check is conservative: it fires only
+when an affirmative write grant is present (a "Write:" allowed-files bullet, or a "write
+exception" / "working tree only" carve-out), so an ordinary `implementation` + `repo-safe`
+prompt (which grants a write *and* requires a worktree) is never flagged.
 
 How to run it as part of the eval:
 
@@ -103,6 +109,17 @@ Recorded run (2026-07-01, Python 3.12):
 - Unit behaviour confirmed: unbalanced fence flagged; a broken table INSIDE a fence not
   flagged; placeholder in prose flagged; the same placeholder inside backticks not flagged.
 
+Write-safety detection run (2026-07-01, Python 3.12):
+- Prompt-mode on the `research-write-worktree-contradiction` bad excerpt: both write-safety
+  contradictions flagged (research-only + write; no-worktree + write), alongside the expected
+  missing-section findings for the partial excerpt.
+- Prompt-mode on a full 12-section research-only prompt with a working-tree write exception:
+  exactly 2 write-safety contradictions, no missing-section noise.
+- Prompt-mode on a full 12-section prompt that forbids editing `main` and grants a write with
+  no worktree mentioned: the third write-safety branch fires (no-main-edit + write, no worktree).
+- Control — a full `implementation` + `repo-safe` prompt granting a write *and* requiring a
+  worktree: clean, 0 issues. No false positive. All four goldens also remained clean.
+
 ## Results
 
 The deterministic portion has been run (see above). The golden and defect eval procedures
@@ -111,4 +128,5 @@ below also require the judgment-based LLM lint pass; that combined run is record
 | Date | Scope | Result |
 |---|---|---|
 | 2026-07-01 | Deterministic lint (prompt_lint.py) across corpus + skill | Clean; detection confirmed on synthetic bad inputs |
+| 2026-07-01 | Write-safety contradiction (concern 7 sub-case) | Deterministic: 3 bad shapes flagged, control + 4 goldens clean. LLM guidance: profiles.md + lint-checklist.md concern 7/8/10/11 |
 | (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |
