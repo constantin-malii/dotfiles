@@ -121,23 +121,34 @@ message`). Fold any real findings into the repairs before Stage 4.
 1. Read `references/output-schema.md`.
 2. Assemble the final dispatch prompt inside a single fenced block, using the twelve sections
    in the fixed order.
-3. **Final-output hygiene pass (mandatory — run on the EXACT text you are about to emit, not a
-   draft).** After assembling and formatting the fenced block, lint that final text before you
-   show it:
-   - Pipe the exact assembled prompt through the deterministic backstop:
+3. **Final-output hygiene pass (mandatory — on the EXACT bytes you are about to show, after
+   formatting, before the response goes out).** The lint target is the *visible* final prompt,
+   not a draft and not "what you intended to write". Do all of the following, in order:
+   - **Read the assembled prompt word by word, every section.** Look for mid-word truncation
+     (`HomeBrai`, `Assistan`, `repositor`), mashed/merged words (`wantrain`, `t mode`), dropped
+     characters, and any fragment that is not a complete word or sentence. This manual read is
+     the primary gate — do not skip it.
+   - Then run the deterministic backstop on the exact text:
      `printf '%s\n' "$FINAL_PROMPT" | python ~/.claude/scripts/prompt_lint.py --stdin --prompt`
-   - Re-run the mechanical checklist over the emitted text (truncated words, incomplete
-     sentences, dangling fragments, broken commands/paths) — formatting and assembly can
-     introduce corruption that was not in the draft.
+   - **A clean deterministic result does NOT authorize emission.** `prompt_lint.py` only catches
+     a subset of truncation (trailing hyphen, connective-before-break, a few known-term prefixes);
+     it can report "clean" while mid-word/mid-line corruption remains. The manual read is
+     authoritative. If the visible text is corrupted, the output is *not* clean no matter what
+     the script says.
    - Re-run the **Write-safety consistency** invariant over the emitted text. If the final
      prompt is `research-only` and grants any write — including an "optional" doc write, and
-     **even if it also adds a worktree step** — it fails. Do not emit it.
-   - If any check fires: repair the final text and lint again, or (for a write-safety
-     contradiction) **STOP and ask** whether to switch to `implementation` + `repo-safe` with a
-     worktree. Never emit a prompt that has not passed this pass on its final text.
+     **even if it also adds a worktree step** — it fails.
+   - **If anything is wrong: STOP. Do not emit the corrupted or contradictory text.** Re-render
+     the prompt from the assembled content, run this pass again, and only emit once the exact
+     visible text is clean. For a write-safety contradiction, STOP and ask whether to switch to
+     `implementation` + `repo-safe` with a worktree. When in doubt about a fragment, STOP —
+     never emit-and-hope.
 4. After the fenced block, emit the short lint report: concerns checked, repairs made, and any
-   items flagged for the user. State that the final-output hygiene pass was run on the emitted
-   text (not a draft) and its result.
+   items flagged. It **must** state that the final-output hygiene pass was run on the emitted
+   text and that the visible text was read and is free of truncation/corruption. **The report
+   may not claim "clean" unless the exact visible output passed the manual read** — if the
+   visible text is corrupted (even when `prompt_lint.py` says clean), do not emit and do not
+   report clean; STOP instead.
 5. Present both to the user. If the lint report flagged an unknown required input, ask for
    it before treating the prompt as final.
 
@@ -147,6 +158,10 @@ message`). Fold any real findings into the repairs before Stage 4.
 - The lint target is the **final emitted text**, not a scratchpad draft. Stage 3 checks the
   draft; Stage 4's final-output hygiene pass re-checks the exact bytes you present. Both are
   mandatory.
+- A clean `prompt_lint.py` result never overrides your eyes. If the visible output has a
+  truncated or mashed word, it is corrupted — STOP and re-render; do not emit, and do not let
+  the lint report say "clean". Emitting corrupted text is a hard failure even if every automated
+  check passed.
 - `research-only` means zero repository writes. If a write is needed, STOP and ask to switch to
   `implementation` + `repo-safe` + worktree — never emit `research-only` + write, with or
   without a worktree.
