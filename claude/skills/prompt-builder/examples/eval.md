@@ -28,6 +28,7 @@ examples for the classes real data did not cover.
 | `defects/ambiguous-broken-stale.md` | SYNTHETIC | 4, 5, 6, 9 |
 | `defects/contradiction.md` | SYNTHETIC | 7 |
 | `defects/research-write-worktree-contradiction.md` | REAL (trimmed) | 7 (write-safety sub-case), 8, 10, 11 |
+| `defects/research-optional-write-waiver-regression.md` | REAL (regression) | 7 (write-safety sub-case), 8, 10, 11 |
 
 ## Concern coverage matrix
 
@@ -41,11 +42,11 @@ Every one of the 14 lint concerns is exercised by at least one defect example.
 | 4 | broken commands | ambiguous-broken-stale |
 | 5 | broken file paths | ambiguous-broken-stale |
 | 6 | stale copied instructions | ambiguous-broken-stale |
-| 7 | contradictions | contradiction; research-write-worktree-contradiction (write-safety sub-case) |
-| 8 | unsafe git or environment rules | unsafe-git; research-write-worktree-contradiction |
+| 7 | contradictions | contradiction; research-write-worktree-contradiction; research-optional-write-waiver-regression (write-safety sub-case) |
+| 8 | unsafe git or environment rules | unsafe-git; research-write-worktree-contradiction; research-optional-write-waiver-regression |
 | 9 | ambiguous optional choices | ambiguous-broken-stale |
-| 10 | missing/invalid allowed-file scope | missing-sections; research-write-worktree-contradiction |
-| 11 | missing forbidden actions / forbidden-allowed conflict | missing-sections; research-write-worktree-contradiction |
+| 10 | missing/invalid allowed-file scope | missing-sections; research-write-worktree-contradiction; research-optional-write-waiver-regression |
+| 11 | missing forbidden actions / forbidden-allowed conflict | missing-sections; research-write-worktree-contradiction; research-optional-write-waiver-regression |
 | 12 | missing verification | missing-sections |
 | 13 | missing stop conditions | missing-sections |
 | 14 | missing definition of done | missing-sections |
@@ -120,6 +121,17 @@ Write-safety detection run (2026-07-01, Python 3.12):
 - Control — a full `implementation` + `repo-safe` prompt granting a write *and* requiring a
   worktree: clean, 0 issues. No false positive. All four goldens also remained clean.
 
+Regression run (2026-07-01, Python 3.12) — the `research-optional-write-waiver-regression`
+example (a real generated prompt that slipped the earlier rule):
+- Prompt-mode on the full 12-section regression prompt: 3 write-safety contradictions flagged —
+  the worktree-requirement waiver, research-only + write, and no-worktree + write — with no
+  missing-section noise. The earlier linter missed this because the write was phrased "Write
+  (optional …)" / "single optional uncommitted working-tree file" and the worktree was removed by
+  an explicit waiver rather than a "do not create worktrees" prohibition; both phrasings are now
+  covered.
+- The prior `research-write-worktree-contradiction` example still flags (no regression).
+- All four goldens remained clean after the broadened patterns (no new false positives).
+
 ## Results
 
 The deterministic portion has been run (see above). The golden and defect eval procedures
@@ -129,4 +141,5 @@ below also require the judgment-based LLM lint pass; that combined run is record
 |---|---|---|
 | 2026-07-01 | Deterministic lint (prompt_lint.py) across corpus + skill | Clean; detection confirmed on synthetic bad inputs |
 | 2026-07-01 | Write-safety contradiction (concern 7 sub-case) | Deterministic: 3 bad shapes flagged, control + 4 goldens clean. LLM guidance: profiles.md + lint-checklist.md concern 7/8/10/11 |
+| 2026-07-01 | Write-safety regression (optional write + waived worktree) | Deterministic: regression example flagged (3 findings), prior example still flagged, 4 goldens clean. Rule hardened: research-only = zero writes; worktree requirement non-waivable |
 | (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |

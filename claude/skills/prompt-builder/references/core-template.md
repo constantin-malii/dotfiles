@@ -61,10 +61,13 @@ when it is a likely temptation.
 **Good content:** Explicit paths or globs the agent may write, and which systems (git, a
 service, an API) it may act on. Infer from the profile and scope; ask only when genuinely
 ambiguous. This section must be present and non-empty. It must be consistent with the mode and
-the git posture: a `research-only` prompt lists read-only access only; never attach a write
-exception ("single working-tree write", "read-only except …") to a list that also forbids
-worktrees or `main` edits. If a durable write is genuinely required, switch to `implementation`
-+ `repo-safe` and require a worktree — see **Write-safety consistency** in `profiles.md`.
+the git posture: a `research-only` prompt lists read-only access only, with **no** write
+exception of any kind — not an "optional" write, a "single working-tree doc", or an
+"uncommitted working-tree file". Never attach a write exception to a list that also forbids
+worktrees or `main` edits, and never waive the worktree requirement for a doc write. If a
+durable write is wanted, do not carve out an exception — STOP and ask whether to switch to
+`implementation` + `repo-safe` with a worktree. See **Write-safety consistency** in
+`profiles.md`.
 
 **Prevents:** Missing allowed-file scope; edits landing in the wrong place; a read-only or
 no-worktree prompt that still permits a file write (the write-safety contradiction).

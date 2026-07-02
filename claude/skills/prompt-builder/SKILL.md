@@ -84,10 +84,12 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
 5. Resolve contradictions in favour of the higher-precedence profile layer, and confirm no
    unsafe git or environment rule survived (for example, branching without a base check).
    In particular, enforce the **Write-safety consistency** invariant (see `profiles.md` and
-   lint concern 7): never output a prompt that permits a file write while framing itself as
-   research-only, forbidding `main` edits, or forbidding worktrees. Default research/decision
-   tasks to chat-only/no-write; if a durable file is truly required, switch to
-   `implementation` + `repo-safe` and require a worktree before writing.
+   lint concern 7), which admits no loophole: `research-only` means zero repository writes
+   (no "optional", "single", or "working-tree-only" exception); any write means the prompt
+   must be `implementation` + `repo-safe`; the worktree requirement cannot be waived; and a
+   task authorization does not override this. Default to chat-only/no-write; if a durable file
+   is requested, **STOP and ask** whether to switch to `implementation` + `repo-safe` with a
+   worktree — never emit an optional working-tree write under a research-only/no-worktree stance.
 6. Record what was checked, what was repaired, and what was flagged. This becomes the lint
    report in Stage 4.
 

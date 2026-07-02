@@ -23,16 +23,18 @@ implies `repo-safe` and `live-gated`, so selecting it pulls both in automaticall
 
 The agent investigates and reports; it does not change anything.
 
-- **Allowed Files / Systems:** read-only access; no writes. Never grant a write, edit, create,
-  or "single working-tree exception" here — a research-only prompt that permits any file write
-  is self-contradictory (see **Write-safety consistency** below).
+- **Allowed Files / Systems:** read-only access. **No repository writes, no exceptions** — not
+  an "optional" write, not a "single working-tree doc", not an "uncommitted working-tree file".
+  Any write, edit, or file creation permission means the prompt is **not** research-only (see
+  **Write-safety consistency** below).
 - **Forbidden Actions:** no file edits, no file creation, no mutating commands, no commits,
   no pushes, no service or state changes.
 - **Verification:** cite sources and read-backs; confirm claims against the files or systems
   actually read.
-- **Definition of Done:** findings delivered with evidence; no side effects. If a durable
-  written note seems necessary, that is an implementation task, not research-only — switch the
-  mode rather than carving out a write exception. The default deliverable is the answer in chat.
+- **Definition of Done:** findings delivered with evidence; no side effects. The default
+  deliverable is the answer in chat. If a durable written note is wanted, that is **not** a
+  research-only task — do not carve out a write exception; STOP and ask whether to switch to
+  `implementation` + `repo-safe` with a worktree.
 - **Expected Final Report:** the findings, the sources, and open questions.
 
 ## Mode: implementation
@@ -113,32 +115,45 @@ HomeBrain rules verbatim.
 ## Write-safety consistency (cross-cutting invariant)
 
 This invariant applies to every profile and is the highest-value contradiction to catch,
-because it silently permits an unsafe edit. **A generated prompt must never combine a file
-write with a stance that forbids the only safe way to make that write.** Concretely, the
-prompt must not simultaneously:
+because it silently permits an unsafe edit. It has bitten a real generated prompt (see
+`examples/defects/research-optional-write-waiver-regression.md`), so the rules below are hard
+and admit no "optional" or "single-file" loophole.
 
-- be `research-only` **and** allow any file write, file creation, edit, commit, or mutation;
-- say "do not edit `main` directly" **and** allow a repository write without also requiring a
-  worktree/branch process (a write in the `main` checkout *is* an edit to `main`);
-- say "do not create branches or worktrees" **and** allow a repository write;
-- present a "read-only" Allowed Files / Systems list **and** attach a write exception
-  (a "single working-tree write", a "no-git write", etc.) — a working-tree write with no
-  worktree still edits the checked-out branch.
+### Hard rules (no exceptions)
 
-These read as reasonable in isolation but cannot all hold: writing a file in the main checkout
-edits `main`, and a working-tree-only carve-out does not change that.
+1. **`research-only` means zero repository writes.** No write, edit, file creation, or mutation
+   — not even an "optional", "single", "uncommitted", or "working-tree-only" one. There is no
+   such thing as a research-only prompt with a write exception.
+2. **Any repository write means the prompt is not research-only.** If the task truly needs to
+   write a file, the prompt must be `implementation` + `repo-safe`, not research-only with a
+   carve-out.
+3. **The `repo-safe` worktree requirement cannot be waived.** A "single working-tree doc", a
+   "single optional uncommitted working-tree file", or an explicit "the worktree requirement was
+   waived" is never acceptable. A write in the `main` checkout **is** an edit to `main`, whether
+   or not it is committed; the only safe way to write is inside a worktree.
+4. **Task authorization does not override profile safety rules.** "The task authorizes a write"
+   or "authorized to create the doc" does not license a research-only or no-worktree write. An
+   authorization only counts if it explicitly authorizes a write/live action **and** the prompt
+   is represented as `implementation` + `repo-safe` (or a claimed `live-gated` action).
+
+Concretely, a generated prompt must **never** simultaneously:
+
+- be `research-only` **and** allow any file write, creation, edit, commit, or mutation;
+- say "do not edit `main` directly" **and** allow a repository write without requiring a worktree;
+- say "do not create branches or worktrees" (or waive the worktree requirement) **and** allow a
+  repository write;
+- present a "read-only" Allowed Files / Systems list **and** attach a write exception (an
+  "optional" write, a "single working-tree doc", an "uncommitted working-tree file", etc.).
 
 ### Repair policy (in order)
 
-1. **Default for research/acquisition/decision tasks: chat-only, no file writes.** Deliver the
-   recommendation or findings in the reply. Remove the write exception; keep the read-only
-   Allowed Files / Systems list.
-2. **If a durable written artifact is genuinely required, change the shape, not just the
-   permission.** Switch the mode to `implementation`, add the `repo-safe` overlay, and require
-   a worktree before any write (base-state check → `git worktree add …` → then write). The
-   prompt then permits the write *because* it now mandates a safe process for it.
-3. **If the user has not authorized a write, flag and ask — do not invent a writable
-   deliverable.** State that the task as written is read-only and ask whether a durable file is
-   wanted before switching modes.
-4. **Never resolve the contradiction by keeping both.** A "single working-tree write exception"
-   alongside "no worktree / no main edit" is never a valid output.
+1. **Default: chat-only, no file writes.** For research/acquisition/decision tasks, deliver the
+   recommendation or findings in the reply. Remove any write exception; keep the Allowed Files /
+   Systems list read-only.
+2. **If a durable written artifact is requested, STOP and ask.** Do not silently invent a
+   writable deliverable or keep a carve-out. Ask the user whether to switch the prompt to
+   `implementation` + `repo-safe` with a worktree (base-state check → `git worktree add …` →
+   then write). Only produce the writable shape once that switch is confirmed.
+3. **Never allow an optional working-tree write under research-only or a no-worktree stance.**
+   A "single working-tree write exception" alongside "no worktree / no main edit" — optional or
+   not, committed or not — is never a valid output.
