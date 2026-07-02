@@ -69,11 +69,24 @@ NO_WORKTREE_RE = re.compile(r"(?:do not|don'?t|never|no)\b[^.\n]*\bworktree", re
 # Forbidding a direct edit of main (e.g. "do not edit main directly").
 NO_MAIN_EDIT_RE = re.compile(r"(?:do not|don'?t|never)\b[^.\n]{0,40}?edit[^.\n]{0,20}?\bmain\b",
                              re.I)
-# Any mention of a worktree at all (an affirmative worktree requirement makes a write safe).
-WORKTREE_ANY_RE = re.compile(r"worktree", re.I)
+# An AFFIRMATIVE worktree requirement (e.g. "create a worktree", "work in a git worktree",
+# "git worktree add"). Its presence means a write has a safe process; a mere mention of the
+# word "worktree" (e.g. inside a waiver) does not count.
+WORKTREE_REQUIRED_RE = re.compile(
+    r"(?:create|make|use|open|work(?:ing)?\s+in|within|under|in)\s+[^.\n]{0,30}?worktree"
+    r"|git\s+worktree\s+add", re.I)
+# An explicit waiver of the worktree requirement — never acceptable under repo-safe.
+WORKTREE_WAIVER_RE = re.compile(r"worktree[^.\n]*waiv|waiv[^.\n]*worktree", re.I)
 # Characteristic write carve-out phrases used when a read-only prompt smuggles in a write.
-WRITE_PHRASE_RE = re.compile(r"write exception|working[- ]tree only|single deliberate[^.\n]*write",
-                             re.I)
+WRITE_PHRASE_RE = re.compile(
+    r"write exception"
+    r"|working[- ]tree only"
+    r"|working[- ]tree doc"
+    r"|single deliberate[^.\n]*write"
+    r"|single optional[^.\n]*(?:file|write|doc)"
+    r"|optional[^.\n]*uncommitted[^.\n]*working[- ]tree"
+    r"|uncommitted working[- ]tree"
+    r"|write\s*\(\s*optional", re.I)
 # An Allowed-Files bullet that STARTS with an affirmative write verb (a write grant). Ordinary
 # allowed-files bullets name a path ("- shell/.bash_profile"), not a verb, so this stays quiet.
 ALLOWED_WRITE_BULLET_RE = re.compile(r"^[\s\-*>]*(?:write|edit|create|modify|overwrite|delete)\b",
@@ -227,20 +240,29 @@ def _write_safety_findings(text, lines, bodies):
         if ALLOWED_WRITE_BULLET_RE.match(ln):
             write_grant = True
             break
-    if not write_grant:
-        return []
 
+    waiver = bool(WORKTREE_WAIVER_RE.search(text))
     loc = allowed_pos + 1 if allowed_pos else 0
     findings = []
+
+    # An explicit worktree-requirement waiver is unsafe on its own; doubly so with a write.
+    if waiver:
+        findings.append((loc, "contradiction",
+                         "prompt waives the repo-safe worktree requirement; it cannot be waived "
+                         "for a working-tree write (concerns 7, 8)"))
+
+    if not write_grant:
+        return findings
+
     if RESEARCH_RE.search(text):
         findings.append((loc, "contradiction",
                          "research-only/research-agent framing but the prompt grants a file "
-                         "write; research prompts must be read-only (concern 7)"))
+                         "write; research prompts must be read-only, no exceptions (concern 7)"))
     if NO_WORKTREE_RE.search(text):
         findings.append((loc, "contradiction",
                          "prompt forbids creating branches/worktrees but grants a repository "
                          "write; a repo write requires a worktree (concerns 7, 8)"))
-    elif NO_MAIN_EDIT_RE.search(text) and not WORKTREE_ANY_RE.search(text):
+    elif NO_MAIN_EDIT_RE.search(text) and not WORKTREE_REQUIRED_RE.search(text):
         findings.append((loc, "contradiction",
                          "prompt forbids editing main directly and grants a write but never "
                          "requires a worktree; a write in the main checkout edits main "
