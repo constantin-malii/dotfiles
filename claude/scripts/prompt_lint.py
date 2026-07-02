@@ -19,6 +19,9 @@ file (default)
 --prompt
     Treat the whole input as a generated dispatch prompt (no surrounding markdown). Checks:
       - all twelve required sections are present and non-empty
+      - write-safety contradictions (concern 7 sub-case): a file write granted under a
+        research-only, no-worktree, or no-main-edit stance (conservative — requires an
+        affirmative write grant to fire)
       - the same truncation / dangling signals
 
 Input
@@ -53,6 +56,28 @@ REQUIRED_SECTIONS = [
 FENCE_RE = re.compile(r"^\s*```")
 PLACEHOLDER_RE = re.compile(r"\b(TODO|TBD|FIXME|XXX)\b")
 INLINE_CODE_RE = re.compile(r"`[^`]*`")
+
+# --- Write-safety contradiction signals (prompt mode; concern 7 sub-case) ---------------
+# These are intentionally conservative: they fire only on affirmative write GRANTS combined
+# with a read-only / no-worktree / no-main-edit stance, so ordinary implementation prompts
+# (which grant writes AND require a worktree) are never flagged.
+
+# Research framing: a research-only mode or a "research agent" role.
+RESEARCH_RE = re.compile(r"research-only|research agent", re.I)
+# Forbidding statement that mentions a worktree/branch (e.g. "do not create ... worktrees").
+NO_WORKTREE_RE = re.compile(r"(?:do not|don'?t|never|no)\b[^.\n]*\bworktree", re.I)
+# Forbidding a direct edit of main (e.g. "do not edit main directly").
+NO_MAIN_EDIT_RE = re.compile(r"(?:do not|don'?t|never)\b[^.\n]{0,40}?edit[^.\n]{0,20}?\bmain\b",
+                             re.I)
+# Any mention of a worktree at all (an affirmative worktree requirement makes a write safe).
+WORKTREE_ANY_RE = re.compile(r"worktree", re.I)
+# Characteristic write carve-out phrases used when a read-only prompt smuggles in a write.
+WRITE_PHRASE_RE = re.compile(r"write exception|working[- ]tree only|single deliberate[^.\n]*write",
+                             re.I)
+# An Allowed-Files bullet that STARTS with an affirmative write verb (a write grant). Ordinary
+# allowed-files bullets name a path ("- shell/.bash_profile"), not a verb, so this stays quiet.
+ALLOWED_WRITE_BULLET_RE = re.compile(r"^[\s\-*>]*(?:write|edit|create|modify|overwrite|delete)\b",
+                                     re.I)
 
 # Words that should not end a complete line/paragraph. Kept conservative to avoid flagging
 # ordinary soft-wrapped prose (where the sentence continues on the next non-blank line).
@@ -176,30 +201,71 @@ def lint_file(text):
     return findings
 
 
-def lint_prompt(text):
-    """Prompt mode: the whole input is a dispatch prompt. Check section presence,
-    non-emptiness, and truncation signals."""
-    findings = []
-    lines = text.splitlines()
-
+def _section_bodies(lines):
+    """Return {section: (heading_line_index, [body_lines])} for the required sections that are
+    present, using the next present heading (in document order) as each section's end."""
     present = {}
     for idx, line in enumerate(lines):
         s = line.strip()
         if s in REQUIRED_SECTIONS:
             present[s] = idx
+    ordered = sorted(present.items(), key=lambda kv: kv[1])
+    bodies = {}
+    for i, (sec, pos) in enumerate(ordered):
+        end = ordered[i + 1][1] if i + 1 < len(ordered) else len(lines)
+        bodies[sec] = (pos, lines[pos + 1:end])
+    return present, bodies
+
+
+def _write_safety_findings(text, lines, bodies):
+    """Concern 7 sub-case: a repository write permitted under a read-only / no-worktree /
+    no-main-edit stance. Conservative — requires an affirmative write GRANT to fire at all."""
+    allowed_pos, allowed_body = bodies.get("ALLOWED FILES / SYSTEMS", (0, []))
+
+    write_grant = bool(WRITE_PHRASE_RE.search(text))
+    for ln in allowed_body:
+        if ALLOWED_WRITE_BULLET_RE.match(ln):
+            write_grant = True
+            break
+    if not write_grant:
+        return []
+
+    loc = allowed_pos + 1 if allowed_pos else 0
+    findings = []
+    if RESEARCH_RE.search(text):
+        findings.append((loc, "contradiction",
+                         "research-only/research-agent framing but the prompt grants a file "
+                         "write; research prompts must be read-only (concern 7)"))
+    if NO_WORKTREE_RE.search(text):
+        findings.append((loc, "contradiction",
+                         "prompt forbids creating branches/worktrees but grants a repository "
+                         "write; a repo write requires a worktree (concerns 7, 8)"))
+    elif NO_MAIN_EDIT_RE.search(text) and not WORKTREE_ANY_RE.search(text):
+        findings.append((loc, "contradiction",
+                         "prompt forbids editing main directly and grants a write but never "
+                         "requires a worktree; a write in the main checkout edits main "
+                         "(concerns 7, 8)"))
+    return findings
+
+
+def lint_prompt(text):
+    """Prompt mode: the whole input is a dispatch prompt. Check section presence,
+    non-emptiness, write-safety contradictions, and truncation signals."""
+    findings = []
+    lines = text.splitlines()
+
+    present, bodies = _section_bodies(lines)
 
     for sec in REQUIRED_SECTIONS:
         if sec not in present:
             findings.append((0, "section", "missing required section: %s" % sec))
 
-    ordered = sorted(present.items(), key=lambda kv: kv[1])
-    for i, (sec, pos) in enumerate(ordered):
-        end = ordered[i + 1][1] if i + 1 < len(ordered) else len(lines)
-        body = [ln for ln in lines[pos + 1:end] if ln.strip()]
-        if not body:
+    for sec, (pos, body_lines) in bodies.items():
+        if not [ln for ln in body_lines if ln.strip()]:
             findings.append((pos + 1, "empty-section",
                              "section '%s' is present but empty" % sec))
 
+    findings.extend(_write_safety_findings(text, lines, bodies))
     findings.extend(_truncation_findings(lines, flags=None))
     return findings
 
