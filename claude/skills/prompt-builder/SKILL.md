@@ -83,6 +83,13 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
    guessing.
 5. Resolve contradictions in favour of the higher-precedence profile layer, and confirm no
    unsafe git or environment rule survived (for example, branching without a base check).
+   In particular, enforce the **Write-safety consistency** invariant (see `profiles.md` and
+   lint concern 7), which admits no loophole: `research-only` means zero repository writes
+   (no "optional", "single", or "working-tree-only" exception); any write means the prompt
+   must be `implementation` + `repo-safe`; the worktree requirement cannot be waived; and a
+   task authorization does not override this. Default to chat-only/no-write; if a durable file
+   is requested, **STOP and ask** whether to switch to `implementation` + `repo-safe` with a
+   worktree — never emit an optional working-tree write under a research-only/no-worktree stance.
 6. Record what was checked, what was repaired, and what was flagged. This becomes the lint
    report in Stage 4.
 
@@ -111,17 +118,75 @@ message`). Fold any real findings into the repairs before Stage 4.
 
 ## Step 4: Output
 
+**The single most important rule of this stage: what you lint MUST be what you emit.** The
+recurring failure is a builder that lints one copy of the prompt and then *re-types* or
+*regenerates* the prompt into its chat response — the regeneration silently corrupts words
+(`HomeBrai`, `research-oires`, `variantnt`), and the lint report falsely claims clean because it
+checked a different, clean copy. Eliminate the regeneration step entirely: lint a **file**, then
+emit **that file's exact bytes** verbatim.
+
 1. Read `references/output-schema.md`.
-2. Emit the final dispatch prompt inside a single fenced block, using the twelve sections in
-   the fixed order.
-3. After the fenced block, emit the short lint report: concerns checked, repairs made, and
-   any items flagged for the user.
-4. Present both to the user. If the lint report flagged an unknown required input, ask for
-   it before treating the prompt as final.
+2. **Write the final dispatch prompt to an output file.** Assemble the twelve sections and write
+   them to a file (e.g. under your scratchpad): call it `$OUT`. From here on, `$OUT` is the
+   *authoritative artifact* — the single source of truth for the output. Never hold the prompt
+   only "in your head" or retype it.
+3. **Lint that exact file** with the deterministic backstop:
+   `python ~/.claude/scripts/prompt_lint.py --prompt "$OUT"`
+4. **Read `$OUT` back and inspect it word by word, every section** — mid-word truncation
+   (`HomeBrai`, `Assistan`, `repositor`), mashed/merged words (`wantrain`, `variantnt`,
+   `researcebrain`), dropped characters, and any fragment that is not a complete word or
+   sentence. **A clean `prompt_lint.py` result does NOT authorize emission** — the script only
+   catches a subset (trailing hyphen, connective-before-break, known-term prefixes); the read of
+   `$OUT` is authoritative. Also re-check the **Write-safety consistency** invariant on `$OUT`.
+5. **Compute the artifact fingerprint** of the linted file:
+   `wc -c "$OUT"` and `sha256sum "$OUT"`. Record the **output file path, byte count, and SHA-256**
+   — these identify the exact clean artifact independently of how any transcript renders it.
+6. **Deliver the artifact.** The file at `$OUT` (identified by its path + SHA-256) is what the
+   caller should use. An inline copy is a **convenience copy only**:
+   - For a short prompt, you may `cat "$OUT"` into the fenced block, but label it as a
+     non-authoritative convenience copy and still report the path + byte count + SHA-256.
+   - For a long prompt, **prefer delivering the file artifact**: give the path + byte count +
+     SHA-256 and either omit the inline text or clearly label it "convenience copy — verify
+     against the SHA-256". Do not present a large inline block as authoritative.
+   Never retype/reformat/regenerate the prompt when composing the reply; any inline text must be
+   a `cat` of `$OUT`.
+7. **If anything is wrong — corruption in `$OUT`, or a write-safety contradiction — STOP. Do not
+   emit.** Rebuild `$OUT` from the assembled content, re-lint, re-read, and re-hash; only proceed
+   once the file is clean. For a write-safety contradiction, STOP and ask whether to switch to
+   `implementation` + `repo-safe` with a worktree. Never emit-and-hope.
+8. After the fenced block (or in place of it, for long prompts), emit the short lint report. It
+   **must** report the artifact's **path, byte count, and SHA-256**, and state that *that file*
+   was linted, read, and is free of truncation/corruption. **The report may claim clean only
+   about the file identified by path + hash — never about the visible transcript**, which the
+   skill cannot control (a display/relay layer can corrupt the rendered copy after emission). If
+   the caller's rendered copy does not match the SHA-256, the **file is authoritative** and the
+   transcript was corrupted downstream — the caller should use the file.
+9. Present the artifact and the lint report. If the lint report flagged an unknown required
+   input, ask for it before treating the prompt as final.
 
 ## Rules
 
 - Stage 3 is never optional. A prompt that has not been linted is not a finished prompt.
+- The lint target is the **final emitted text**, not a scratchpad draft. Stage 3 checks the
+  draft; Stage 4's final-output hygiene pass re-checks the exact bytes you present. Both are
+  mandatory.
+- A clean `prompt_lint.py` result never overrides your eyes. If the visible output has a
+  truncated or mashed word, it is corrupted — STOP and re-render; do not emit, and do not let
+  the lint report say "clean". Emitting corrupted text is a hard failure even if every automated
+  check passed.
+- **What you lint must be what you emit.** Lint a file and emit that file's exact bytes verbatim
+  (`cat`); never retype, reformat, or regenerate the prompt after checking it — regeneration is
+  where corruption enters. If the visible text is not a byte-for-byte copy of the linted file,
+  the lint report is invalid and you must STOP.
+- **The file is the authoritative artifact; the transcript is not.** Report the output file's
+  path, byte count, and SHA-256, and claim cleanliness only of *that file*. A display/relay layer
+  can corrupt the rendered copy after emission — that is outside the skill's control, so never
+  assert the visible transcript is clean. If the caller's copy does not match the SHA-256, the
+  file wins. For long prompts, prefer delivering the file and labelling any inline text a
+  non-authoritative convenience copy.
+- `research-only` means zero repository writes. If a write is needed, STOP and ask to switch to
+  `implementation` + `repo-safe` + worktree — never emit `research-only` + write, with or
+  without a worktree.
 - Never invent scope, paths, or authorizations. When unsure, flag and ask.
 - The final prompt must itself satisfy every lint rule (dogfooding).
 - Do not add AI or Claude attribution to any generated prompt.
