@@ -154,6 +154,28 @@ bytes came verbatim from the linted file.
 
 ---
 
+## Delivery integrity — relay/display corruption (post-emission)
+
+Concerns 1-14 lint the prompt *content*. This concern is different: even a provably clean linted
+file can be corrupted **after emission** by a display/relay/transport layer, so what the caller
+*sees* in the transcript may not equal what was linted (mid-word cuts, mashed words, dropped
+characters). The skill cannot lint or repair the transcript — that layer is outside its control —
+so it must make the corruption *detectable* by the caller and never falsely claim the transcript
+is clean.
+
+- **Detect:** you cannot detect this by linting the draft. Assume the transcript may be corrupted
+  for any output, and especially for long ones.
+- **Mitigation (required):**
+  - Treat the output **file** as the authoritative artifact. Report its **path, byte count, and
+    SHA-256** so the caller can verify their copy by hashing it.
+  - Claim cleanliness **only of the file identified by path + hash** — never of the visible
+    transcript. If the caller's rendered copy does not match the SHA-256, the file is
+    authoritative and the transcript was corrupted downstream.
+  - For long outputs, **prefer delivering the file** and either omit the inline prompt text or
+    label it explicitly as a non-authoritative convenience copy to be verified against the hash.
+
+---
+
 ## Coverage note
 
 A deterministic script, `prompt_lint.py` (deployed to `~/.claude/scripts/`), now backstops

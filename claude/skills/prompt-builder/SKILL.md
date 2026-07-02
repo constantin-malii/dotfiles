@@ -126,9 +126,10 @@ checked a different, clean copy. Eliminate the regeneration step entirely: lint 
 emit **that file's exact bytes** verbatim.
 
 1. Read `references/output-schema.md`.
-2. **Write the final dispatch prompt to a file.** Assemble the twelve sections and write them to
-   a temp file (e.g. under your scratchpad): call it `$OUT`. From here on, `$OUT` is the *single
-   source of truth* for the output — never hold the prompt only "in your head" or retype it.
+2. **Write the final dispatch prompt to an output file.** Assemble the twelve sections and write
+   them to a file (e.g. under your scratchpad): call it `$OUT`. From here on, `$OUT` is the
+   *authoritative artifact* — the single source of truth for the output. Never hold the prompt
+   only "in your head" or retype it.
 3. **Lint that exact file** with the deterministic backstop:
    `python ~/.claude/scripts/prompt_lint.py --prompt "$OUT"`
 4. **Read `$OUT` back and inspect it word by word, every section** — mid-word truncation
@@ -137,24 +138,31 @@ emit **that file's exact bytes** verbatim.
    sentence. **A clean `prompt_lint.py` result does NOT authorize emission** — the script only
    catches a subset (trailing hyphen, connective-before-break, known-term prefixes); the read of
    `$OUT` is authoritative. Also re-check the **Write-safety consistency** invariant on `$OUT`.
-5. **Emit `$OUT` verbatim.** Print the file's exact contents into the fenced block — for example
-   `cat "$OUT"` — and copy those exact bytes into the response. **Do not retype, reformat,
-   re-summarize, or regenerate the prompt** when composing the reply; the visible fenced text
-   must be a byte-for-byte copy of the file you just linted and read. If you cannot guarantee the
-   visible text equals `$OUT`, STOP.
-6. **If anything is wrong — corruption in `$OUT`, or the visible text differs from `$OUT`, or a
-   write-safety contradiction — STOP. Do not emit.** Rebuild `$OUT` from the assembled content,
-   re-lint and re-read it, and only emit once the file is clean and you are emitting it verbatim.
-   For a write-safety contradiction, STOP and ask whether to switch to `implementation` +
-   `repo-safe` with a worktree. Never emit-and-hope.
-7. After the fenced block, emit the short lint report: concerns checked, repairs made, and any
-   items flagged. It **must** state that the emitted text is a verbatim copy of the linted file
-   `$OUT` and that `$OUT` was read and is free of truncation/corruption. **The report may not
-   claim "clean" unless the exact bytes shown came from the linted file and passed the read** —
-   if the visible text is corrupted or was regenerated separately (even when `prompt_lint.py`
-   said clean), do not emit and do not report clean; STOP instead.
-8. Present both to the user. If the lint report flagged an unknown required input, ask for
-   it before treating the prompt as final.
+5. **Compute the artifact fingerprint** of the linted file:
+   `wc -c "$OUT"` and `sha256sum "$OUT"`. Record the **output file path, byte count, and SHA-256**
+   — these identify the exact clean artifact independently of how any transcript renders it.
+6. **Deliver the artifact.** The file at `$OUT` (identified by its path + SHA-256) is what the
+   caller should use. An inline copy is a **convenience copy only**:
+   - For a short prompt, you may `cat "$OUT"` into the fenced block, but label it as a
+     non-authoritative convenience copy and still report the path + byte count + SHA-256.
+   - For a long prompt, **prefer delivering the file artifact**: give the path + byte count +
+     SHA-256 and either omit the inline text or clearly label it "convenience copy — verify
+     against the SHA-256". Do not present a large inline block as authoritative.
+   Never retype/reformat/regenerate the prompt when composing the reply; any inline text must be
+   a `cat` of `$OUT`.
+7. **If anything is wrong — corruption in `$OUT`, or a write-safety contradiction — STOP. Do not
+   emit.** Rebuild `$OUT` from the assembled content, re-lint, re-read, and re-hash; only proceed
+   once the file is clean. For a write-safety contradiction, STOP and ask whether to switch to
+   `implementation` + `repo-safe` with a worktree. Never emit-and-hope.
+8. After the fenced block (or in place of it, for long prompts), emit the short lint report. It
+   **must** report the artifact's **path, byte count, and SHA-256**, and state that *that file*
+   was linted, read, and is free of truncation/corruption. **The report may claim clean only
+   about the file identified by path + hash — never about the visible transcript**, which the
+   skill cannot control (a display/relay layer can corrupt the rendered copy after emission). If
+   the caller's rendered copy does not match the SHA-256, the **file is authoritative** and the
+   transcript was corrupted downstream — the caller should use the file.
+9. Present the artifact and the lint report. If the lint report flagged an unknown required
+   input, ask for it before treating the prompt as final.
 
 ## Rules
 
@@ -170,6 +178,12 @@ emit **that file's exact bytes** verbatim.
   (`cat`); never retype, reformat, or regenerate the prompt after checking it — regeneration is
   where corruption enters. If the visible text is not a byte-for-byte copy of the linted file,
   the lint report is invalid and you must STOP.
+- **The file is the authoritative artifact; the transcript is not.** Report the output file's
+  path, byte count, and SHA-256, and claim cleanliness only of *that file*. A display/relay layer
+  can corrupt the rendered copy after emission — that is outside the skill's control, so never
+  assert the visible transcript is clean. If the caller's copy does not match the SHA-256, the
+  file wins. For long prompts, prefer delivering the file and labelling any inline text a
+  non-authoritative convenience copy.
 - `research-only` means zero repository writes. If a write is needed, STOP and ask to switch to
   `implementation` + `repo-safe` + worktree — never emit `research-only` + write, with or
   without a worktree.
