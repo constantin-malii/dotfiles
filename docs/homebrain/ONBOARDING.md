@@ -104,6 +104,8 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
 ## 7. Reliable recipes / cheatsheet
 
+> ⚡ **After a reboot / "ChatGPT can't reach music/radio" → [`runbooks/quick-connect-and-health-check.md`](runbooks/quick-connect-and-health-check.md).** It has the SSH connect pattern (key `~/.ssh/id_homebrain` via ssh-agent + `timeout`/keepalive), a one-shot **read-only** stack health check (VM · resolver · `/command` bind + 200/401 · MA · HA · event path — using the resolver's own on-host secret, no token needed), and the cold-boot `/command` bind-race triage. Recovery steps there need user approval.
+
 - **Play YTM reliably:** `music_assistant.search` → top result's `uri` → `music_assistant.play_media(media_id=uri)` → nudge `media_player.media_play`. (Free-text `play_media` unreliable; cold-start latency still applies.)
 - **Recover HA↔MA:** reload the MA config entry (above), wait ~15 s.
 - **After a power outage / host reboot (ChatGPT "can't reach music/radio"):** the `mass-resolver` `/command` server can lose its startup bind race with the libvirt bridge (`OSError 99, Cannot assign requested address` → logs "continuing event-only"; the event path still works but the three `/command` tools return the fallback). Fix: once the VM is up, `sudo systemctl restart mass-resolver`, then confirm `SERVICE: /command HTTP server on 192.168.122.1:8770` in `~/mass-resolver/resolver.log` and `/command` returns 200 (good key) / 401 (no key). Durable self-heal is planned — see `plans/2026-07-01-command-bind-retry-bugfix.md`.
@@ -265,6 +267,7 @@ Reliable playback of **track, artist, album, playlist, genre** from YouTube Musi
   - `music-assistant-audio-architecture.md` — master (architecture, voice, LLM, TTS, YTM investigation, http_profile, A1/A2a, change log).
   - **Resolver / Inc / F1-R:** `2026-06-28-F1-synchronous-command-result-design.md` (F1 design), `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` (F1-R addendum), `plans/2026-06-28-F1-R-music-remigration.md` (music migration), `plans/2026-06-29-F1-R-radio-find-migration.md` (radio/find migration), `assistant-capabilities.md`, `local-music-architecture.md`, `CHANGELOG.md`.
   - `haos-vm-deployment.md`, `homebrain-architecture.md`, `migration-inventory.md`, **this `ONBOARDING.md`**.
+  - **Runbooks:** `runbooks/quick-connect-and-health-check.md` — SSH connect + read-only stack health check + "ChatGPT can't play" triage.
 - **Agent memory (running project log, latest status):** `~/.claude/projects/C--Users-ConstantinMalii/memory/homebrain-ha-vm-project.md` — detailed chronology + every finding.
 - **Scratchpad (test outputs, config snapshots):** session scratchpad dir; e.g. `ma_cfg_before_*.json`, `phase3_exposure_snapshot_*.json`.
 
