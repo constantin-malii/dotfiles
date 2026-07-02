@@ -31,6 +31,7 @@ examples for the classes real data did not cover.
 | `defects/research-optional-write-waiver-regression.md` | REAL (regression) | 7 (write-safety sub-case), 8, 10, 11 |
 | `defects/research-worktree-write-final-output-regression.md` | REAL (regression) | 1, 2, 3, 4, 7 (write-safety), 8, 10, 11 |
 | `defects/emitted-output-truncation-regression.md` | REAL (regression) | 1, 2, 3 (visible-output corruption emitted while write-safety was correct) |
+| `defects/emitted-output-regeneration-corruption-regression.md` | REAL (regression) | 1, 2, 3 (corruption from regenerating the prompt instead of emitting the linted file verbatim) |
 
 ## Concern coverage matrix
 
@@ -38,9 +39,9 @@ Every one of the 14 lint concerns is exercised by at least one defect example.
 
 | # | Concern | Covered by |
 |---|---|---|
-| 1 | truncated words | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression |
-| 2 | incomplete sentences | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression |
-| 3 | dangling fragments | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression |
+| 1 | truncated words | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
+| 2 | incomplete sentences | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
+| 3 | dangling fragments | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
 | 4 | broken commands | ambiguous-broken-stale; research-worktree-write-final-output-regression |
 | 5 | broken file paths | ambiguous-broken-stale |
 | 6 | stale copied instructions | ambiguous-broken-stale |
@@ -160,6 +161,20 @@ the lint report still claimed clean):
 - Added a conservative deterministic known-term truncation heuristic (`HomeBrain`, `worktree`,
   `Assistant`, `repository`, …); goldens remain clean (no false positives on short prefixes).
 
+Regeneration-corruption regression run (2026-07-02, Python 3.12) — the
+`emitted-output-regeneration-corruption-regression` example (a real clean-session output whose
+write-safety was correct — chat-only, zero writes — but whose visible prompt was corrupted while
+the lint report falsely claimed clean):
+- Root cause identified: the prompt was **regenerated / re-typed** into the reply after being
+  linted, so the check ran on a clean copy while the visible copy was corrupted.
+- Process fix (SKILL.md Stage 4): write the final prompt to a file, run
+  `prompt_lint.py --prompt <file>` on it, read that file word-by-word, then emit the file's exact
+  bytes verbatim (`cat`) — never regenerate the prompt separately. The lint report may claim clean
+  only for the exact bytes shown, and only if they came verbatim from the linted file.
+- Deterministic backstop on the fixture flags `HomeBrai` (known-term); the many other
+  corruptions (`research-oires`, `checkmended`, `variantnt`, …) are caught by the verbatim-emit +
+  read discipline, not the script. Note: `prompt_lint.py --prompt <file>` lints a file directly.
+
 ## Results
 
 The deterministic portion has been run (see above). The golden and defect eval procedures
@@ -172,4 +187,5 @@ below also require the judgment-based LLM lint pass; that combined run is record
 | 2026-07-01 | Write-safety regression (optional write + waived worktree) | Deterministic: regression example flagged (3 findings), prior example still flagged, 4 goldens clean. Rule hardened: research-only = zero writes; worktree requirement non-waivable |
 | 2026-07-01 | Final-output regression (research-only + worktree + write, emitted with truncation) | Deterministic: flagged (truncation + dangling + write-safety, worktree does not rescue). Added Stage 4 final-output hygiene pass (lint the emitted text, not a draft). Clean-session test: builder stops-and-asks, no truncation |
 | 2026-07-02 | Visible-output regression (correct write-safety, corrupted emitted text) | Hardened Stage 4: read the exact visible text; clean prompt_lint does not authorize emission; STOP + re-render on any corruption; lint report cannot claim clean over corrupted output. Added known-term truncation heuristic (flags HomeBrai). Goldens clean |
+| 2026-07-02 | Regeneration-corruption regression (lint clean but visible prompt corrupted) | Root cause: prompt regenerated after linting. Stage 4 now mandates verbatim-from-file emit (write to file → lint the file → read the file → cat it); lint report valid only for the exact emitted bytes. Fixture added; clean-session test re-run |
 | (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |

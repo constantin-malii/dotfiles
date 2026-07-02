@@ -23,6 +23,14 @@ is clean. You must read the exact emitted text yourself. **If the visible output
 STOP and re-render — never emit it, and never let the lint report claim "clean".** A lint report
 that says "clean" over corrupted visible text is itself a defect.
 
+**What you lint must be what you emit (verbatim-from-file).** The corruption that keeps slipping
+through is introduced when the prompt is *regenerated/re-typed* into the reply after being
+checked: the lint runs on a clean copy, but the visible copy is a fresh, corrupted one. Prevent
+it structurally — write the final prompt to a file, lint and read *that file*, then emit the
+file's exact bytes verbatim (`cat`). Never compose the visible prompt separately from the linted
+artifact. A lint report may claim "clean" only about the exact bytes shown, and only if those
+bytes came verbatim from the linted file.
+
 ---
 
 ## Mechanical concerns (repair inline)

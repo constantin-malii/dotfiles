@@ -118,38 +118,42 @@ message`). Fold any real findings into the repairs before Stage 4.
 
 ## Step 4: Output
 
+**The single most important rule of this stage: what you lint MUST be what you emit.** The
+recurring failure is a builder that lints one copy of the prompt and then *re-types* or
+*regenerates* the prompt into its chat response — the regeneration silently corrupts words
+(`HomeBrai`, `research-oires`, `variantnt`), and the lint report falsely claims clean because it
+checked a different, clean copy. Eliminate the regeneration step entirely: lint a **file**, then
+emit **that file's exact bytes** verbatim.
+
 1. Read `references/output-schema.md`.
-2. Assemble the final dispatch prompt inside a single fenced block, using the twelve sections
-   in the fixed order.
-3. **Final-output hygiene pass (mandatory — on the EXACT bytes you are about to show, after
-   formatting, before the response goes out).** The lint target is the *visible* final prompt,
-   not a draft and not "what you intended to write". Do all of the following, in order:
-   - **Read the assembled prompt word by word, every section.** Look for mid-word truncation
-     (`HomeBrai`, `Assistan`, `repositor`), mashed/merged words (`wantrain`, `t mode`), dropped
-     characters, and any fragment that is not a complete word or sentence. This manual read is
-     the primary gate — do not skip it.
-   - Then run the deterministic backstop on the exact text:
-     `printf '%s\n' "$FINAL_PROMPT" | python ~/.claude/scripts/prompt_lint.py --stdin --prompt`
-   - **A clean deterministic result does NOT authorize emission.** `prompt_lint.py` only catches
-     a subset of truncation (trailing hyphen, connective-before-break, a few known-term prefixes);
-     it can report "clean" while mid-word/mid-line corruption remains. The manual read is
-     authoritative. If the visible text is corrupted, the output is *not* clean no matter what
-     the script says.
-   - Re-run the **Write-safety consistency** invariant over the emitted text. If the final
-     prompt is `research-only` and grants any write — including an "optional" doc write, and
-     **even if it also adds a worktree step** — it fails.
-   - **If anything is wrong: STOP. Do not emit the corrupted or contradictory text.** Re-render
-     the prompt from the assembled content, run this pass again, and only emit once the exact
-     visible text is clean. For a write-safety contradiction, STOP and ask whether to switch to
-     `implementation` + `repo-safe` with a worktree. When in doubt about a fragment, STOP —
-     never emit-and-hope.
-4. After the fenced block, emit the short lint report: concerns checked, repairs made, and any
-   items flagged. It **must** state that the final-output hygiene pass was run on the emitted
-   text and that the visible text was read and is free of truncation/corruption. **The report
-   may not claim "clean" unless the exact visible output passed the manual read** — if the
-   visible text is corrupted (even when `prompt_lint.py` says clean), do not emit and do not
-   report clean; STOP instead.
-5. Present both to the user. If the lint report flagged an unknown required input, ask for
+2. **Write the final dispatch prompt to a file.** Assemble the twelve sections and write them to
+   a temp file (e.g. under your scratchpad): call it `$OUT`. From here on, `$OUT` is the *single
+   source of truth* for the output — never hold the prompt only "in your head" or retype it.
+3. **Lint that exact file** with the deterministic backstop:
+   `python ~/.claude/scripts/prompt_lint.py --prompt "$OUT"`
+4. **Read `$OUT` back and inspect it word by word, every section** — mid-word truncation
+   (`HomeBrai`, `Assistan`, `repositor`), mashed/merged words (`wantrain`, `variantnt`,
+   `researcebrain`), dropped characters, and any fragment that is not a complete word or
+   sentence. **A clean `prompt_lint.py` result does NOT authorize emission** — the script only
+   catches a subset (trailing hyphen, connective-before-break, known-term prefixes); the read of
+   `$OUT` is authoritative. Also re-check the **Write-safety consistency** invariant on `$OUT`.
+5. **Emit `$OUT` verbatim.** Print the file's exact contents into the fenced block — for example
+   `cat "$OUT"` — and copy those exact bytes into the response. **Do not retype, reformat,
+   re-summarize, or regenerate the prompt** when composing the reply; the visible fenced text
+   must be a byte-for-byte copy of the file you just linted and read. If you cannot guarantee the
+   visible text equals `$OUT`, STOP.
+6. **If anything is wrong — corruption in `$OUT`, or the visible text differs from `$OUT`, or a
+   write-safety contradiction — STOP. Do not emit.** Rebuild `$OUT` from the assembled content,
+   re-lint and re-read it, and only emit once the file is clean and you are emitting it verbatim.
+   For a write-safety contradiction, STOP and ask whether to switch to `implementation` +
+   `repo-safe` with a worktree. Never emit-and-hope.
+7. After the fenced block, emit the short lint report: concerns checked, repairs made, and any
+   items flagged. It **must** state that the emitted text is a verbatim copy of the linted file
+   `$OUT` and that `$OUT` was read and is free of truncation/corruption. **The report may not
+   claim "clean" unless the exact bytes shown came from the linted file and passed the read** —
+   if the visible text is corrupted or was regenerated separately (even when `prompt_lint.py`
+   said clean), do not emit and do not report clean; STOP instead.
+8. Present both to the user. If the lint report flagged an unknown required input, ask for
    it before treating the prompt as final.
 
 ## Rules
@@ -162,6 +166,10 @@ message`). Fold any real findings into the repairs before Stage 4.
   truncated or mashed word, it is corrupted — STOP and re-render; do not emit, and do not let
   the lint report say "clean". Emitting corrupted text is a hard failure even if every automated
   check passed.
+- **What you lint must be what you emit.** Lint a file and emit that file's exact bytes verbatim
+  (`cat`); never retype, reformat, or regenerate the prompt after checking it — regeneration is
+  where corruption enters. If the visible text is not a byte-for-byte copy of the linted file,
+  the lint report is invalid and you must STOP.
 - `research-only` means zero repository writes. If a write is needed, STOP and ask to switch to
   `implementation` + `repo-safe` + worktree — never emit `research-only` + write, with or
   without a worktree.
