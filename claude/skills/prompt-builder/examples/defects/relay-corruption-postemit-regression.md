@@ -15,7 +15,7 @@ artifact. The corruption did **not** exist in the file. Therefore it was introdu
 verbatim emission cannot fix this, because the file is already correct; the rendered copy is what
 diverges.
 
-**Why this is not a content-lint defect:** concerns 1-14 lint the prompt content, and here the
+**Why this is not a content-lint defect:** concerns 1-15 lint the prompt content, and here the
 content (the file) passed. This is the **Delivery integrity — relay/display corruption** concern:
 the failure is that the process *claimed the transcript was clean* when only the *file* was
 verified. The fix is a delivery-contract change, not a new content check.

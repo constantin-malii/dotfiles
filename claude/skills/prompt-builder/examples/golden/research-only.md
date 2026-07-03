@@ -61,7 +61,7 @@ EXPECTED FINAL REPORT
 
 Lint report
 - Profile: research-only (no overlays)
-- Checked: all 14 concerns
+- Checked: all 15 concerns
 - Repaired: nothing
 - Flagged (needs your input): none
 - Mechanical checks: by inspection (deterministic script arrives in Increment 3)
