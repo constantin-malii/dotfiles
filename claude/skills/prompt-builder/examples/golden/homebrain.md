@@ -71,7 +71,7 @@ EXPECTED FINAL REPORT
 
 Lint report
 - Profile: implementation + homebrain (implies repo-safe + live-gated; gate FREE)
-- Checked: all 14 concerns
+- Checked: all 15 concerns
 - Repaired: nothing
 - Flagged (needs your input): none
 - Mechanical checks: by inspection (deterministic script arrives in Increment 3)

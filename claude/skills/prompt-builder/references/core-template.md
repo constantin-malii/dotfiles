@@ -7,6 +7,11 @@ content looks like, and the failure it prevents.
 The final prompt uses these exact section headings, in this exact order. See
 `output-schema.md` for the emitted contract.
 
+One **optional** section — `REQUIRED SKILLS` — may be inserted between `ROLE` and `GOAL`
+when the generated prompt should tell its executing agent which skills to use (see the
+"Optional: Required Skills" subsection below). It is omitted entirely when empty, so a prompt
+with no required skills is exactly the twelve-section schema.
+
 ---
 
 ## 1. Role
@@ -17,6 +22,25 @@ The final prompt uses these exact section headings, in this exact order. See
 working posture ("work like a careful human developer who follows this repo's conventions").
 
 **Prevents:** Vague, personaless prompts that drift in tone or ignore repo conventions.
+
+## Optional: Required Skills
+
+**Purpose:** Tell the executing agent which skills to load before acting, when — and only
+when — a skill materially improves execution quality, safety, or repo-convention adherence.
+
+**Placement:** When present, this section goes **immediately after `ROLE` and before
+`GOAL`**. When absent, the prompt is the standard twelve-section schema unchanged — the
+section is optional and is omitted entirely when empty. Never emit an empty `REQUIRED SKILLS`
+heading.
+
+**Good content:** A short bulleted list of **0–3** downstream skills chosen per
+`references/skill-selection.md` (Layer 2), each a real skill name, ideally with a one-line
+reason. Prefer zero: most simple prompts have no `REQUIRED SKILLS` section. Do not copy the
+builder's own companion skills here unless the downstream task independently calls for them,
+and never dump a catalog.
+
+**Prevents:** Both under-specification (a downstream agent that skips a materially useful
+skill) and skill dumping (padding the prompt with irrelevant skills). See lint concern 15.
 
 ## 2. Goal
 

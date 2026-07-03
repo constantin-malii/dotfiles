@@ -13,6 +13,7 @@ profile. Used for the golden eval.
 |---|---|
 | `golden/research-only.md` | mode research-only |
 | `golden/implementation-repo-safe.md` | mode implementation + overlay repo-safe |
+| `golden/implementation-with-required-skills.md` | implementation + repo-safe with an optional `REQUIRED SKILLS` section (2 downstream skills) |
 | `golden/live-gated-claimed.md` | overlay live-gated, gate explicitly claimed |
 | `golden/homebrain.md` | overlay homebrain (implies repo-safe + live-gated), gate free |
 
@@ -33,10 +34,11 @@ examples for the classes real data did not cover.
 | `defects/emitted-output-truncation-regression.md` | REAL (regression) | 1, 2, 3 (visible-output corruption emitted while write-safety was correct) |
 | `defects/emitted-output-regeneration-corruption-regression.md` | REAL (regression) | 1, 2, 3 (corruption from regenerating the prompt instead of emitting the linted file verbatim) |
 | `defects/relay-corruption-postemit-regression.md` | REAL (regression) | Delivery integrity — relay/display corruption after emission (file clean by hash, transcript corrupted; not a content-lint concern) |
+| `defects/skill-dumping.md` | SYNTHETIC | 15 (too many, irrelevant, and leaked companion skills in `REQUIRED SKILLS`) |
 
 ## Concern coverage matrix
 
-Every one of the 14 lint concerns is exercised by at least one defect example.
+Every one of the 15 lint concerns is exercised by at least one defect example.
 
 | # | Concern | Covered by |
 |---|---|---|
@@ -54,8 +56,9 @@ Every one of the 14 lint concerns is exercised by at least one defect example.
 | 12 | missing verification | missing-sections |
 | 13 | missing stop conditions | missing-sections |
 | 14 | missing definition of done | missing-sections |
+| 15 | skill-selection discipline | skill-dumping |
 
-Beyond the 14 content concerns, one **delivery-integrity** concern is tracked separately:
+Beyond the 15 content concerns, one **delivery-integrity** concern is tracked separately:
 
 | Concern | Covered by |
 |---|---|
@@ -88,6 +91,9 @@ For each defect file:
 - Mechanical concerns (1 through 6) are checked by inspection until the deterministic
   `prompt_lint.py` script lands (Increment 3); record them as inspection-based and do not
   claim perfect detection for them yet.
+- Skill-selection discipline (concern 15) is judgment-based — the `REQUIRED SKILLS` section's
+  relevance, count, and companion-leakage are LLM inspection calls, not deterministic checks,
+  so record it as inspection-based like concerns 1 through 6.
 
 ## Deterministic lint (prompt_lint.py)
 
@@ -210,4 +216,5 @@ below also require the judgment-based LLM lint pass; that combined run is record
 | 2026-07-02 | Visible-output regression (correct write-safety, corrupted emitted text) | Hardened Stage 4: read the exact visible text; clean prompt_lint does not authorize emission; STOP + re-render on any corruption; lint report cannot claim clean over corrupted output. Added known-term truncation heuristic (flags HomeBrai). Goldens clean |
 | 2026-07-02 | Regeneration-corruption regression (lint clean but visible prompt corrupted) | Root cause: prompt regenerated after linting. Stage 4 now mandates verbatim-from-file emit (write to file → lint the file → read the file → cat it); lint report valid only for the exact emitted bytes. Fixture added; clean-session test re-run |
 | 2026-07-02 | Relay/display corruption identified as post-emission (not in file) | Raw linted file verified clean by SHA-256; corruption is downstream of the skill. Mitigation added: Stage 4 reports artifact path + byte count + SHA-256, claims cleanliness only of the file (never the transcript), prefers file delivery for long prompts. Fixture `relay-corruption-postemit-regression` added |
+| 2026-07-02 | Skill-selection guidance added (concern 15) | New `references/skill-selection.md` (builder companion vs downstream required skills, curated table, 0–3 bounds); optional `REQUIRED SKILLS` section wired into core-template.md + output-schema.md (placed after ROLE, omitted when empty); lint concern 15 added (judgment-based). Golden `implementation-with-required-skills` and defect `skill-dumping` added. Deterministic file-mode lint over the skill dir: clean (the optional section is invisible to `prompt_lint.py`'s twelve-section check, so omitting it changes nothing) |
 | (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |

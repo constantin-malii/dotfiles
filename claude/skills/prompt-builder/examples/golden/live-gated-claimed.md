@@ -63,7 +63,7 @@ EXPECTED FINAL REPORT
 
 Lint report
 - Profile: implementation + live-gated (gate claimed for one scoped action)
-- Checked: all 14 concerns
+- Checked: all 15 concerns
 - Repaired: nothing
 - Flagged (needs your input): none
 - Mechanical checks: by inspection (deterministic script arrives in Increment 3)

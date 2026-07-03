@@ -28,6 +28,7 @@ final output; use them to construct and check the prompt.
 |---|---|---|
 | `references/core-template.md` | Stage 2 | The twelve sections and per-section authoring guidance |
 | `references/profiles.md` | Stage 1 and 2 | Modes, overlays, precedence, and HomeBrain rules |
+| `references/skill-selection.md` | Stage 1 and 2 | Builder companion skills vs downstream required skills, the curated table, and the 0–3 anti-dumping bounds |
 | `references/lint-checklist.md` | Stage 3 | Every lint concern with its detect signal and repair action |
 | `references/output-schema.md` | Stage 4 | The exact final-output contract and lint-report format |
 
@@ -51,10 +52,17 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
      `repo-safe` and `live-gated` automatically.
 3. Determine the target: which agent or session will run this prompt, and in which
    repository or system.
-4. Infer the Allowed Files / Systems list from the selected profile and the stated scope.
+4. Read `references/skill-selection.md` and pick your **builder companion skills** (Layer 1):
+   the skills prompt-builder itself uses while creating the prompt. For non-trivial
+   prompt-generation work, use `engineering-skills:senior-prompt-engineer` and
+   `superpowers:verification-before-completion`; add `superpowers:brainstorming` only when the
+   task is underdefined, strategic, architectural, or multi-path. A trivial, well-defined
+   prompt needs none. These companion skills stay on the builder side — do not copy them into
+   the generated prompt (see Stage 2 for the downstream layer).
+5. Infer the Allowed Files / Systems list from the selected profile and the stated scope.
    Ask the user only when scope is genuinely ambiguous and cannot be reasonably inferred. Do
    not stop merely because the list was not stated up front.
-5. Ask clarifying questions **only** when a required section cannot be filled without the
+6. Ask clarifying questions **only** when a required section cannot be filled without the
    answer. Prefer one question at a time. Never invent facts to fill a section.
 
 ## Step 2: Assemble
@@ -64,10 +72,17 @@ Run the four stages in order. Stage 3 is mandatory and must never be skipped.
    Role, Goal, Context, Inputs / Required Reading, Scope, Allowed Files / Systems,
    Forbidden Actions, Required Steps, Verification, Stop Conditions, Definition of Done,
    Expected Final Report.
-3. Apply the selected profile overlays from `references/profiles.md`, respecting the
+3. Decide the **downstream required skills** (Layer 2) using `references/skill-selection.md`:
+   classify the task shape, pick only the skills that materially improve the executing agent's
+   quality, safety, or repo-convention adherence, cap at three, and prefer zero. If one or more
+   survive, emit an optional `REQUIRED SKILLS` section right after `ROLE` (see
+   `core-template.md` and `output-schema.md`); otherwise omit it entirely. Do not copy your
+   Stage 1 builder companion skills here unless the downstream task independently calls for
+   them, and never dump a catalog.
+4. Apply the selected profile overlays from `references/profiles.md`, respecting the
    precedence `core < mode < repo-safe < live-gated < homebrain`. When two layers conflict,
    the higher-precedence layer wins.
-4. Keep the draft concrete: real paths, real commands, explicit constraints. Every section
+5. Keep the draft concrete: real paths, real commands, explicit constraints. Every section
    must be present and non-empty.
 
 ## Step 3: Lint and repair (mandatory)

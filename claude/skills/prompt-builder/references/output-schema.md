@@ -5,11 +5,18 @@ Stage 4 emits two things, in this order: the dispatch prompt, then the lint repo
 ## Part 1: the dispatch prompt
 
 Emit the prompt inside a single fenced code block so it is copy-paste ready. Use the twelve
-sections in this exact order, with these exact uppercase headings:
+sections in this exact order, with these exact uppercase headings. One optional section —
+`REQUIRED SKILLS` — may appear between `ROLE` and `GOAL`; when there are no downstream
+required skills, omit it entirely and the schema is the twelve sections unchanged (shown
+below in brackets to mark it optional):
 
 ```
 ROLE
 <one or two sentences>
+
+[REQUIRED SKILLS]                       (optional — include only when 0–3 downstream
+- <skill name> — <one-line reason>       skills materially help; omit the whole section
+                                         when empty; see references/skill-selection.md)
 
 GOAL
 <one sentence, outcome-focused>
@@ -46,7 +53,10 @@ EXPECTED FINAL REPORT
 ```
 
 Rules for the emitted prompt:
-- All twelve sections present and non-empty.
+- All twelve required sections present and non-empty.
+- The optional `REQUIRED SKILLS` section is emitted only when it holds 0–3 genuinely useful
+  downstream skills; when empty it is omitted entirely (never an empty heading). When present
+  it sits between `ROLE` and `GOAL`. See `references/skill-selection.md` and lint concern 15.
 - Fixed order, exact headings.
 - Concrete paths and commands; no placeholders, no truncation.
 - No AI or Claude attribution anywhere in the prompt.
@@ -58,7 +68,7 @@ Immediately after the fenced block, emit a short report (plain text, not fenced)
 ```
 Lint report
 - Profile: <mode> + <overlays>
-- Checked: all 14 concerns
+- Checked: all 15 concerns
 - Repaired: <list what was fixed, or "nothing">
 - Flagged (needs your input): <list unknown required inputs, or "none">
 - Mechanical checks: by inspection (deterministic script arrives in Increment 3)

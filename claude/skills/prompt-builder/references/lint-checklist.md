@@ -152,11 +152,33 @@ bytes came verbatim from the linted file.
 - **Detect:** the Definition of Done section is absent, empty, or non-verifiable.
 - **Repair:** add objectively checkable completion criteria.
 
+### 15. Skill-selection discipline
+- **Applies to:** the optional `REQUIRED SKILLS` section (the downstream Layer 2 of
+  `references/skill-selection.md`). This section is optional — its **absence is never a
+  defect**. The concern is about a section that *is* present but is mis-scoped.
+- **Detect (any of):**
+  - **Too many** — more than three downstream skills listed.
+  - **Skill dumping** — skills listed "for completeness" or "in case they help", or an
+    enumeration that reads like a catalog rather than a task-specific shortlist.
+  - **Irrelevant skills** — a listed skill has no bearing on the task's shape (for example a
+    research or lookup skill in a pure single-file edit, or a skill with no statable one-line
+    reason tied to this task).
+  - **Companion leakage** — a builder companion skill
+    (`engineering-skills:senior-prompt-engineer`, `superpowers:brainstorming`,
+    `superpowers:verification-before-completion`) copied into the downstream prompt without an
+    independent downstream reason.
+  - **Empty heading** — a `REQUIRED SKILLS` heading with no skills under it.
+- **Repair:** remove every skill that does not materially change execution quality, safety, or
+  repo-convention adherence, keeping only those that do (prefer 0–3, per
+  `references/skill-selection.md`). If nothing survives, delete the `REQUIRED SKILLS` section
+  entirely rather than leaving an empty heading. This is a repair, not a flag — do not ask the
+  user; prune to the materially useful set.
+
 ---
 
 ## Delivery integrity — relay/display corruption (post-emission)
 
-Concerns 1-14 lint the prompt *content*. This concern is different: even a provably clean linted
+Concerns 1-15 lint the prompt *content*. This concern is different: even a provably clean linted
 file can be corrupted **after emission** by a display/relay/transport layer, so what the caller
 *sees* in the transcript may not equal what was linted (mid-word cuts, mashed words, dropped
 characters). The skill cannot lint or repair the transcript — that layer is outside its control —
@@ -199,7 +221,9 @@ Deterministic coverage (`prompt_lint.py`):
 Judgment-based, still handled by the checklist above (LLM inspection):
 - broken commands (4), broken file paths (5), stale copied instructions (6) beyond marker
   words, contradictions (7) beyond the write-safety sub-case, ambiguous optional choices (9),
-  and the parts of truncation and incomplete-sentence detection (1, 2) that need meaning.
+  skill-selection discipline (15) — the `REQUIRED SKILLS` section's relevance, count, and
+  companion-leakage are all judgment calls the script does not check — and the parts of
+  truncation and incomplete-sentence detection (1, 2) that need meaning.
 
 The lint report should note which concerns were confirmed by `prompt_lint.py` and which were
 verified by inspection.
