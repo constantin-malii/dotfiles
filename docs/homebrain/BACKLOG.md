@@ -29,7 +29,6 @@ working backlog, every item with all 14 fields as explicit columns.
 - `INF-01` Adopt parallel-agent operating model + maintain this `BACKLOG.md` *(INF)*
 
 ### 🔵 Ready / Next *(all read-only / design / decision; no live gate)*
-- `AU-01` Interaction Audio Policy design (media-zone ducking) *(AU)*
 - `RQ-03` Music-source / Inc 3 direction decision *(RQ)*
 - `RQ-06` Z-Wave coordinator adoption decision *(RQ)*
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
@@ -54,7 +53,7 @@ working backlog, every item with all 14 fields as explicit columns.
 
 ### ✅ Done *(detail in `CHANGELOG.md`)*
 - `MR-Inc0` foundation · `MR-Inc1` radio · `F1`/`F1-R` CommandResult + relay · `BUG-Speaker` reconnect fix · `MR-Inc4A` status · **`MR-Inc2A` News (deployed + exposed + validated)**
-- `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)*
+- `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design
 
 ### 🔬 Research / Purchasing
 - `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
@@ -187,9 +186,9 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `AU-01` | Audio policy design (media-zone ducking) | AU | ready | design | P1 | resolver/HA | **HA-07** (roadmap area/room implications, usable now); **S0** (satellite map) | none (design) | new design doc | none | n/a | design media-zone ducking now; multi-room waits on S0 | new |
-| `AU-02` | Explicit "resume music" restore behavior | AU | later | design→repo-code | P2 | resolver/HA | AU-01 | media path | `core.py`/`music.py`+tests | resolver + HA | restore `.bak/` | new |
-| `AU-03` | Ducking implementation | AU | later | repo-code→HA-live | later | resolver/HA | AU-01/02 | media path + HA | resolver modules + HA | host + HA | restore `.bak/` + revert HA | new |
+| `AU-01` | Audio policy design (media-zone ducking) | AU | done | design | P1 | resolver/HA | HA-07 ✅; S0 (multi-room only) | none (design) | design doc | none | n/a | **DELIVERED 2026-07-06** — single-zone pause/duck/ignore policy + restore semantics; feeds AU-02/AU-03; multi-room waits on S0. See `2026-07-06-au-01-interaction-audio-policy-design.md` | 2026-07-06-au-01 |
+| `AU-02` | Explicit "resume music" restore behavior | AU | later | design→repo-code | P2 | resolver/HA | AU-01 ✅ | media path | `core.py`/`music.py`+tests | resolver + HA | restore `.bak/` | implement AU-01 §6 restore/resume + edge cases | 2026-07-06-au-01 §6 |
+| `AU-03` | Ducking implementation | AU | later | repo-code→HA-live | later | resolver/HA | AU-01 ✅ / AU-02 | media path + HA | resolver modules + HA | host + HA | restore `.bak/` + revert HA | implement AU-01 §3–§5 (duck-not-boost) + §7 tunables | 2026-07-06-au-01 §3–§5 |
 
 ### INF — Infrastructure / Operating Model
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
