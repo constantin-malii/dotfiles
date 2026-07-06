@@ -172,8 +172,8 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### DV — Dashboards / Value Features
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `DV-01` | "What's on / running / open?" home status | DV | later | design | P2 | HA | HA-01 | none (read-only) | design doc | read-only | n/a | read-model design | new |
-| `DV-02` | "What needs attention?" household status | DV | later | design | P2 | HA | HA-01, HA-06 | none (read-only) | design doc | read-only | n/a | read-model design | new |
+| `DV-01` | "What's on / running / open?" home status | DV | later | design→repo-code | P2 | HA | HA-01 ✅ | none (read-only) | design doc → resolver read cap | read-only (exposure gated) | n/a | **design DELIVERED 2026-07-06**; impl = resolver read capability (reuse `media_status`, F1-R hard return), gated exposure | 2026-07-06-dv-01-02 |
+| `DV-02` | "What needs attention?" household status | DV | later | design→repo-code | P2 | HA | HA-01 ✅, HA-06 | none (read-only) | design doc → resolver read cap | read-only (exposure gated) | n/a | **design DELIVERED 2026-07-06**; impl consumes HA-06 + (future) SA supervision; ranked, honest-reporting | 2026-07-06-dv-01-02 |
 | `DV-03` | Dashboards (household view) | DV | later | HA-live | later | HA | HA-01 | HA-config surface | HA Lovelace config | HA change | revert dashboard | new |
 | `DV-04` | Energy monitoring | DV | later | design | later | HA | metering hardware (HS220 has no energy monitoring) | none (read-only) | design doc | read-only | n/a | research | new |
 
