@@ -258,10 +258,12 @@ ones.
 - **Q1 — Controller choice:** confirm **ZWA-2** (recommended) vs **HomeSeer G8** (runner-up) vs
   **Zooz ZST39 LR** (viable third). Any preference for a compact stick, same-country (CA) purchase, or
   Zooz vendor-cohesion changes the pick.
+  → **Decided (2026-07-06): ZWA-2** — see Addendum (§12).
 - **Q2 — Enablement path (§6):** prefer **Path A** (USB passthrough into the `haos` VM — standard, but
   a libvirt XML change on old QEMU 2.5/libvirt 1.3.1) or **Path B** (host-side Z-Wave JS + NAT
   network — keeps the VM XML untouched, adds a host service)? Decision needed before the (gated)
   implementation task.
+  → **Owner lean (2026-07-06): Path A preferred, Path B fallback** — see Addendum (§12).
 - **Q3 — ZEN55 install state (HA-07 §13.a #5):** is the ZEN55 already wired to the SC7010BA
   interconnect, or still boxed? SA-01 smoke telemetry depends on it being wired.
 - **Q4 — Long Range:** engage Z-Wave LR (needs ZEN55 fw ≥ 1.20) or run the ZEN55 as a classic Z-Wave
@@ -270,6 +272,8 @@ ones.
   owned, and commit to **Z-Wave** for future ones so the single coordinator serves both — this firms
   up the SA-04 dependency and the "one coordinator, two safety features" rationale.
 - **Q6 — CA frequency SKU (§7):** confirm the 908.42 MHz (US/CA/MX) variant at acquisition.
+  → **Resolved (2026-07-06): moot for the ZWA-2** — it is a single worldwide SKU with no regional
+  hardware variant; region is set in software (auto-detected from the HA location). See Addendum (§12).
 - **Q7 — INF-08 tie-in:** if a UPS is later added (INF-08), the coordinator should be on protected
   power so smoke telemetry survives a short outage (HA-07 §9). Not a blocker for SA-03.
 
@@ -287,6 +291,49 @@ ones.
 - **No BACKLOG.md edit** — the RQ-06 row / gate register are INF-owned (BACKLOG §9); any status change
   is proposed to INF separately, not made here.
 - **No staging, commit, or push** — the doc is left uncommitted in the worktree pending approval.
+
+---
+
+## 12. Addendum — acquisition verification & enablement-path decision (2026-07-06)
+
+> Follow-up to §7–§10. Read-only web research + owner decisions only — **still no purchase, no live/host/HA
+> change.** Availability/price facts are point-in-time (observed **2026-07-04**, prices in **CAD**) and can
+> change. Frequency/region facts are from primary sources (Silicon Labs, Z-Wave Alliance, Nabu Casa/HA).
+
+**Frequency confirmed (Q6).** 908.42 MHz is the correct Z-Wave band for Canada (same FCC Part 15.249
+region as US/MX), distinct from the EU's 868.42 MHz (EN 300 220). Silicon Labs lists "908.4 MHz, 916 MHz"
+for USA/Canada/Mexico; corroborated by DigiKey ("USA/Canada 908.42 MHz; CEPT 868.42 MHz") and the Z-Wave
+Alliance certification.
+[Silabs — global regions](https://www.silabs.com/wireless/z-wave/global-regions) ·
+[HA — Connect ZWA-2](https://www.home-assistant.io/connect/zwa-2/).
+
+**ZWA-2 region-variant risk is moot (Q6).** The Connect ZWA-2 is a **single worldwide SKU with no regional
+hardware variant** — region is set in software, auto-detected from the HA location. HA product page,
+verbatim: *"The Connect ZWA-2 supports all regions (there are no regional variations of this adapter, just
+one for the whole world)"* and *"if you are using Home Assistant, it will set the region automatically
+based on the location details in your settings."* So there is no 908.42 vs 868.42 SKU to pick for the
+ZWA-2. (This risk is **real only for the Zooz ZST39**, which is sold as region-specific frequency SKUs —
+select the 908.42 MHz US/CA variant if ever chosen.)
+
+**Canada availability (Q1 sourcing).** ZWA-2 is available to ship within Canada:
+- **Amazon.ca** — ASIN **B0FL858V4Q**, brand Nabu Casa, UPC 860011789734; "Amazon's Choice"; observed
+  **~CA$131.08** (−5% from CA$137.89). Best price found. Buy-box price/seller can change.
+  [amazon.ca/dp/B0FL858V4Q](https://www.amazon.ca/dp/B0FL858V4Q)
+- **North Control (CA)** — "In Stock and Ready to Ship," **CA$149.00** (reg. CA$159.00), free shipping
+  across Canada. Domestic-support backup. [northcontrol.ca](https://northcontrol.ca/products/connect-zwa-2)
+
+**Owner decisions (2026-07-06):**
+- **Q1 — Controller: Home Assistant Connect ZWA-2** (confirms §8's primary pick). Acquire from Amazon.ca
+  (ASIN B0FL858V4Q) at the lower price; North Control as backup.
+- **Q2 — Enablement path: Path A (USB passthrough into the `haos` VM) preferred; Path B (host-side Z-Wave
+  JS + NAT network) as fallback.** Rationale: for a life-safety path, direct USB is HA's most-reliable,
+  lowest-latency option with the fewest moving parts. The one risk is USB passthrough on the old
+  QEMU 2.5 / libvirt 1.3.1 stack — if it proves unstable at install time, fall back to Path B (which the
+  ZWA-2 uniquely documents as a first-class remote pattern, §6). Path is finalized at the (gated) install.
+
+**Unchanged:** Q3 (ZEN55 wired state), Q4 (LR vs classic), Q5 (leak sensors), Q7 (UPS) remain open. This
+addendum opens/closes **no** live gate and satisfies no SA gate beyond §9's coordinator prerequisite;
+acquisition and live enablement remain separate, approval-gated steps.
 
 ---
 
