@@ -37,7 +37,7 @@ working backlog, every item with all 14 fields as explicit columns.
 - `MR-05` Tidy verbose RadioBrowser station names *(MR)*
 
 ### 🟡 Later
-- `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
+- `MR-Inc3` acquire (Lidarr, guarded — unblocked by RQ-03 2026-07-06) · `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
 - `P1` reminders · `P2` decisions/referents · `P3` HA delivery · `P4` drafting/recall · `P5` receipts · `P6` multi-user · `P7` semantic memory
 - `HA-02` plugs/switches · `HA-03` vacuum · `HA-04` cameras · `HA-05` routines · `HA-06` device health · `HA-08` garage door (Meross) · `HA-09` ecobee climate
 - `SA-03` smoke/CO alerting · `SA-04` water/leak alerting · `SA-05` security/camera detection
@@ -49,7 +49,6 @@ working backlog, every item with all 14 fields as explicit columns.
 
 ### 🔴 Blocked
 - `S0` satellite inventory — **hardware install** *(reSpeaker incoming — move to Ready once installed)*
-- `MR-Inc3` Acquire/Lidarr — **`RQ-03`** music-source decision
 - `RQ-02` upstream MA lock issue — YTM reliability + approval
 - `INF-05` HAOS upgrade / host modernization — backups + risk plan
 
@@ -114,7 +113,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `MR-Inc2A` | News headlines | MR | done | repo-code→HA-live | — | resolver | — | shipped (media path) | `news.py`,`newsfeed.py`,`news.json`,tests | (closed) | restore `.inc2-bak/` + un-expose `script.news` | CHANGELOG 2026-06-29 |
 | `MR-Inc2B` | News-station playback | MR | later | repo-code | P2 | resolver | MR-Inc2A | branch-isolated | `radio.py`/`news.py`+tests | none (build); exposure if surfaced | `git revert` | inc2a design |
-| `MR-Inc3` | Acquire via Lidarr (guarded) | MR | blocked | repo-code→HA-live | P1 | resolver | **RQ-03** | guarded write to Lidarr | `acquire.py`+tests; `.lidarr` secret | host deploy + exposure | restore `.bak/` + un-expose | tooling §7 |
+| `MR-Inc3` | Acquire via Lidarr (guarded) | MR | later | repo-code→HA-live | P1 | resolver | RQ-03 ✅ (decided 2026-07-06) | guarded write to Lidarr | `acquire.py`+tests; `.lidarr` secret | host deploy + exposure | restore `.bak/` + un-expose | design `acquire` = guarded Lidarr add+search across both routes (Usenet + Soulseek); see 2026-07-06-rq-03 §7 | tooling §7 |
 | `MR-Inc4B` | Sleep timer + shuffle/repeat + queue | MR | later | repo-code→HA-live | P2 | resolver | MR-Inc4A | media path | `status.py`/`core.py`+tests | exposure | restore `.bak/` + un-expose | inc4a design |
 | `MR-04` | Status aspect enum / per-aspect text | MR | later | repo-code | P2 | resolver | MR-Inc4A | branch-isolated | `status.py`+tests | exposure | `git revert` | inc4a design |
 | `MR-05` | Tidy verbose RadioBrowser names | MR | ready | repo-code | P2 | resolver | — | branch-isolated (cosmetic) | `radio.py`+tests | none | `git revert` | tooling §10 |
@@ -209,7 +208,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `RQ-01` | YTM playback reliability / shelved guard | RQ | research | research | later | resolver | upstream fix | none | research notes | none | n/a | revisit only if YTM restored | research-playback-lock |
 | `RQ-02` | File upstream MA lock issue | RQ | blocked | research | later | process | YTM reliability + approval | none (external) | `upstream-issue-draft.md` | none | retract issue if needed | upstream-issue-draft |
-| `RQ-03` | **Music-source decision** (local/Tidal/Qobuz/Soulseek/YTM) | RQ | research | research | P2 | resolver | — | none (decision) | decision record | none | n/a | decide → **unblocks MR-Inc3** | tooling §10 |
+| `RQ-03` | **Music-source decision** (local/Tidal/Qobuz/Soulseek/YTM) | RQ | research | research | P2 | resolver | — | none (decision) | decision record | none | n/a | **DECIDED 2026-07-06: local-first** — add Soulseek (Soularr+slskd) alongside Lidarr+Usenet; defer streaming (Deezer/Tidal if ever, not Qobuz); keep YTM shelved. **Unblocks MR-Inc3.** See `2026-07-06-rq-03-music-source-decision.md` | tooling §10 · 2026-07-06-rq-03 |
 | `RQ-04` | Hardware volume buttons → ceiling (Tasker) | RQ | later | research→repo-code | later | device | resolver HTTP (exists) | phone-side only | Tasker profile + resolver HTTP | phone-side | remove Tasker profile | tooling §11 |
 | `RQ-05` | Device purchasing list | RQ | done | device-purchase | P2 | device | HA-01, SA-01/02 | none (procurement) | buy-list doc | none | n/a | done — purchase-gap analysis now lives in the `HA-07` roadmap (§11; gaps derived after existing-device mapping) | device-integration-architecture-roadmap.md |
 | `RQ-06` | Z-Wave coordinator adoption decision | RQ | ready | research→device-purchase | P2 | device/process | — | none (decision) | decision record | none | n/a | **DECIDED 2026-07-06: HA Connect ZWA-2** (single worldwide SKU, 908.42 MHz auto-set; see `2026-07-01-rq-06-z-wave-coordinator-decision.md` §12); **coordinator on order**. Enablement = Path A USB passthrough (`runbooks/zwave-coordinator-enablement-path-a.md`), alerting impl = SA-03. Purchase/enablement still gated | device-integration-architecture-roadmap.md · 2026-07-01-rq-06 §12 |
