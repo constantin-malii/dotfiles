@@ -29,10 +29,17 @@ ssh costea@192.168.1.68 '
   echo "== stable serial symlink (use this inside HAOS) =="; ls -l /dev/serial/by-id/'
 ```
 
-- **[CONFIRM-1] USB controller model** the guest exposes on q35 (typically ICH9 EHCI/UHCI on QEMU 2.5).
-  A CDC-ACM serial device works at full/high speed on it; note the model so the `<hostdev>` attaches to a
-  compatible controller.
-- **[CONFIRM-2] ZWA-2 `idVendor:idProduct`** from `lsusb`, and its **`/dev/serial/by-id/…`** symlink.
+**Confirmed 2026-07-06 (read-only peek, VM running):** libvirt **1.3.1** / QEMU **2.5.0**, machine
+**`pc-q35-2.5`**. Guest USB = **`ich9-ehci1`** (USB 2.0 EHCI) + **`ich9-uhci1/2/3`** companions — standard
+q35 USB2; a CDC-ACM serial device (the ZWA-2) passes through fine, so **no `<controller>` model change is
+needed**. **No existing `<hostdev>`/`<redirdev>`** → the passthrough is a clean first-of-its-kind add.
+Host `lsusb` at peek time showed only the HP LaserJet, Dell keyboard, and Intel hubs — **ZWA-2 not present
+(on order)** — and `/dev/serial/by-id/` was empty.
+
+- **[CONFIRM-1] ✅ RESOLVED (2026-07-06)** — guest USB controllers = `ich9-ehci1` + 3× `ich9-uhci`
+  (above). The `<hostdev>` auto-binds to the EHCI (USB2) bus; no controller addition required.
+- **[CONFIRM-2] ⏳ pending device** — capture the ZWA-2 `idVendor:idProduct` (`lsusb`) and its
+  **`/dev/serial/by-id/…`** symlink once it is plugged into the host.
 
 ## 1. ⚠️ Critical trap — never re-define from the stale XML
 
