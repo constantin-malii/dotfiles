@@ -2,7 +2,7 @@
 """Run: python tests/test_radio.py"""
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import radio
+import radio, capability
 
 RC = {
     "favorites": [
@@ -191,6 +191,34 @@ class RadioCapabilityTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "play_failed")
         self.assertIn("couldn't start", r["chat_text"].lower())
         self.assertFalse(r["metadata"]["played"])
+
+
+class MR05TidyTest(unittest.TestCase):
+    def test_disp_tidies_radiobrowser_only(self):
+        self.assertEqual(radio._disp({"name": "Pop 128kbps", "source": "radiobrowser"}), "Pop")
+        self.assertEqual(radio._disp({"name": "Pop 128kbps", "source": "favorite"}), "Pop 128kbps")
+
+    def test_play_radiobrowser_name_tidied(self):
+        ma = FakeMA(browse=[rb_item("u3", "Pop Station - 128kb/s")])
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "play", "genre": "pop"}, "rid")
+        self.assertTrue(r["ok"] and r["played"])
+        self.assertEqual(r["source"], "radiobrowser")
+        self.assertEqual(r["station"], "Pop Station")             # tidied for presentation
+        self.assertEqual(r["uri"], "radiobrowser://radio/u3")      # uri untouched
+
+    def test_play_favorite_name_untouched(self):
+        ma = FakeMA(search=[rb_item("u1", "Other Jazz")])
+        r = radio.resolve_radio(FakeCtx(ma), {"mode": "play", "station": "smooth jazz"}, "rid")
+        self.assertEqual(r["station"], "101 SMOOTH JAZZ")          # favorite, unchanged
+
+    def test_find_tidies_radiobrowser_not_favorite(self):
+        ma = FakeMA(browse=[rb_item("u9", "Jazz Blues 128kbps")])
+        res = capability.run(radio.RadioCapability(), FakeCtx(ma),
+                             {"mode": "find", "genre": "jazz", "_rid": "r"}, "r")
+        self.assertTrue(res["ok"])
+        self.assertIn("101 SMOOTH JAZZ", res["chat_text"])         # favorite untouched
+        self.assertIn("Jazz Blues", res["chat_text"])             # radiobrowser tidied
+        self.assertNotIn("128kbps", res["chat_text"])             # cruft removed
 
 
 if __name__ == "__main__":

@@ -85,5 +85,27 @@ class RadioBrowserTest(unittest.TestCase):
         self.assertIsNone(rb.station_from_item(item))
 
 
+class TidyNameTest(unittest.TestCase):
+    def test_strips_bitrate_quality_suffix(self):
+        self.assertEqual(rb.tidy_name("Hit FM (UKraine) - 128kb/s"), "Hit FM (UKraine)")
+        self.assertEqual(rb.tidy_name("Rock 320kbps"), "Rock")
+        self.assertEqual(rb.tidy_name("Radio X [128k]"), "Radio X")
+        self.assertEqual(rb.tidy_name("Jazz 44.1kHz"), "Jazz")
+        self.assertEqual(rb.tidy_name("Foo  -  128 kbps"), "Foo")
+
+    def test_leaves_clean_names_and_real_tokens(self):
+        for n in ["101 SMOOTH JAZZ", "Classic Vinyl HD", ".977 Country",
+                  "Radio 538", "Deep House Bucharest", "Kiss 108"]:
+            self.assertEqual(rb.tidy_name(n), n)
+
+    def test_collapses_whitespace(self):
+        self.assertEqual(rb.tidy_name("  A   B  "), "A B")
+
+    def test_empty_and_all_cruft_fallback(self):
+        self.assertEqual(rb.tidy_name(""), "")
+        self.assertEqual(rb.tidy_name(None), "")
+        self.assertEqual(rb.tidy_name("128kbps"), "128kbps")  # never blank a name
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -50,6 +50,14 @@ def _candidates(ma, radio_cfg, params, cap):
     return [], ""
 
 
+def _disp(station):
+    """Presentation name for chat/spoken/metadata: tidy verbose RadioBrowser names;
+    leave curated favorites untouched. Matching/dedupe already ran on raw names (resolve),
+    so this is UX-only with no correctness impact."""
+    name = station.get("name") or ""
+    return rb.tidy_name(name) if station.get("source") == "radiobrowser" else name
+
+
 class RadioCapability(capability.Capability):
     name = "radio"
 
@@ -89,7 +97,7 @@ class RadioCapability(capability.Capability):
         find_speak = resolved.get("find_speak") or 3
         try:
             if mode == "find":
-                names = [s["name"] for s in cands[:find_speak]]
+                names = [_disp(s) for s in cands[:find_speak]]
                 if len(names) == 1:
                     spoken = "I found " + names[0] + "."
                     chat = "Here are some stations: " + names[0] + "."
@@ -101,12 +109,13 @@ class RadioCapability(capability.Capability):
 
             # mode == play
             chosen = cands[0]
-            md = {"uri": chosen["uri"], "station": chosen["name"], "source": chosen["source"], "mode": "play"}
+            disp = _disp(chosen)   # presentation name (raw name kept in logs)
+            md = {"uri": chosen["uri"], "station": disp, "source": chosen["source"], "mode": "play"}
             if resolved["dry_run"]:
                 LOG.info("[DRY-RUN] req=%s WOULD PLAY radio %r uri=%s source=%s",
                          rid, chosen["name"], chosen["uri"], chosen["source"])
                 md["played"] = False
-                return cr.ok(self.name, rid, "Would play " + chosen["name"] + ".",
+                return cr.ok(self.name, rid, "Would play " + disp + ".",
                              spoken_text=None, metadata=md)
             pr = ma.play(ctx.settings.queue_id, chosen["uri"])
             if (not pr) or ("error_code" in pr):
@@ -114,13 +123,13 @@ class RadioCapability(capability.Capability):
                           pr.get("error_code") if pr else None)
                 md["played"] = False
                 return cr.err(self.name, rid, "play_failed", "play failed",
-                              "I found " + chosen["name"] + ", but couldn't start it.",
-                              spoken_text="I found " + chosen["name"] + ", but couldn't start it.",
+                              "I found " + disp + ", but couldn't start it.",
+                              spoken_text="I found " + disp + ", but couldn't start it.",
                               metadata=md)
             LOG.info("req=%s RADIO PLAYING %r uri=%s source=%s",
                      rid, chosen["name"], chosen["uri"], chosen["source"])
             md["played"] = True
-            return cr.ok(self.name, rid, "Playing " + chosen["name"] + ".",
+            return cr.ok(self.name, rid, "Playing " + disp + ".",
                          spoken_text=None, metadata=md)
         finally:
             ma.close()
