@@ -67,13 +67,23 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
                          metadata={"ducked": True, "from": vol, "to": target, "zone": zone})
 
-    def _arm_timer(self, ctx, zone):
+    def _arm_timer(self, ctx, zone, secs=None):
         snap = self._snaps.get(zone)
         if snap is None:
             return
         self._cancel_timer(snap)
-        secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0   # fallback 120s
+        if secs is None:
+            secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0
         t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
+        snap["timer"] = t
+        t.start()
+
+    def _arm_reply_timer(self, ctx, zone, secs):
+        snap = self._snaps.get(zone)
+        if snap is None:
+            return
+        self._cancel_timer(snap)                               # replace the dead-man with the reply timer
+        t = self._timer_factory(secs, self._reply_complete, [ctx, zone])
         snap["timer"] = t
         t.start()
 
@@ -106,6 +116,10 @@ class InteractionCapability(capability.Capability):
             if snap is None:
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
+            if snap.get("reply_active"):                       # a ceiling reply is playing; the reply timer owns restore
+                LOG.info("RESTORE req=%s zone=%s deferred (reply active)", rid, zone)
+                return cr.ok(self.name, rid, "Deferred.", spoken_text=None,
+                             metadata={"restored": False, "reason": "reply_active", "zone": zone})
             try:
                 state = ctx.ha.get_entity_state(zone) or {}
                 cur = (state.get("attributes") or {}).get("volume_level")
@@ -131,6 +145,40 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Restored.", spoken_text=None,
                          metadata={"restored": True, "to": target, "zone": zone})
 
-    # implemented in Task 3
     def _say(self, ctx, resolved, rid):
-        raise NotImplementedError
+        zone = resolved["zone"]; uri = resolved["uri"]
+        with self._lock:
+            ctx.ha.call_service_rest("media_player", "play_media",
+                                     {"entity_id": zone, "media_content_id": uri,
+                                      "media_content_type": "music", "announce": True})
+            snap = self._snaps.get(zone)
+            if snap is None:                                   # music wasn't ducked -> just play the reply
+                LOG.info("SAY req=%s zone=%s uri=%s (no active duck)", rid, zone, uri)
+                return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                             metadata={"said": True, "held": False, "zone": zone})
+            snap["reply_active"] = True                        # reply turn: hold the duck until playback ends
+            margin = int(getattr(ctx.settings, "say_margin_ms", 1500))
+            hold = resolved.get("hold_ms")
+            hold = (int(hold) if hold is not None
+                    else int(getattr(ctx.settings, "say_hold_default_ms", 8000))) + margin
+            self._arm_reply_timer(ctx, zone, hold / 1000.0)
+            LOG.info("SAY req=%s zone=%s uri=%s hold=%sms", rid, zone, uri, hold)
+            return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                         metadata={"said": True, "held": True, "zone": zone})
+
+    def _reply_complete(self, ctx, zone):
+        LOG.info("SAY reply complete: restoring zone=%s", zone)
+        with self._lock:
+            snap = self._snaps.get(zone)
+            if snap is not None:
+                snap["reply_active"] = False                   # clear so _restore proceeds
+        try:
+            self._restore(ctx, zone, "reply")
+        except Exception as e:
+            LOG.error("reply-complete restore failed zone=%s: %r; re-arming", zone, e)
+            try:
+                with self._lock:
+                    if zone in self._snaps:
+                        self._arm_timer(ctx, zone)             # fall back to the dead-man backstop
+            except Exception as e2:
+                LOG.error("reply re-arm failed zone=%s: %r", zone, e2)

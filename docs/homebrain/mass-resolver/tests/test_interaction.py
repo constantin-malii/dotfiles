@@ -147,6 +147,74 @@ class DuckTest(unittest.TestCase):
         self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # FakeSettings max_duck_timeout 45000ms -> 45s
 
 
+class SayTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        self.zone = "media_player.ceiling_speakers"
+
+    def test_say_plays_uri_as_announcement(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"])
+        self.assertTrue(r["metadata"]["said"])
+        dom, svc, data = ha.calls[-1]
+        self.assertEqual((dom, svc), ("media_player", "play_media"))
+        self.assertEqual(data["entity_id"], self.zone)
+        self.assertEqual(data["media_content_id"], "http://x/a.flac")
+        self.assertTrue(data["announce"])
+
+    def test_say_without_active_duck_does_not_hold(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)           # no prior duck -> no snapshot
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        self.assertTrue(r["ok"]); self.assertFalse(r["metadata"]["held"])
+        self.assertEqual(len(FakeTimer.created), 0)             # no reply timer armed
+
+    def test_say_during_duck_holds_and_arms_reply_timer(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40, dead-man armed
+        ha._state = playing(0.15); ha.calls = []; FakeTimer.created = []
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": 4000})
+        self.assertTrue(r["metadata"]["held"])
+        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])
+        self.assertEqual(len(FakeTimer.created), 1)             # reply timer replaces the dead-man
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 5.5)   # 4000 + 1500 margin -> 5.5s
+
+    def test_restore_defers_while_reply_active(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        ha._state = playing(0.15)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "restore"})             # simulates the future idle trigger
+        self.assertFalse(r["metadata"]["restored"])
+        self.assertEqual(r["metadata"]["reason"], "reply_active")
+        self.assertIn(self.zone, self.cap._snaps)               # NOT restored yet
+        self.assertEqual(ha.calls, [])                          # no volume write
+
+    def test_reply_timer_restores_baseline_on_playback_end(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40
+        ha._state = playing(0.15)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        ha.calls = []
+        FakeTimer.created[-1].fire()                            # playback-end
+        self.assertNotIn(self.zone, self.cap._snaps)            # cleared
+        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_writes), 1)
+        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # restored baseline
+
+    def test_barge_in_rearms_reply_timer_keeps_baseline(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        ha._state = playing(0.15)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        first = FakeTimer.created[-1]
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in
+        self.assertTrue(first.cancelled)                        # old reply timer cancelled
+        self.assertAlmostEqual(self.cap._snaps[self.zone]["volume"], 0.40)   # baseline preserved
+
+
 class RestoreTest(unittest.TestCase):
     def setUp(self):
         FakeTimer.created = []
