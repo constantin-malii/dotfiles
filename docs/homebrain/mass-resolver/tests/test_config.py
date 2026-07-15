@@ -49,5 +49,22 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(config.country_code(radio, "Atlantis"))
 
 
+class InteractionTunablesTest(unittest.TestCase):
+    def test_defaults(self):
+        s = config.Settings({})
+        self.assertEqual(s.interaction_floor, 15)
+        self.assertEqual(s.fade_ms, 0)
+        self.assertEqual(s.max_duck_timeout, 120000)
+        self.assertTrue(s.interaction_ignore_when_idle)
+
+    def test_overrides(self):
+        s = config.Settings({"interaction_floor": 25, "fade_ms": 200,
+                             "max_duck_timeout": 30000, "interaction_ignore_when_idle": False})
+        self.assertEqual(s.interaction_floor, 25)
+        self.assertEqual(s.fade_ms, 200)
+        self.assertEqual(s.max_duck_timeout, 30000)
+        self.assertFalse(s.interaction_ignore_when_idle)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

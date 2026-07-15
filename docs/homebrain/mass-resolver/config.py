@@ -41,6 +41,11 @@ class Settings(object):
         # tts_data placeholders {msg}/{entity} are filled by haconn.announce().
         self.tts_service = cfg.get("tts_service", "")          # e.g. "tts.speak"
         self.tts_data = cfg.get("tts_data", {})               # e.g. {"entity_id":"tts.x","media_player_entity_id":"{entity}","message":"{msg}"}
+        # AU-02/AU-03 interaction duck/restore tunables
+        self.interaction_floor = int(cfg.get("interaction_floor", 15))          # % while interacting
+        self.fade_ms = int(cfg.get("fade_ms", 0))                               # reserved (no fade v1)
+        self.max_duck_timeout = int(cfg.get("max_duck_timeout", 120000))        # ms dead-man auto-restore (>= longest reply)
+        self.interaction_ignore_when_idle = bool(cfg.get("interaction_ignore_when_idle", True))
 
 
 def load_settings(here):
