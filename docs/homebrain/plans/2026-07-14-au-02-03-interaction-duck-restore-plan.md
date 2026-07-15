@@ -51,6 +51,61 @@ baseline), **last-writer-wins** restore (don't clobber a user's mid-interaction 
 
 ---
 
+### Task 0: Thread-safe HA sends (concurrency prerequisite — must ship with the code)
+
+**Why:** `haconn.HA.call_service` sends on the **shared** event WebSocket `self.s` with **no lock**
+(`haconn.py:32-35` → `wsutil.ws_send` → `s.sendall`). The HTTP server is `ThreadingMixIn`, and Task 3's
+dead-man runs `call_service` on a **`threading.Timer` thread** — so two threads can `sendall` on one socket
+at once → interleaved bytes → corrupt WS frames → broken HA connection. `get_entity_state` already dodges
+this with a fresh per-call HTTP connection (`haconn.py:37-43`); `call_service` needs an explicit lock. This
+is invisible to the fake-based suite, so it **lands with the code, not deferred to deploy.** (It also fixes
+the pre-existing latent race between concurrent `/command` requests.)
+
+**Files:** Modify `haconn.py`; Modify `tests/test_haconn.py`.
+
+- [ ] **Step 1: Failing test** — add to `tests/test_haconn.py`:
+
+```python
+class SendLockTest(unittest.TestCase):
+    def test_call_service_holds_lock_during_send(self):
+        ha = haconn.HA("h", 1, "tok")
+        held = {"during_send": None}
+        class FakeSock(object):
+            def sendall(self, b):
+                held["during_send"] = ha._send_lock.locked()
+        ha.s = FakeSock()
+        ha.call_service("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        self.assertTrue(held["during_send"])          # lock held while sending
+        self.assertFalse(ha._send_lock.locked())      # released after
+```
+
+- [ ] **Step 2: Run, verify fail** — `python tests/test_haconn.py` → FAIL (`no attribute '_send_lock'`).
+
+- [ ] **Step 3: Implement** — in `haconn.py`: add `import threading` at top; in `HA.__init__` add
+  `self._send_lock = threading.Lock()`; wrap the send + `cmd_id` bump in `call_service`:
+
+```python
+    def call_service(self, domain, service, data):
+        with self._send_lock:
+            self.cmd_id += 1
+            wsutil.ws_send(self.s, {"id": self.cmd_id, "type": "call_service",
+                                    "domain": domain, "service": service, "service_data": data})
+```
+
+(The interaction path and `announce` both go through `call_service`, so wrapping it covers them; `subscribe`
+runs only at startup on the main thread. `Speaker.speak` already serializes its own calls.)
+
+- [ ] **Step 4: Run, verify pass** — `python tests/test_haconn.py` → PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add haconn.py tests/test_haconn.py
+git commit -m "fix(resolver): thread-safe HA call_service send (lock shared WS)"
+```
+
+---
+
 ### Task 1: Config tunables
 
 **Files:** Modify `config.py:Settings.__init__`; Modify `config.json`; Test `tests/test_config.py`.
@@ -66,7 +121,7 @@ class InteractionTunablesTest(unittest.TestCase):
         s = config.Settings({})
         self.assertEqual(s.interaction_floor, 15)
         self.assertEqual(s.fade_ms, 0)
-        self.assertEqual(s.max_duck_timeout, 45000)
+        self.assertEqual(s.max_duck_timeout, 120000)
         self.assertTrue(s.interaction_ignore_when_idle)
 
     def test_overrides(self):
@@ -89,7 +144,7 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'interact
         # AU-02/AU-03 interaction duck/restore tunables
         self.interaction_floor = int(cfg.get("interaction_floor", 15))          # % while interacting
         self.fade_ms = int(cfg.get("fade_ms", 0))                               # reserved (no fade v1)
-        self.max_duck_timeout = int(cfg.get("max_duck_timeout", 45000))         # ms dead-man auto-restore
+        self.max_duck_timeout = int(cfg.get("max_duck_timeout", 120000))        # ms dead-man auto-restore (>= longest reply)
         self.interaction_ignore_when_idle = bool(cfg.get("interaction_ignore_when_idle", True))
 ```
 
@@ -98,7 +153,7 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'interact
 ```json
   "interaction_floor": 15,
   "fade_ms": 0,
-  "max_duck_timeout": 45000,
+  "max_duck_timeout": 120000,
   "interaction_ignore_when_idle": true,
 ```
 
@@ -107,11 +162,13 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'interact
 Run: `python tests/test_config.py`
 Expected: PASS (all tests, including the two new ones).
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit (code + runtime config separately, per CLAUDE.md)**
 
 ```bash
-git add config.py config.json tests/test_config.py
+git add config.py tests/test_config.py
 git commit -m "feat(resolver): add interaction duck/restore tunables"
+git add config.json
+git commit -m "config(resolver): interaction duck/restore tunable values"
 ```
 
 ---
@@ -215,6 +272,7 @@ class InteractionCapability(capability.Capability):
         self._timer_factory = timer_factory or threading.Timer
         self._clock = clock or time.time
         self._snaps = {}                             # zone -> {"volume": float, "ts": float, "timer": obj|None}
+        self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -302,6 +360,14 @@ class DuckTest(unittest.TestCase):
         self.assertFalse(r["metadata"]["ducked"])
         self.assertEqual(ha.calls, [])                              # no volume change
 
+    def test_duck_ignored_when_no_volume(self):
+        ha = FakeHA({"state": "playing", "attributes": {}}); ctx = FakeCtx(ha)   # playing but no volume_level
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["ducked"])
+        self.assertEqual(r["metadata"]["reason"], "no_volume")
+        self.assertEqual(ha.calls, [])                              # never duck what we can't restore
+
     def test_re_duck_coalesces_keeps_original_baseline(self):
         ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
         run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
@@ -333,10 +399,14 @@ Expected: FAIL — `NotImplementedError` from `_duck`.
         if player_state != "playing" and getattr(ctx.settings, "interaction_ignore_when_idle", True):
             return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
                          metadata={"ducked": False, "reason": "not_playing", "zone": zone})
+        if vol is None:                                             # can't guarantee restore -> don't duck
+            return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                         metadata={"ducked": False, "reason": "no_volume", "zone": zone})
         floor = int(getattr(ctx.settings, "interaction_floor", 15)) / 100.0
-        if zone not in self._snaps:                                  # coalesce: keep original baseline
-            self._snaps[zone] = {"volume": vol, "ts": self._clock(), "timer": None}
-        self._arm_timer(ctx, zone)
+        with self._lock:                                            # atomic snapshot + timer arm
+            if zone not in self._snaps:                             # coalesce: keep original baseline
+                self._snaps[zone] = {"volume": vol, "ts": self._clock(), "timer": None}
+            self._arm_timer(ctx, zone)
         ctx.ha.call_service("media_player", "volume_set",
                             {"entity_id": zone, "volume_level": floor})
         LOG.info("DUCK req=%s zone=%s %s -> %s", rid, zone, vol, floor)
@@ -434,7 +504,8 @@ Expected: FAIL — `NotImplementedError` from `_restore`.
 
 ```python
     def _restore(self, ctx, zone, rid):
-        snap = self._snaps.pop(zone, None)
+        with self._lock:
+            snap = self._snaps.pop(zone, None)
         if snap is None:
             return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                          metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
@@ -583,6 +654,13 @@ CAPS = {
 }
 ```
 
+Also correct the stale comment at `core.py:8` — it claims "re-instantiated per call via capability.run",
+but `dispatch` reuses the singleton `CAPS[intent]`, and `InteractionCapability` deliberately holds per-zone
+snapshot state on that singleton. Replace with:
+```python
+# Capability registry (singletons; dispatch reuses one instance per intent — InteractionCapability keeps state)
+```
+
 - [ ] **Step 4: Run, verify pass**
 
 Run: `python tests/test_interaction.py`
@@ -622,3 +700,12 @@ pattern in `CHANGELOG.md`:
   (AU-01 §4 fallback) not built — duck-only per S1a. Both noted for a follow-up if validation needs them.
 - **No placeholders:** every step has runnable code + exact commands + expected output.
 - **Silent by construction:** all results `spoken_text=None`; Task 6 asserts dispatch never speaks.
+- **Concurrency (review #1):** Task 0 adds a `haconn` send lock so the dead-man's off-thread `call_service`
+  can't interleave `sendall` with a concurrent `/command`; Task 3/4 add a capability lock for `_snaps`.
+- **Dead-man vs long replies (review #2, cross-ref S1a):** default `max_duck_timeout` = **120000 ms** so a
+  single duck survives long replies (news, long ChatGPT answers). **S1a's automation SHOULD also re-fire
+  `duck` on each intermediate `assist_satellite` transition** — the coalesce path re-arms the timer
+  (`_arm_timer`), refreshing the dead-man for free. This plan and the S1a design must agree on who keeps it
+  alive; **follow-up: add this cross-reference to the S1a design doc.**
+- **Unrestorable duck (review #3):** playing-but-`volume_level=None` → don't duck (Task 3), so we never
+  strand the zone at the floor.
