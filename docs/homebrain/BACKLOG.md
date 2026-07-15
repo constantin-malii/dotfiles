@@ -34,7 +34,6 @@ working backlog, every item with all 14 fields as explicit columns.
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
 - `NL-02` Prompt / `assistant-capabilities.md` lockstep discipline *(NL)*
 - `MR-05` Tidy verbose RadioBrowser station names *(MR)*
-- `S0` Satellite inventory — hardware live (reSpeaker Living Room onboarded 2026-07-14) *(S)*
 
 ### 🟡 Later
 - `MR-Inc3` acquire (Lidarr, guarded — unblocked by RQ-03 2026-07-06) · `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
@@ -53,7 +52,7 @@ working backlog, every item with all 14 fields as explicit columns.
 
 ### ✅ Done *(detail in `CHANGELOG.md`)*
 - `MR-Inc0` foundation · `MR-Inc1` radio · `F1`/`F1-R` CommandResult + relay · `BUG-Speaker` reconnect fix · `MR-Inc4A` status · **`MR-Inc2A` News (deployed + exposed + validated)**
-- `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design
+- `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design · `S0` satellite inventory (reSpeaker Living Room)
 
 ### 🔬 Research / Purchasing
 - `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
@@ -180,7 +179,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### S — Satellites / Room Routing *(design/inventory-first; build only when approved + installed)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | ready | research | P2 | HA | hardware installed ✅ (reSpeaker Living Room, 2026-07-14) | none (read-only) | new inventory doc | read-only | n/a | **hardware live** — read-only inventory of the reSpeaker satellite (entities/pipeline/TTS-reach/wake/area/identity), HA-01 pattern | PCL §6A.8 · CHANGELOG 2026-07-14 |
+| `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | done | research | P2 | HA | hardware installed ✅ (reSpeaker Living Room, 2026-07-14) | none (read-only) | `s0-satellite-inventory.md` | read-only | n/a | **DELIVERED 2026-07-14** (`s0-satellite-inventory.md`): 1 satellite, `Living Room Voice` pipeline (Whisper+Piper), local TTS ✅; **gaps → S1**: area unassigned + no satellite→ceiling route | PCL §6A.8 · CHANGELOG 2026-07-14 · s0-satellite-inventory |
 | `S1`–`S4` | `InteractionContext`→`ResponseRoutingPolicy`→privacy gating→household announce/targeting (room-aware responses) | S | later | design→repo-code | later | PCL/HA | S0 | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | PCL §6A, C§7 |
 
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*
