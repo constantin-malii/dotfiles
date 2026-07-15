@@ -68,6 +68,26 @@ class ResolveValidateTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "invalid_input")
 
 
+class SayResolveValidateTest(unittest.TestCase):
+    def test_resolve_uri_and_defaults(self):
+        cap = interaction.InteractionCapability()
+        r = cap.resolve(FakeCtx(FakeHA()), {"mode": "say", "uri": "http://x/a.flac"})
+        self.assertEqual(r["mode"], "say")
+        self.assertEqual(r["uri"], "http://x/a.flac")
+        self.assertEqual(r["zone"], "media_player.ceiling_speakers")
+
+    def test_resolve_media_content_id_alias(self):
+        cap = interaction.InteractionCapability()
+        r = cap.resolve(FakeCtx(FakeHA()), {"mode": "say", "media_content_id": "http://x/b.flac"})
+        self.assertEqual(r["uri"], "http://x/b.flac")
+
+    def test_say_without_uri_rejected(self):
+        cap = interaction.InteractionCapability()
+        r = run(cap, FakeCtx(FakeHA(playing(0.3))), {"mode": "say"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "invalid_input")
+
+
 class FakeTimer(object):
     created = []
     def __init__(self, interval, fn, args=None):

@@ -5,7 +5,7 @@ import capability
 import command_result as cr
 
 LOG = logging.getLogger("resolver")
-_MODES = ("duck", "restore")
+_MODES = ("duck", "restore", "say")
 
 
 class InteractionCapability(capability.Capability):
@@ -20,7 +20,9 @@ class InteractionCapability(capability.Capability):
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
         zone = params.get("zone") or getattr(ctx.settings, "ceiling_entity", "")
-        return {"mode": mode, "zone": zone}
+        uri = params.get("uri") or params.get("media_content_id") or ""
+        hold_ms = params.get("hold_ms")
+        return {"mode": mode, "zone": zone, "uri": uri, "hold_ms": hold_ms}
 
     def validate(self, ctx, resolved):
         if resolved["mode"] not in _MODES:
@@ -28,11 +30,15 @@ class InteractionCapability(capability.Capability):
                     "chat_text": "Unknown interaction mode."}
         if not resolved["zone"]:
             return {"code": "invalid_input", "reason": "no zone", "chat_text": "No zone."}
+        if resolved["mode"] == "say" and not resolved.get("uri"):
+            return {"code": "invalid_input", "reason": "no uri", "chat_text": "No reply audio."}
         return None
 
     def execute(self, ctx, resolved, rid):
         if resolved["mode"] == "duck":
             return self._duck(ctx, resolved["zone"], rid)
+        if resolved["mode"] == "say":
+            return self._say(ctx, resolved, rid)
         return self._restore(ctx, resolved["zone"], rid)
 
     def _duck(self, ctx, zone, rid):
@@ -124,3 +130,7 @@ class InteractionCapability(capability.Capability):
             LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
             return cr.ok(self.name, rid, "Restored.", spoken_text=None,
                          metadata={"restored": True, "to": target, "zone": zone})
+
+    # implemented in Task 3
+    def _say(self, ctx, resolved, rid):
+        raise NotImplementedError
