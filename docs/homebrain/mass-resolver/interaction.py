@@ -77,6 +77,35 @@ class InteractionCapability(capability.Capability):
         except Exception as e:
             LOG.error("auto-restore failed zone=%s: %r", zone, e)
 
-    # implemented in a later task
     def _restore(self, ctx, zone, rid):
-        raise NotImplementedError
+        with self._lock:
+            snap = self._snaps.pop(zone, None)
+        if snap is None:
+            return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                         metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
+        if snap.get("timer") is not None:
+            try:
+                snap["timer"].cancel()
+            except Exception:
+                pass
+        floor = int(getattr(ctx.settings, "interaction_floor", 15)) / 100.0
+        cur = None
+        try:
+            state = ctx.ha.get_entity_state(zone) or {}
+            cur = (state.get("attributes") or {}).get("volume_level")
+        except Exception:
+            cur = None
+        # last-writer-wins: if the current volume is no longer our floor, the user changed it -> keep it.
+        if cur is not None and abs(cur - floor) > 0.01:
+            LOG.info("RESTORE req=%s zone=%s user_override cur=%s (kept)", rid, zone, cur)
+            return cr.ok(self.name, rid, "Kept.", spoken_text=None,
+                         metadata={"restored": False, "reason": "user_override", "zone": zone})
+        target = snap.get("volume")
+        if target is None:
+            return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                         metadata={"restored": False, "reason": "no_baseline", "zone": zone})
+        ctx.ha.call_service("media_player", "volume_set",
+                            {"entity_id": zone, "volume_level": target})
+        LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
+        return cr.ok(self.name, rid, "Restored.", spoken_text=None,
+                     metadata={"restored": True, "to": target, "zone": zone})

@@ -117,5 +117,40 @@ class DuckTest(unittest.TestCase):
         self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # FakeSettings max_duck_timeout 45000ms -> 45s
 
 
+class RestoreTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_restore_returns_to_snapshot(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, now at 0.15
+        ha._state = playing(0.15)                                   # unchanged since our duck
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["metadata"]["restored"])
+        self.assertEqual(len(ha.calls), 1)
+        _, _, data = ha.calls[0]
+        self.assertAlmostEqual(data["volume_level"], 0.40)
+        self.assertNotIn("media_player.ceiling_speakers", self.cap._snaps)   # snapshot cleared
+        self.assertTrue(FakeTimer.created[0].cancelled)             # dead-man cancelled
+
+    def test_restore_last_writer_wins_when_user_changed(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # floor 0.15
+        ha._state = playing(0.55)                                   # user bumped it mid-interaction
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertFalse(r["metadata"]["restored"])
+        self.assertEqual(r["metadata"]["reason"], "user_override")
+        self.assertEqual(ha.calls, [])                              # do not clobber the user's 0.55
+
+    def test_restore_without_snapshot_is_noop(self):
+        ha = FakeHA(playing(0.30)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["ok"]); self.assertFalse(r["metadata"]["restored"])
+        self.assertEqual(ha.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
