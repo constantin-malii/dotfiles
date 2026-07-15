@@ -3,6 +3,33 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-15 — AU-02/AU-03 interaction duck/restore deployed (resolver `InteractionCapability`)
+
+- **What:** deployed the resolver **`InteractionCapability`** (`interaction` intent, modes `duck`/`restore`)
+  that ducks the ceiling zone (`media_player.ceiling_speakers`) during an assistant interaction and restores
+  it exactly afterward — **AU-02** (restore/resume) + **AU-03** (duck-not-boost) shipped as one unit. Silent
+  (volume-only; no TTS, never `media_stop`/`pause`). Driven manually via `/command` today; the automatic
+  satellite trigger is **S1a** (next).
+- **Mechanism:** snapshot current volume → `volume_set` to a floor (`interaction_floor`, default 15%, never
+  *upward* — `min(current, floor)`) → restore to the snapshot. Coalesced re-ducks, **last-writer-wins**
+  (won't clobber a user's mid-turn volume change), and a **120 s dead-man** auto-restore if the restore
+  trigger never arrives. Volume writes go via a **fresh, status-checked HA REST** call (never the shared
+  event WebSocket); duck/restore are serialized under a lock; restore discards its baseline only after the
+  write is confirmed (no stranded-quiet ceiling).
+- **Files deployed** to `~/mass-resolver/`: `haconn.py` (added `call_service_rest`), `config.py` +
+  `config.json` (4 tunables: `interaction_floor` 15, `fade_ms` 0, `max_duck_timeout` 120000,
+  `interaction_ignore_when_idle` true), `interaction.py` (new), `core.py` (registered in `CAPS`). Backup at
+  `~/mass-resolver/.bak/20260715-130644/`.
+- **Validation (live):** host Python **3.5.2** `py_compile` + the changed unit tests pass on-host;
+  post-restart `/command` bound, auth `200/401`, event path `connected; subscribed`, no regressions.
+  **End-to-end with music playing:** `duck` took the ceiling `0.43 → 0.15` and `restore` returned it to
+  exactly `0.43` (confirmed against HA state), music never stopped, no assistant speech.
+- **Scope / safety:** resolver code only; **no exposure change**, no HA-script change, no `media_stop`. The
+  single live action was the restart (user-run `sudo systemctl restart mass-resolver`).
+- **Rollback:** `cp ~/mass-resolver/.bak/20260715-130644/* ~/mass-resolver/ && rm interaction.py`, then restart.
+- **Unblocks:** **S1a** (satellite `assist_satellite` state → `interaction` intent trigger). Procedure:
+  `runbooks/resolver-deploy.md`. Design/plan: `plans/2026-07-14-au-02-03-interaction-duck-restore-plan.md`.
+
 ## 2026-07-14 — reSpeaker XVF3800 voice satellite onboarded + HA Internal URL fixed (NAT→LAN)
 
 - **What:** onboarded the first **voice satellite** — a Seeed **reSpeaker XVF3800 + XIAO ESP32-S3** — into HA
