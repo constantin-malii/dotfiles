@@ -152,5 +152,21 @@ class RestoreTest(unittest.TestCase):
         self.assertEqual(ha.calls, [])
 
 
+class DeadManTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_timeout_auto_restores(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
+        ha._state = playing(0.15); ha.calls = []                    # still at floor
+        FakeTimer.created[0].fire()                                 # dead-man fires
+        self.assertNotIn("media_player.ceiling_speakers", self.cap._snaps)
+        self.assertEqual(len(ha.calls), 1)
+        _, _, data = ha.calls[0]
+        self.assertAlmostEqual(data["volume_level"], 0.40)         # restored to baseline
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
