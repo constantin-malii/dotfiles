@@ -238,6 +238,24 @@ class SayTest(unittest.TestCase):
         self.assertEqual(len(vol_writes), 1)
         self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # baseline restored
 
+    def test_deadman_overrides_reply_active_hold(self):
+        # A barge-in duck while a reply is active re-arms the dead-man (replacing the reply
+        # timer) but leaves reply_active True. When the dead-man fires it MUST force the
+        # restore through, not defer forever -> strand.
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                       # snapshot 0.40; dead-man = created[0]
+        ha._state = playing(0.15)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})  # reply timer = created[1] (replaces created[0]); reply_active
+        run(self.cap, ctx, {"mode": "duck"})                       # barge-in: dead-man = created[2] (replaces created[1])
+        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])   # still active (duck doesn't clear it)
+        self.assertTrue(FakeTimer.created[1].cancelled)               # reply timer cancelled by the barge-in
+        ha.calls = []
+        FakeTimer.created[-1].fire()                               # dead-man fires
+        self.assertNotIn(self.zone, self.cap._snaps)               # forced through -> restored, not stranded
+        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_writes), 1)
+        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)  # baseline
+
     def test_say_play_media_failure_leaves_deadman(self):
         ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
         run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, dead-man armed

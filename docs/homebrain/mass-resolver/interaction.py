@@ -98,7 +98,7 @@ class InteractionCapability(capability.Capability):
     def _auto_restore(self, ctx, zone):
         LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
         try:
-            self._restore(ctx, zone, "deadman")
+            self._restore(ctx, zone, "deadman", force=True)
         except Exception as e:
             LOG.error("auto-restore failed zone=%s: %r; re-arming", zone, e)
             try:
@@ -108,7 +108,7 @@ class InteractionCapability(capability.Capability):
             except Exception as e2:
                 LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
 
-    def _restore(self, ctx, zone, rid):
+    def _restore(self, ctx, zone, rid, force=False):
         with self._lock:                                               # read + write stay under _lock together
                                                                         # (intentional: serializes HTTP threads
                                                                         # against the timer thread)
@@ -116,7 +116,7 @@ class InteractionCapability(capability.Capability):
             if snap is None:
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
-            if snap.get("reply_active"):                       # a ceiling reply is playing; the reply timer owns restore
+            if snap.get("reply_active") and not force:          # a ceiling reply is playing; the reply timer owns restore
                 LOG.info("RESTORE req=%s zone=%s deferred (reply active)", rid, zone)
                 return cr.ok(self.name, rid, "Deferred.", spoken_text=None,
                              metadata={"restored": False, "reason": "reply_active", "zone": zone})
