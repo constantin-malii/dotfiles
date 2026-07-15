@@ -3,6 +3,41 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-14 — reSpeaker XVF3800 voice satellite onboarded + HA Internal URL fixed (NAT→LAN)
+
+- **What:** onboarded the first **voice satellite** — a Seeed **reSpeaker XVF3800 + XIAO ESP32-S3** — into HA
+  as an ESPHome device **`reSpeaker Living Room`**, with on-device wake word "Okay Nabu", local Whisper STT,
+  and working spoken (Piper) TTS. Also fixed HA's **Internal URL**, which was auto-resolving to the host-only
+  NAT IP and blocking LAN media/TTS fetches.
+- **Firmware / flash:** installed the **ESPHome Device Builder** add-on; used the formatBCE
+  `Respeaker-XVF3800-ESPHome-integration` satellite config (board `esp32-s3-devkitc-1`; external components +
+  XMOS DSP firmware pulled at build; **unencrypted API**; secrets = `wifi_ssid`/`wifi_password`/`ota_password`
+  only). Compiled in-add-on (~745 s) and flashed over USB via **web.esphome.io** ("Open USB flasher", since the
+  HA page is plain http). XMOS DSP firmware 1.0.7.
+- **Adoption:** auto-discovered → **Added**. Device: mfr `formatbce`, model *Respeaker XVF3800 Satellite*,
+  MAC `68:ee:8f:51:e4:0c`. Entities incl. `assist_satellite.respeaker_living_room_assist_satellite`,
+  `media_player.respeaker_living_room_media_player`, wake-word/LED/mute/alarm/timer controls.
+- **HA Internal URL fix (the enabler):** `Settings → System → Network → Local network` was auto-set to
+  `http://192.168.122.10:8123` (NAT, host-only) → **changed to `http://192.168.1.104:8123` (LAN)**. Without it,
+  LAN devices (satellite, phone) can't fetch TTS/media (the satellite's setup media test failed until this).
+  Ceiling TTS still works (host is on the LAN and reaches `192.168.1.104`). **Phone TTS reachability likely
+  restored too — worth re-testing.**
+- **Dedicated satellite pipeline:** created **"Living Room Voice"** (`id 01kxhm0a1vcdjwkrbp40a6cs43`) =
+  Whisper STT + **Piper TTS** + `conversation.home_assistant`, assigned to the satellite
+  (`select.respeaker_living_room_assistant`). This **isolates Piper TTS to the satellite** — the shared
+  **"Home Assistant"** and **"ChatGPT"** pipelines keep `tts=None` (phone/default untouched). Spoken replies
+  confirmed working on the reSpeaker (contradicts the old "Piper crashes the pipeline" blanket note — see
+  ONBOARDING §6/§12).
+- **Hardware note:** the XVF3800 has **no built-in speaker** — audio via its **3.5mm jack** or **JST 5W**
+  connector. Tested with an external speaker on the 3.5mm jack.
+- **Scope / safety:** **no exposure changes**; **no** resolver/MA/host changes; **no** MA/resolver/HA restarts.
+  Changes were: one new add-on (ESPHome Device Builder), one new ESPHome device, one dedicated pipeline, and one
+  network-URL setting. Device not yet assigned to an HA **area**.
+- **Rollback:** set Internal URL back to auto; delete/ignore the ESPHome device; delete the "Living Room Voice"
+  pipeline (satellite falls back to "preferred"); the ESPHome Device Builder add-on can be uninstalled.
+- **Unblocks:** **`S0`** (satellite inventory — hardware now live) and the **`AU`** audio-policy /
+  satellite→ceiling output-routing work.
+
 ## 2026-06-29 — Inc 2A News headlines: deployed, `script.news` created + exposed, validated
 
 - **What:** shipped **Inc 2A — spoken news headlines**. New resolver `news` capability fetches a curated
