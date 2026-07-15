@@ -35,9 +35,48 @@ class InteractionCapability(capability.Capability):
             return self._duck(ctx, resolved["zone"], rid)
         return self._restore(ctx, resolved["zone"], rid)
 
-    # implemented in later tasks
     def _duck(self, ctx, zone, rid):
-        raise NotImplementedError
+        state = ctx.ha.get_entity_state(zone) or {}
+        player_state = state.get("state")
+        vol = (state.get("attributes") or {}).get("volume_level")
+        if player_state != "playing" and getattr(ctx.settings, "interaction_ignore_when_idle", True):
+            return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                         metadata={"ducked": False, "reason": "not_playing", "zone": zone})
+        if vol is None:                                             # can't guarantee restore -> don't duck
+            return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                         metadata={"ducked": False, "reason": "no_volume", "zone": zone})
+        floor = int(getattr(ctx.settings, "interaction_floor", 15)) / 100.0
+        with self._lock:                                            # atomic snapshot + timer arm
+            if zone not in self._snaps:                             # coalesce: keep original baseline
+                self._snaps[zone] = {"volume": vol, "ts": self._clock(), "timer": None}
+            self._arm_timer(ctx, zone)
+        ctx.ha.call_service("media_player", "volume_set",
+                            {"entity_id": zone, "volume_level": floor})
+        LOG.info("DUCK req=%s zone=%s %s -> %s", rid, zone, vol, floor)
+        return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
+                     metadata={"ducked": True, "from": vol, "to": floor, "zone": zone})
 
+    def _arm_timer(self, ctx, zone):
+        snap = self._snaps.get(zone)
+        if snap is None:
+            return
+        if snap.get("timer") is not None:
+            try:
+                snap["timer"].cancel()
+            except Exception:
+                pass
+        secs = int(getattr(ctx.settings, "max_duck_timeout", 45000)) / 1000.0
+        t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
+        snap["timer"] = t
+        t.start()
+
+    def _auto_restore(self, ctx, zone):
+        LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
+        try:
+            self._restore(ctx, zone, "deadman")
+        except Exception as e:
+            LOG.error("auto-restore failed zone=%s: %r", zone, e)
+
+    # implemented in a later task
     def _restore(self, ctx, zone, rid):
         raise NotImplementedError

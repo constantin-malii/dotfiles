@@ -58,5 +58,64 @@ class ResolveValidateTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "invalid_input")
 
 
+class FakeTimer(object):
+    created = []
+    def __init__(self, interval, fn, args=None):
+        self.interval = interval; self.fn = fn; self.args = args or []
+        self.started = False; self.cancelled = False
+        FakeTimer.created.append(self)
+    def start(self): self.started = True
+    def cancel(self): self.cancelled = True
+    def fire(self): self.fn(*self.args)
+
+
+class DuckTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_duck_snapshots_and_sets_floor(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"])
+        self.assertTrue(r["metadata"]["ducked"])
+        self.assertEqual(len(ha.calls), 1)
+        domain, service, data = ha.calls[0]
+        self.assertEqual((domain, service), ("media_player", "volume_set"))
+        self.assertEqual(data["entity_id"], "media_player.ceiling_speakers")
+        self.assertAlmostEqual(data["volume_level"], 0.15)          # floor 15%
+        self.assertAlmostEqual(r["metadata"]["from"], 0.40)
+
+    def test_duck_ignored_when_not_playing(self):
+        ha = FakeHA({"state": "idle", "attributes": {"volume_level": 0.4}}); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["ducked"])
+        self.assertEqual(ha.calls, [])                              # no volume change
+
+    def test_duck_ignored_when_no_volume(self):
+        ha = FakeHA({"state": "playing", "attributes": {}}); ctx = FakeCtx(ha)   # playing but no volume_level
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["ducked"])
+        self.assertEqual(r["metadata"]["reason"], "no_volume")
+        self.assertEqual(ha.calls, [])                              # never duck what we can't restore
+
+    def test_re_duck_coalesces_keeps_original_baseline(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
+        ha._state = playing(0.15)                                   # now at floor
+        r2 = run(self.cap, ctx, {"mode": "duck"})                   # re-duck
+        self.assertAlmostEqual(self.cap._snaps["media_player.ceiling_speakers"]["volume"], 0.40)
+        self.assertTrue(r2["metadata"]["ducked"])
+
+    def test_duck_schedules_dead_man_timer(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertTrue(FakeTimer.created[0].started)
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # FakeSettings max_duck_timeout 45000ms -> 45s
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
