@@ -41,7 +41,6 @@ working backlog, every item with all 14 fields as explicit columns.
 - `HA-02` plugs/switches · `HA-03` vacuum · `HA-04` cameras · `HA-05` routines · `HA-06` device health · `HA-08` garage door (Meross) · `HA-09` ecobee climate
 - `SA-03` smoke/CO alerting · `SA-04` water/leak alerting · `SA-05` security/camera detection
 - `DV-01` home status · `DV-02` needs-attention · `DV-03` dashboards · `DV-04` energy
-- `AU-02` resume-restore · `AU-03` ducking impl
 - `NL-01` NL device control · `NL-03` gpt-4o eval
 - `INF-03` soundbar · `INF-04` `/hassio` panel · `INF-06` Lidarr/Beets/Plex · `INF-07` backup target · `INF-08` UPS + NUT resilience
 - `S1`–`S4` satellite routing *(after S0)* · `RQ-04` hardware volume buttons
@@ -53,6 +52,7 @@ working backlog, every item with all 14 fields as explicit columns.
 ### ✅ Done *(detail in `CHANGELOG.md`)*
 - `MR-Inc0` foundation · `MR-Inc1` radio · `F1`/`F1-R` CommandResult + relay · `BUG-Speaker` reconnect fix · `MR-Inc4A` status · **`MR-Inc2A` News (deployed + exposed + validated)**
 - `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design · `S0` satellite inventory (reSpeaker Living Room)
+- **`AU-02`+`AU-03` interaction duck/restore** (`InteractionCapability`, deployed + live-validated 2026-07-15)
 
 ### 🔬 Research / Purchasing
 - `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
@@ -186,8 +186,8 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `AU-01` | Audio policy design (media-zone ducking) | AU | done | design | P1 | resolver/HA | HA-07 ✅; S0 (multi-room only) | none (design) | design doc | none | n/a | **DELIVERED 2026-07-06** — single-zone pause/duck/ignore policy + restore semantics; feeds AU-02/AU-03; multi-room waits on S0. See `2026-07-06-au-01-interaction-audio-policy-design.md` | 2026-07-06-au-01 |
-| `AU-02` | Explicit "resume music" restore behavior | AU | later | design→repo-code | P2 | resolver/HA | AU-01 ✅ | media path | `interaction.py`/`core.py`/`config.py`+tests | resolver + HA | restore `.bak/` | **IMPLEMENTED on branch `homebrain/au-02-03-interaction-duck-restore`** (with AU-03 as one `InteractionCapability`); code+tests landed (214 OK), **deploy gated/pending**. See `plans/2026-07-14-au-02-03-interaction-duck-restore-plan.md` | 2026-07-06-au-01 §6 |
-| `AU-03` | Ducking implementation | AU | later | repo-code→HA-live | later | resolver/HA | AU-01 ✅ / AU-02 | media path + HA | resolver modules + HA | host + HA | restore `.bak/` + revert HA | **IMPLEMENTED on branch `homebrain/au-02-03-interaction-duck-restore`** (merged with AU-02: verified fresh-REST duck/restore, dead-man, silent intent); code+tests landed, **deploy gated/pending**. See the AU-02/03 plan | 2026-07-06-au-01 §3–§5 |
+| `AU-02` | Explicit "resume music" restore behavior | AU | done | design→repo-code | P2 | resolver/HA | AU-01 ✅ | media path | `interaction.py`/`core.py`/`config.py`+tests | resolver + HA | restore `.bak/` | **DONE 2026-07-15** — shipped with AU-03 as one `InteractionCapability`; deployed + live-validated (duck 0.43→0.15, restore→0.43). See `CHANGELOG.md` 2026-07-15 · `plans/2026-07-14-au-02-03-interaction-duck-restore-plan.md` | 2026-07-06-au-01 §6 |
+| `AU-03` | Ducking implementation | AU | done | repo-code→HA-live | later | resolver/HA | AU-01 ✅ / AU-02 | media path + HA | resolver modules + HA | host + HA | restore `.bak/` + revert HA | **DONE 2026-07-15** — merged with AU-02: verified fresh-REST duck/restore, 120s dead-man, silent intent; deployed + live-validated. See `CHANGELOG.md` 2026-07-15 | 2026-07-06-au-01 §3–§5 |
 
 ### INF — Infrastructure / Operating Model
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -301,7 +301,7 @@ Serialize edits to these conflict-and-truth magnets — at most one track edits 
 
 | Gate | Holder | Status |
 |---|---|---|
-| **host-live / HA-live / exposure** | *(none)* | **FREE** — `MR-Inc2A` released it on completion (2026-06-29). |
+| **host-live / HA-live / exposure** | *(none)* | **FREE** — `AU-02`/`AU-03` claimed it for the interaction duck/restore deploy and released it on completion (2026-07-15). |
 
 **To claim the gate:** record the track ID + branch here in the claiming PR; release it on merge or
 abandonment. The first recommended tracks (§7) are all read-only/design/decision and **do not claim
