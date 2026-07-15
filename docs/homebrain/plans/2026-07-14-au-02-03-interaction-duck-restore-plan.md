@@ -837,6 +837,98 @@ strands the ceiling at the floor (self-correcting on the next volume/play comman
 via the Deployment precondition below; snapshot **persistence is deferred** — the stale-baseline risk of
 restoring across a restart outweighs the self-correcting annoyance. Revisit only if it recurs.
 
+## Round-3 review fixes (PR #18 multi-specialist review, 2026-07-15)
+
+The Round-2 rework closed the adversarial findings but introduced **two strand-at-floor
+regressions** (the exact failure this capability exists to prevent), plus two silent-failure
+gaps. All confirmed against source by multiple reviewers.
+
+### Invariants (Round 3, additive)
+- **Duck records the snapshot + arms the dead-man BEFORE the volume write** (symmetry with
+  restore's write-before-discard). A failed/lost-ack write is then always recoverable: the
+  dead-man later sees `cur == baseline`, treats it as `user_override`, and cleans up.
+- **`snap["target"]` = the last value we actually wrote** — updated on *every* duck (first or
+  coalesced); `snap["volume"]` (the restore baseline) is captured once on the first duck.
+  Override detection compares live volume to `snap["target"]`.
+- **Self-healing never lets an exception escape the Timer thread** — the `_auto_restore` re-arm
+  is itself wrapped.
+- **Read failures during restore are logged (WARNING), never silent.**
+- **I/O stays under `_lock`** (deliberate — it's the Round-2 #5 mutual-exclusion guarantee;
+  do not move it out).
+
+### Task 8: Round-3 strand-at-floor fixes (C1, C2, F3, F5)
+
+**Files:** Modify `interaction.py` + `tests/test_interaction.py`.
+
+- [ ] **Step 1 (C1 + C2): reorder `_duck` — snapshot/arm before write; sync target on re-duck:**
+
+```python
+        target = min(vol, floor)                                   # never raise volume
+        if zone not in self._snaps:                                # first duck: capture baseline
+            self._snaps[zone] = {"volume": vol, "target": target, "ts": self._clock(), "timer": None}
+        else:                                                      # coalesce: keep baseline, track last-written target
+            self._snaps[zone]["target"] = target
+        self._arm_timer(ctx, zone)                                 # snapshot + timer BEFORE the write, so a
+        ctx.ha.call_service_rest("media_player", "volume_set",     #   lost-ack write is reconciled by the dead-man
+                                 {"entity_id": zone, "volume_level": target})
+        LOG.info("DUCK req=%s zone=%s %s -> %s", rid, zone, vol, target)
+        return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
+                     metadata={"ducked": True, "from": vol, "to": target, "zone": zone})
+```
+
+- [ ] **Step 2 (F3): wrap the `_auto_restore` re-arm** so a re-arm failure can't kill the Timer thread:
+
+```python
+    def _auto_restore(self, ctx, zone):
+        LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
+        try:
+            self._restore(ctx, zone, "deadman")
+        except Exception as e:
+            LOG.error("auto-restore failed zone=%s: %r; re-arming", zone, e)
+            try:
+                with self._lock:
+                    if zone in self._snaps:
+                        self._arm_timer(ctx, zone)
+            except Exception as e2:
+                LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
+```
+
+- [ ] **Step 3 (F5): log the restore read failure** (keep fail-safe behavior, lose the silence):
+
+```python
+            try:
+                state = ctx.ha.get_entity_state(zone) or {}
+                cur = (state.get("attributes") or {}).get("volume_level")
+            except Exception as e:
+                LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)
+                cur = None
+```
+
+- [ ] **Step 4: comments** — fix the `_snaps` schema comment to include `target`
+  (`# zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}`); add a one-line
+  note that the read+write stay under `_lock` intentionally (Round-2 #5 serialization); drop the bare `#N`
+  finding refs from code comments (keep self-contained prose).
+
+- [ ] **Step 5: tests** (all must fail first where applicable):
+    - **C2 regression:** duck at 0.40 (target 0.15) → simulate user drop to 0.05 → re-duck (writes 0.05,
+      `target` now 0.05) → restore → reaches **baseline 0.40** (not a false `user_override`).
+    - **C1:** first-duck write raises after snapshot/arm → snapshot **present**, timer armed; a subsequent
+      dead-man/`restore` cleans up (no permanent strand).
+    - **Real threading:** two threads, one holding `_lock` inside a blocking `call_service_rest` (gated by an
+      `Event`), the other's duck/restore must block until released — proves mutual exclusion (not the
+      single-threaded `_lock.locked()` probe).
+    - **Re-arm loop:** `_auto_restore` write fails once → re-arms → second fire succeeds → snapshot cleared.
+    - **Behavioral asserts:** `user_override` path cancels the timer + pops the snapshot; `get_entity_state`
+      raising mid-restore still restores baseline (with the new WARNING).
+
+- [ ] **Step 6: full-suite regression** — `python -m unittest discover -s tests -p "test_*.py"` → OK.
+- [ ] **Step 7: Commit** — `git commit -m "fix(resolver): duck snapshots before write; sync coalesce target; guard self-heal paths"`
+
+### BACKLOG follow-up (#2, sharpened)
+The "deploy-when-idle" mitigation covers **planned** deploys only; an **unplanned** crash/OOM/reboot during
+the ≤120 s ducked window still strands (silently, low probability). Persistence remains deferred; if this
+class recurs, a persist-baseline-and-reconcile-on-startup would neutralize it (and the C1 lost-ack case) at once.
+
 ## Deployment (gated — NOT part of this plan's code)
 
 Implementation above is **branch-only and ungated**. Shipping it is a **separate live step requiring
