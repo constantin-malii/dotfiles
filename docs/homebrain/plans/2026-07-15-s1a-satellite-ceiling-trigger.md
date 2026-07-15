@@ -73,6 +73,13 @@ done'
   from `listening/processing/responding/idle`, update the trigger `to:` lists in Task 2 accordingly. **If**
   transitions are flaky/unordered, stop and reconsider the trigger model before Task 3.
 
+**Observed (2026-07-15, music playing @ 0.32, two interactions):**
+`idle → listening → responding → idle`, consistent and ordered, no flapping — trigger model confirmed
+reliable (clears §10's top risk). **`processing` did not surface** (this pipeline goes `listening →
+responding` directly; the ~3 s gap would have caught it at 0.25 s polling). Kept in the Task 2 trigger list
+defensively — a never-firing state simply never matches. Short interaction ≈ 5 s (well under the 120 s
+dead-man). Ceiling volume unchanged (0.32) throughout, as expected pre-install.
+
 - [ ] **Step 3: Commit** (record the observed sequence in the plan / CHANGELOG note — no code):
 
 ```bash
