@@ -680,13 +680,173 @@ git commit -m "feat(resolver): register interaction capability in core dispatch"
 
 ---
 
+## Round-2 review fixes (opus adversarial review, 2026-07-14)
+
+A whole-branch adversarial pass found the volume writes fragile: they ride the shared event
+WebSocket (unverified, reconnect-fragile), and `_restore` discards the baseline *before* the write is
+confirmed — so any failed/rejected restore write strands the ceiling at the floor. Fixes below collapse
+review findings #1/#3/#4/#5/#6/#7/#8 into one write-path rewrite. #2 (restart-while-ducked) is handled
+operationally (see Deployment), not persisted.
+
+### Invariants (Round 2)
+- **Writes go via a fresh REST call** (`POST /api/services/media_player/volume_set`), status-checked —
+  never the event WebSocket. `ctx.ha` is read-only for event subscription (`resolver.py:118-119`); this
+  mirrors `get_entity_state`'s fresh-connection idiom and removes the concurrent-send, `cmd_id`-vs-subscribe,
+  and reconnect hazards.
+- **Duck**: write the floor first; record the snapshot + arm the dead-man only after the write succeeds.
+  Coalesce keeps the original baseline. Duck target = `min(current, floor)` (never raise volume). Store the
+  *applied target* in the snapshot.
+- **Restore**: peek the snapshot (don't pop); compare current volume against the *applied target* (not the
+  config floor) for user-override; write first, and discard the snapshot + cancel the timer only after the
+  write succeeds. On write failure, keep the snapshot and leave the dead-man armed to retry.
+- **Duck and restore for a zone are mutually exclusive** — hold `_lock` across the whole read→decide→write.
+  The REST calls are bounded by a short timeout; serializing one ceiling zone is free.
+
+### Task 7: Round-2 write-path hardening (#1, #3, #4, #5, #6, #7, #8)
+
+**Files:** Modify `haconn.py` + `tests/test_haconn.py`; Modify `interaction.py` + `tests/test_interaction.py`.
+
+- [ ] **Step 1: haconn — failing test then implement** `HA.call_service_rest`:
+
+```python
+    def call_service_rest(self, domain, service, data):
+        """Call an HA service over a FRESH REST connection (POST /api/services/<d>/<s>).
+
+        Like get_entity_state: fresh per-call HTTPConnection, safe from any thread, never touches the
+        shared event WebSocket self.s, raises on non-2xx so callers confirm the write before discarding
+        state. Never logs the token.
+        """
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        try:
+            headers = {"Authorization": "Bearer " + (self.token or ""),
+                       "Content-Type": "application/json"}
+            conn.request("POST", "/api/services/" + domain + "/" + service,
+                         body=json.dumps(data).encode("utf-8"), headers=headers)
+            resp = conn.getresponse(); resp.read()
+            if resp.status not in (200, 201):
+                raise IOError("HA REST POST services/%s/%s -> HTTP %s" % (domain, service, resp.status))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+```
+  Test it the same way `test_haconn.py` already exercises `get_entity_state` (mock
+  `http.client.HTTPConnection`): assert POST, path `/api/services/media_player/volume_set`, Bearer header,
+  raises on non-2xx, and `ha.s` is never touched.
+
+- [ ] **Step 2: interaction — failing tests then rewrite** `_duck`/`_arm_timer`/`_cancel_timer`/`_auto_restore`/`_restore`:
+
+```python
+    def _duck(self, ctx, zone, rid):
+        floor = int(getattr(ctx.settings, "interaction_floor", 15)) / 100.0
+        with self._lock:
+            state = ctx.ha.get_entity_state(zone) or {}
+            player_state = state.get("state")
+            vol = (state.get("attributes") or {}).get("volume_level")
+            if player_state != "playing" and getattr(ctx.settings, "interaction_ignore_when_idle", True):
+                return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                             metadata={"ducked": False, "reason": "not_playing", "zone": zone})
+            if vol is None:
+                return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                             metadata={"ducked": False, "reason": "no_volume", "zone": zone})
+            target = min(vol, floor)                                   # never duck upward (#7)
+            ctx.ha.call_service_rest("media_player", "volume_set",     # write first, verified
+                                     {"entity_id": zone, "volume_level": target})
+            if zone not in self._snaps:                                # coalesce: keep original baseline
+                self._snaps[zone] = {"volume": vol, "target": target, "ts": self._clock(), "timer": None}
+            self._arm_timer(ctx, zone)
+            LOG.info("DUCK req=%s zone=%s %s -> %s", rid, zone, vol, target)
+            return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
+                         metadata={"ducked": True, "from": vol, "to": target, "zone": zone})
+
+    def _arm_timer(self, ctx, zone):
+        snap = self._snaps.get(zone)
+        if snap is None:
+            return
+        self._cancel_timer(snap)
+        secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0   # fallback 120s (#6)
+        t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
+        snap["timer"] = t
+        t.start()
+
+    def _cancel_timer(self, snap):
+        t = snap.get("timer")
+        if t is not None:
+            try:
+                t.cancel()
+            except Exception:
+                pass
+
+    def _auto_restore(self, ctx, zone):
+        LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
+        try:
+            self._restore(ctx, zone, "deadman")
+        except Exception as e:                                         # write failed -> keep + retry
+            LOG.error("auto-restore failed zone=%s: %r; re-arming", zone, e)
+            with self._lock:
+                if zone in self._snaps:
+                    self._arm_timer(ctx, zone)
+
+    def _restore(self, ctx, zone, rid):
+        with self._lock:
+            snap = self._snaps.get(zone)                              # peek; discard only after write
+            if snap is None:
+                return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                             metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
+            cur = None
+            try:
+                state = ctx.ha.get_entity_state(zone) or {}
+                cur = (state.get("attributes") or {}).get("volume_level")
+            except Exception:
+                cur = None
+            applied = snap.get("target")
+            # last-writer-wins vs the value WE set (not the config floor) -> honors min()/#7
+            if cur is not None and applied is not None and abs(cur - applied) > 0.01:
+                self._cancel_timer(snap); self._snaps.pop(zone, None)
+                LOG.info("RESTORE req=%s zone=%s user_override cur=%s (kept)", rid, zone, cur)
+                return cr.ok(self.name, rid, "Kept.", spoken_text=None,
+                             metadata={"restored": False, "reason": "user_override", "zone": zone})
+            target = snap.get("volume")
+            if target is None:
+                self._cancel_timer(snap); self._snaps.pop(zone, None)
+                return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                             metadata={"restored": False, "reason": "no_baseline", "zone": zone})
+            ctx.ha.call_service_rest("media_player", "volume_set",    # write first (raises on failure)
+                                     {"entity_id": zone, "volume_level": target})
+            self._cancel_timer(snap); self._snaps.pop(zone, None)     # confirmed -> safe to discard
+            LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
+            return cr.ok(self.name, rid, "Restored.", spoken_text=None,
+                         metadata={"restored": True, "to": target, "zone": zone})
+```
+
+  Update `FakeHA` to route `call_service_rest` into `.calls` and accept a `write_boom` to simulate a
+  failing write. Existing duck/restore tests keep working (same `.calls` shape). **Add tests** (finding → test):
+    - #7: baseline 0.10, floor 0.15 → write 0.10 (not 0.15); snapshot `target` == 0.10.
+    - #1: `write_boom` on restore → result `ok:False`, snapshot **still present**, dead-man timer **not** cancelled.
+    - #6: settings object lacking `max_duck_timeout` → armed interval == 120.0.
+    - #5: probe `call_service_rest` asserting `cap._lock.locked()` is True during the write (proves
+      duck/restore run under the lock → mutually exclusive).
+
+- [ ] **Step 3: full-suite regression** — `python -m unittest discover -s tests -p "test_*.py"` → OK.
+- [ ] **Step 4: Commit** — `git commit -m "fix(resolver): verified fresh-REST interaction writes; restore-after-confirm; no upward duck"`
+
+### BACKLOG follow-up (#2)
+Snapshots + the dead-man timer are in-memory; a resolver restart *while a duck is active* loses both and
+strands the ceiling at the floor (self-correcting on the next volume/play command). Handled operationally
+via the Deployment precondition below; snapshot **persistence is deferred** — the stale-baseline risk of
+restoring across a restart outweighs the self-correcting annoyance. Revisit only if it recurs.
+
 ## Deployment (gated — NOT part of this plan's code)
 
 Implementation above is **branch-only and ungated**. Shipping it is a **separate live step requiring
 explicit user approval** and claims the single live gate (BACKLOG §10), following the resolver deploy
 pattern in `CHANGELOG.md`:
-1. Deploy `config.py`, `config.json`, `interaction.py`, `core.py` to host `~/mass-resolver/` (timestamped
-   backup dir; checksum; `py_compile` on host Python 3.5.2).
+0. **Precondition (Round-2 #2):** deploy/restart only when no interaction is active (verify
+   `assist_satellite` idle) — a restart mid-duck loses the in-memory snapshot + dead-man timer and strands
+   the ceiling at the floor.
+1. Deploy `haconn.py`, `config.py`, `config.json`, `interaction.py`, `core.py` to host `~/mass-resolver/`
+   (timestamped backup dir; checksum; `py_compile` on host Python 3.5.2).
 2. Restart the resolver service (**user-run sudo**), confirm active + 0 tracebacks.
 3. Live-validate `/command` `intent=interaction {mode:duck}` ducks the ceiling and `{mode:restore}`
    restores; confirm silence (no TTS); confirm no regression to music/radio/news/status.
