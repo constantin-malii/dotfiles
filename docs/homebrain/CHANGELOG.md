@@ -3,6 +3,29 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-15 — S1a satellite→ceiling duck/restore trigger (HA automation)
+
+- **What:** installed an HA automation (`automation.s1a_satellite_ceiling_duck_restore`) that fires the
+  resolver's `interaction` intent when the **reSpeaker Living Room** satellite enters/leaves a conversation —
+  ceiling music **auto-ducks** while you talk to the satellite and **restores** when it returns to idle.
+  Completes **S1a**. The spoken reply still plays on the **satellite's own speaker** (reply-on-ceiling is the
+  separate S1b). No resolver code change (AU-02/AU-03 already live); no new `rest_command`.
+- **Trigger:** state automation on `assist_satellite.respeaker_living_room_assist_satellite` —
+  `→ listening/processing/responding` calls `rest_command.resolver_command {intent: interaction, params:
+  {mode: duck}}`; `→ idle` calls `{mode: restore}`. `mode: queued` so intermediate transitions each re-fire
+  `duck` (coalesced, re-arming the resolver's 120 s dead-man). Observed transitions: `idle → listening →
+  responding → idle` (this pipeline skips `processing`; kept in the trigger defensively).
+- **Install:** HA config API (`POST /api/config/automation/config/<id>` → HTTP 200); manageable in the HA UI.
+- **Validation (live):** music playing, "Okay Nabu, what time is it?" → resolver log `DUCK 0.32→0.15` (wake)
+  → two coalesced re-ducks (`0.15→0.15`, baseline preserved) → `RESTORE →0.32` (idle). Ducked audibly and
+  returned; the mic heard the query over the 0.15 floor (no tuning needed); silent (volume-only).
+  Ignore-when-idle confirmed (idle ceiling → `not_playing`, no change).
+- **Scope / safety:** one HA automation; **no** exposure change, **no** resolver/model change, **no**
+  `media_stop`. HA-live gate claimed + released (BACKLOG §10).
+- **Rollback:** disable/delete the `S1a - Satellite Ceiling Duck/Restore` automation (nothing else to undo).
+- **Unblocks / next:** **S1b** — universal resolver TTS relay so replies play on the ceiling. Plan:
+  `plans/2026-07-15-s1a-satellite-ceiling-trigger.md`.
+
 ## 2026-07-15 — AU-02/AU-03 interaction duck/restore deployed (resolver `InteractionCapability`)
 
 - **What:** deployed the resolver **`InteractionCapability`** (`interaction` intent, modes `duck`/`restore`)

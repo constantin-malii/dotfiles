@@ -43,7 +43,7 @@ working backlog, every item with all 14 fields as explicit columns.
 - `DV-01` home status · `DV-02` needs-attention · `DV-03` dashboards · `DV-04` energy
 - `NL-01` NL device control · `NL-03` gpt-4o eval
 - `INF-03` soundbar · `INF-04` `/hassio` panel · `INF-06` Lidarr/Beets/Plex · `INF-07` backup target · `INF-08` UPS + NUT resilience
-- `S1`–`S4` satellite routing *(after S0)* · `RQ-04` hardware volume buttons
+- `S1b`–`S4` satellite routing *(after S1a)* · `RQ-04` hardware volume buttons
 
 ### 🔴 Blocked
 - `RQ-02` upstream MA lock issue — YTM reliability + approval
@@ -53,6 +53,7 @@ working backlog, every item with all 14 fields as explicit columns.
 - `MR-Inc0` foundation · `MR-Inc1` radio · `F1`/`F1-R` CommandResult + relay · `BUG-Speaker` reconnect fix · `MR-Inc4A` status · **`MR-Inc2A` News (deployed + exposed + validated)**
 - `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design · `S0` satellite inventory (reSpeaker Living Room)
 - **`AU-02`+`AU-03` interaction duck/restore** (`InteractionCapability`, deployed + live-validated 2026-07-15)
+- **`S1a`** satellite→ceiling duck/restore trigger (HA automation, installed + live-validated 2026-07-15)
 
 ### 🔬 Research / Purchasing
 - `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
@@ -180,7 +181,8 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | done | research | P2 | HA | hardware installed ✅ (reSpeaker Living Room, 2026-07-14) | none (read-only) | `s0-satellite-inventory.md` | read-only | n/a | **DELIVERED 2026-07-14** (`s0-satellite-inventory.md`): 1 satellite, `Living Room Voice` pipeline (Whisper+Piper), local TTS ✅; **gaps → S1**: area unassigned + no satellite→ceiling route | PCL §6A.8 · CHANGELOG 2026-07-14 · s0-satellite-inventory |
-| `S1`–`S4` | `InteractionContext`→`ResponseRoutingPolicy`→privacy gating→household announce/targeting (room-aware responses) | S | later | design→repo-code | later | PCL/HA | S0 | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | PCL §6A, C§7 |
+| `S1a` | Satellite→ceiling interaction duck/restore **trigger** (HA automation → resolver `interaction` intent) | S | done | HA-live | P2 | HA | S0 ✅ · AU-02/AU-03 ✅ | one HA automation | HA automation | HA-live (claimed+released 2026-07-15) | disable/delete automation | **DONE 2026-07-15** — `automation.s1a_satellite_ceiling_duck_restore` installed + live-validated (duck 0.32→0.15 on wake, coalesced re-ducks, restore→0.32, silent). See `CHANGELOG.md` 2026-07-15 · `plans/2026-07-15-s1a-satellite-ceiling-trigger.md` | 2026-07-14-s1a design |
+| `S1b`–`S4` | reply-on-ceiling relay (`S1b`) → `ResponseRoutingPolicy` → privacy gating → household announce/targeting | S | later | design→repo-code | later | PCL/HA | S1a ✅ | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | **S1b next** = universal resolver TTS relay so replies play on the ceiling (F1/F1-R-grade, no double-speak) | PCL §6A, C§7 · 2026-07-14-s1a §2 |
 
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -301,7 +303,7 @@ Serialize edits to these conflict-and-truth magnets — at most one track edits 
 
 | Gate | Holder | Status |
 |---|---|---|
-| **host-live / HA-live / exposure** | *(none)* | **FREE** — `AU-02`/`AU-03` claimed it for the interaction duck/restore deploy and released it on completion (2026-07-15). |
+| **host-live / HA-live / exposure** | *(none)* | **FREE** — `S1a` claimed it to install the satellite duck/restore automation and released it on completion (2026-07-15). |
 
 **To claim the gate:** record the track ID + branch here in the claiming PR; release it on merge or
 abandonment. The first recommended tracks (§7) are all read-only/design/decision and **do not claim
