@@ -27,6 +27,8 @@ class FakeSettings(object):
     max_duck_timeout = 45000
     interaction_ignore_when_idle = True
     announce_failures = True
+    say_hold_default_ms = 8000
+    say_margin_ms = 1500
 
 
 class FakeSpeaker(object):
@@ -466,6 +468,17 @@ class CoreWiringTest(unittest.TestCase):
         r = core.dispatch(ctx, "interaction", {"mode": "duck"})
         self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "interaction")
         self.assertTrue(r["metadata"]["ducked"])
+        self.assertEqual(spk.said, [])                              # silent: no TTS
+
+
+class SayDispatchTest(unittest.TestCase):
+    def test_dispatch_say_is_silent(self):
+        ha = FakeHA(playing(0.40)); spk = FakeSpeaker()
+        ctx = core.Ctx(ma_factory=lambda: None, ha=ha, settings=FakeSettings(),
+                       radio_cfg={}, news_cfg={}, speaker=spk)
+        r = core.dispatch(ctx, "interaction", {"mode": "say", "uri": "http://x/a.flac"})
+        self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "interaction")
+        self.assertTrue(r["metadata"]["said"])
         self.assertEqual(spk.said, [])                              # silent: no TTS
 
 
