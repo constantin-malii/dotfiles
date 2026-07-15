@@ -78,5 +78,79 @@ class SendLockTest(unittest.TestCase):
         self.assertFalse(ha._send_lock.locked())      # released after
 
 
+class FakeResponse(object):
+    def __init__(self, status):
+        self.status = status
+    def read(self):
+        return b""
+
+
+class FakeHTTPConnection(object):
+    created = []
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.requests = []
+        self.status = 200
+        FakeHTTPConnection.created.append(self)
+
+    def request(self, method, path, body=None, headers=None):
+        self.requests.append({"method": method, "path": path, "body": body, "headers": headers})
+
+    def getresponse(self):
+        return FakeResponse(self.status)
+
+    def close(self):
+        pass
+
+
+class CallServiceRestTest(unittest.TestCase):
+    def setUp(self):
+        FakeHTTPConnection.created = []
+        self._real_conn = haconn.http.client.HTTPConnection
+        haconn.http.client.HTTPConnection = FakeHTTPConnection
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        haconn.http.client.HTTPConnection = self._real_conn
+
+    def test_posts_correct_method_and_path(self):
+        ha = haconn.HA("host", 1, "tok")
+        ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        conn = FakeHTTPConnection.created[0]
+        req = conn.requests[0]
+        self.assertEqual(req["method"], "POST")
+        self.assertEqual(req["path"], "/api/services/media_player/volume_set")
+
+    def test_sends_bearer_auth_and_json_content_type(self):
+        ha = haconn.HA("host", 1, "tok")
+        ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        req = FakeHTTPConnection.created[0].requests[0]
+        self.assertEqual(req["headers"]["Authorization"], "Bearer tok")
+        self.assertEqual(req["headers"]["Content-Type"], "application/json")
+
+    def test_non_2xx_raises(self):
+        ha = haconn.HA("host", 1, "tok")
+        FakeHTTPConnection.created = []
+        orig_init = FakeHTTPConnection.__init__
+        def init_with_bad_status(self, host, port, timeout=None):
+            orig_init(self, host, port, timeout)
+            self.status = 500
+        FakeHTTPConnection.__init__ = init_with_bad_status
+        try:
+            with self.assertRaises(Exception):
+                ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        finally:
+            FakeHTTPConnection.__init__ = orig_init
+
+    def test_never_touches_shared_websocket(self):
+        ha = haconn.HA("host", 1, "tok")
+        self.assertIsNone(ha.s)
+        ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        self.assertIsNone(ha.s)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

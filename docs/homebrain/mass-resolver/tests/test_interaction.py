@@ -6,15 +6,18 @@ import capability, interaction, core
 
 
 class FakeHA(object):
-    def __init__(self, state=None, boom=None):
+    def __init__(self, state=None, boom=None, write_boom=None):
         self._state = state
         self._boom = boom
+        self._write_boom = write_boom
         self.calls = []                              # (domain, service, data)
     def get_entity_state(self, entity_id):
         if self._boom is not None:
             raise self._boom
         return self._state
-    def call_service(self, domain, service, data):
+    def call_service_rest(self, domain, service, data):
+        if self._write_boom is not None:
+            raise self._write_boom
         self.calls.append((domain, service, data))
 
 
@@ -173,6 +176,60 @@ class DeadManTest(unittest.TestCase):
         self.assertEqual(len(ha.calls), 1)
         _, _, data = ha.calls[0]
         self.assertAlmostEqual(data["volume_level"], 0.40)         # restored to baseline
+
+
+class Round2FindingsTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_duck_never_goes_upward(self):                          # finding #7
+        ha = FakeHA(playing(0.10)); ctx = FakeCtx(ha)                # already below floor 0.15
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(ha.calls), 1)
+        _, _, data = ha.calls[0]
+        self.assertAlmostEqual(data["volume_level"], 0.10)           # min(0.10, 0.15) == 0.10
+        self.assertAlmostEqual(self.cap._snaps["media_player.ceiling_speakers"]["target"], 0.10)
+
+    def test_restore_write_failure_keeps_snapshot_and_timer(self):  # finding #1
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, target 0.15
+        # Swap ctx.ha: reads the floor (no user-override short-circuit) but the write raises.
+        ctx.ha = FakeHA(playing(0.15), write_boom=IOError("nope"))
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertFalse(r["ok"])
+        self.assertIn("media_player.ceiling_speakers", self.cap._snaps)
+        self.assertFalse(FakeTimer.created[0].cancelled)
+
+    def test_missing_max_duck_timeout_falls_back_to_120s(self):     # finding #6
+        class SettingsNoTimeout(object):
+            ceiling_entity = "media_player.ceiling_speakers"
+            interaction_floor = 15
+            interaction_ignore_when_idle = True
+        ha = FakeHA(playing(0.40))
+        ctx = FakeCtx(ha)
+        ctx.settings = SettingsNoTimeout()
+        run(self.cap, ctx, {"mode": "duck"})
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 120.0)
+
+    def test_write_happens_while_lock_held(self):                   # finding #5
+        cap = self.cap
+        held = {"locked": None}
+        class LockCheckingHA(object):
+            def __init__(self, cap):
+                self._cap = cap
+                self.calls = []
+            def get_entity_state(self, entity_id):
+                return playing(0.40)
+            def call_service_rest(self, domain, service, data):
+                held["locked"] = self._cap._lock.locked()
+                self.calls.append((domain, service, data))
+        ha = LockCheckingHA(cap)
+        ctx = FakeCtx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        self.assertTrue(held["locked"])
 
 
 class CoreWiringTest(unittest.TestCase):
