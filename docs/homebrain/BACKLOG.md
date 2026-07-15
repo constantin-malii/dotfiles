@@ -34,6 +34,7 @@ working backlog, every item with all 14 fields as explicit columns.
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
 - `NL-02` Prompt / `assistant-capabilities.md` lockstep discipline *(NL)*
 - `MR-05` Tidy verbose RadioBrowser station names *(MR)*
+- `S0` Satellite inventory — hardware live (reSpeaker Living Room onboarded 2026-07-14) *(S)*
 
 ### 🟡 Later
 - `MR-Inc3` acquire (Lidarr, guarded — unblocked by RQ-03 2026-07-06) · `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
@@ -47,7 +48,6 @@ working backlog, every item with all 14 fields as explicit columns.
 - `S1`–`S4` satellite routing *(after S0)* · `RQ-04` hardware volume buttons
 
 ### 🔴 Blocked
-- `S0` satellite inventory — **hardware install** *(reSpeaker incoming — move to Ready once installed)*
 - `RQ-02` upstream MA lock issue — YTM reliability + approval
 - `INF-05` HAOS upgrade / host modernization — backups + risk plan
 
@@ -180,7 +180,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 ### S — Satellites / Room Routing *(design/inventory-first; build only when approved + installed)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | blocked | research | later | HA | hardware install | none (read-only) | new inventory doc | read-only | n/a | inventory on install | PCL §6A.8 |
+| `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | ready | research | P2 | HA | hardware installed ✅ (reSpeaker Living Room, 2026-07-14) | none (read-only) | new inventory doc | read-only | n/a | **hardware live** — read-only inventory of the reSpeaker satellite (entities/pipeline/TTS-reach/wake/area/identity), HA-01 pattern | PCL §6A.8 · CHANGELOG 2026-07-14 |
 | `S1`–`S4` | `InteractionContext`→`ResponseRoutingPolicy`→privacy gating→household announce/targeting (room-aware responses) | S | later | design→repo-code | later | PCL/HA | S0 | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | PCL §6A, C§7 |
 
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*

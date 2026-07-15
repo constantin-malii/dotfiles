@@ -33,6 +33,13 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   - **NAT NIC → `192.168.122.10`** (host↔VM only; see networking gotcha).
 - **Music Assistant:** add-on `d5369777_music_assistant` **v2.9.3**, UI/API at `http://192.168.1.104:8095`. Plays to **ceiling speakers** via a **Squeezelite** systemd service on the host (`squeezelite-ceiling.service`, ALSA `hw:1,0`).
 - **Audio path:** MA (VM) → SlimProto/HTTP stream over NAT `192.168.122.10` → Squeezelite (host) → ceiling speakers.
+- **Voice satellite (2026-07-14):** `reSpeaker Living Room` — Seeed **reSpeaker XVF3800 + XIAO ESP32-S3**,
+  ESPHome (formatBCE firmware), on-device wake word **"Okay Nabu"**, LAN Wi-Fi. Entities
+  `assist_satellite.respeaker_living_room_assist_satellite` + `media_player.respeaker_living_room_media_player`.
+  Uses a dedicated **"Living Room Voice"** pipeline (Whisper STT + Piper TTS). **No built-in speaker** (3.5mm /
+  JST). See `CHANGELOG.md` 2026-07-14. (Not yet assigned to an HA area.)
+- **HA Internal URL:** `http://192.168.1.104:8123` (LAN) — set 2026-07-14. Previously auto-detected to the NAT
+  IP `192.168.122.10:8123`, which LAN devices (phone/satellite) can't reach.
 
 ---
 
@@ -43,7 +50,7 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 | **HA REST/WS** | `http://192.168.1.104:8123` ✅ | LAN-reachable. Needs an HA token (below). |
 | **MA API** | `http://192.168.1.104:8095` ✅ | `/info` open; `/ws` needs an **MA account token** (HA token is rejected). |
 | **SSH to host** | `ssh costea@192.168.1.68` ✅ | **Must use ssh-agent:** `ssh-add ~/.ssh/id_homebrain` first — direct `-i` fails ("we did not send a packet"). |
-| **NAT IP `192.168.122.10`** | ❌ from your machine/LAN | Reachable **only from the host**. TTS/stream URLs use this IP (host can fetch; phone/LAN cannot). |
+| **NAT IP `192.168.122.10`** | ❌ from your machine/LAN | Reachable **only from the host**. The MA→Squeezelite audio **stream** uses this IP. (HA's **TTS/media base URL moved off this to the LAN IP** on 2026-07-14 — Internal URL fix; see §1/§12.) |
 | **Into the HAOS VM shell / its Docker** | ❌ | No SSH into the VM. You only have the host shell + HA/MA APIs. |
 
 **Tokens (secrets — never commit):**
@@ -96,7 +103,7 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
 - ⚠️ **YTM track *playback* is not LLM-grade and NOT exposed to the LLM.** See the full investigation in §8–§13. Summary: **stop-wedge** (Squeezelite stuck `playing` after stop; HTTP/1.0 root cause) + **cold-start latency ~95–150 s**.
 - ⚠️ **YTM cookie rotates** — re-extract via incognito when YTM returns nothing.
-- ⚠️ **Piper TTS** crashes the Assist pipeline → TTS **off** in pipelines; only explicit `tts.speak` to ceiling works. Whisper STT fine (model `auto`/sherpa-parakeet; couldn't pin tiny-int8).
+- ⚠️ **Piper TTS** crashes the Assist pipeline → TTS **off** in pipelines; only explicit `tts.speak` to ceiling works. Whisper STT fine (model `auto`/sherpa-parakeet; couldn't pin tiny-int8). **Update 2026-07-14:** Piper TTS **runs fine in the new "Living Room Voice" satellite pipeline** (spoken replies confirmed on the reSpeaker) — the old crash may be version-stale; the shared HA/phone pipelines still keep TTS off pending a re-test.
 - ⚠️ **HA↔MA connection** drops after MA restarts / intermittently (internal DNS). Recover: `POST /api/config/config_entries/entry/01KVPNW1JFHJG30NANAPVARHY8/reload`. A1/A2a automate this.
 - ⚠️ **MA stuck playback lock** ("previous holder appears stuck") — consequence of the stop-wedge; clears on MA restart; `players/cmd/stop` does **not** reliably clear it.
 
@@ -213,7 +220,7 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 |---|---|
 | **YTM not exposed to the LLM** | Playback isn't reliable (stop-wedge + cold-start latency). Exposing it would let the assistant hang the speakers. Gate: only expose once playback is proven reliable. |
 | **Exposed playback = local library + radio (resolver / F1-R)** | `play_music` (local files via MA `filesystem_smb`), `play_radio`, and `find_stations` are exposed through the synchronous resolver `/command` path. **YTM track playback stays unexposed** (stop-wedge + cold-start latency — §8–§13). |
-| **Phone-pipeline TTS disabled** | Piper crashes the pipeline, and TTS proxy URLs resolve to the NAT IP `192.168.122.10` which the **phone can't reach** (macvtap split). Spoken replies on the phone would fail; text replies are reliable. |
+| **Phone-pipeline TTS disabled** | Piper crashes the pipeline, and TTS proxy URLs resolve to the NAT IP `192.168.122.10` which the **phone can't reach** (macvtap split). Spoken replies on the phone would fail; text replies are reliable. **Update 2026-07-14:** the NAT-IP reachability half is fixed (Internal URL → LAN `192.168.1.104`) and Piper TTS works in the reSpeaker's dedicated pipeline — so **phone TTS is worth re-testing**; kept off until verified. |
 | **LLM exposure restricted to helper scripts (+ weather)** | Entity exposure is shared by all conversation agents; exposing raw `media_player`/TV/etc. would re-enable broken built-in intents and widen the LLM's reach. Purpose-built `script.ceiling_*` are a safe, minimal, bounded action surface. `expose_new_entities` turned off. |
 | **Ceiling TTS via explicit `tts.speak`, not the pipeline** | The pipeline TTS is off (Piper); explicit `tts.speak` to `media_player.ceiling_speakers` works because the **host** can fetch the NAT-IP TTS URL. `script.ceiling_announce` is the reusable primitive (kept un-exposed to the LLM). |
 | **Auto-reload automations (A1 + A2a) exist** | The HA↔MA integration drops its connection (internal DNS) and doesn't auto-reconnect — it sits silently dead until a config-entry reload. A1 covers restart drops; A2a's active probe covers silent drops. Both reload the entry to self-heal, with debounce/cooldown to avoid loops. |
