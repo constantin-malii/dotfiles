@@ -46,6 +46,11 @@ S1a ships the useful behavior fast using only what's already wired; S1b isolates
 | Duck/restore is **resolver-owned** (sole media + TTS owner) | AU-01 §2/§9 | The HA side only **triggers**; the resolver performs the duck/restore (AU-02/AU-03). |
 | Satellite exposes an `assist_satellite` **state** (idle/listening/processing/responding) | S0 §2 | That state is the interaction **trigger** for duck (leaving idle) and restore (returning to idle). |
 
+> **Not blocked by S0's area gap:** S0 flagged the satellite's HA **area = unassigned** as blocking
+> *area-based* routing. S1a does **not** need it — the route is a fixed single-zone binding (the one Living
+> Room satellite → the one ceiling zone). Area assignment matters for **S2+** (multi-zone / room-aware),
+> not here.
+
 ## 4. Interaction flow (single zone)
 
 ```
@@ -57,9 +62,21 @@ interaction ends            → assist_satellite: → idle
    └─ trigger: back to idle → resolver RESTORE ceiling (restore snapshot; AU-01 §6 edge cases)
 ```
 
-- **One duck for the whole turn** (listen + think + speak), restored once at DONE — no per-phase churn
-  (simpler than AU-01's per-phase floors; S1a uses a single interaction floor).
+- **One duck for the whole turn** (listen + think + speak), restored once at DONE — no per-phase churn.
+  **Single floor by construction:** AU-01 splits `listen_floor`/`speak_floor` because there the SPEAK
+  phase overlays TTS *on the ceiling* (duck-under-TTS is a different acoustic goal than duck-for-mic). In
+  S1a the reply is on the **satellite's** speaker — the ceiling **never carries TTS** — so the only
+  requirement across the whole turn is "quiet enough that the in-room mic and the satellite speaker win."
+  That is one floor. (The divergence from AU-01 is therefore deliberate, not an oversight.)
 - If the ceiling is **not playing** at wake (`idle`/`paused`) → **IGNORE** (nothing to duck), per AU-01 §4.1.
+
+**Reconciliation with AU-01 §4 decision rules.** Two AU-01 rules both point at a satellite and disagree:
+rule 2 (I/O on a different device + no ceiling TTS → **IGNORE**, written for the acoustically-isolated
+phone) and rule 4 (in-room satellite needs a clean mic → **PAUSE**). S1a deliberately chooses a third
+action — **near-quiet DUCK** — refining both: rule 2's real predicate is *acoustic isolation*, which an
+**in-room** satellite breaks (so IGNORE is wrong here); and near-quiet duck is preferred over PAUSE because
+pause carries stop-wedge-adjacent risk and empty-queue/resume edge cases, while duck keeps the music going.
+**PAUSE is the explicit fallback** if validation (§10) shows even near-quiet residual music defeats Whisper.
 
 ## 5. Trigger mechanism
 
@@ -68,10 +85,16 @@ interaction ends            → assist_satellite: → idle
     ceiling zone.
   - `→ idle` (interaction end) → call resolver **restore**.
 - The automation calls the resolver via the existing `rest_command.resolver_command` path (a new
-  read/side-effect-light **`interaction` intent**, e.g. `{mode: duck|restore, zone: ceiling}`) so the
-  duck/restore stays **resolver-owned** (AU-01). No `volume_set` from the automation directly.
+  **thin/lightweight `interaction` intent** — note it is a **write**: it mutates ceiling volume — e.g.
+  `{mode: duck|restore, zone: ceiling}`) so the duck/restore stays **resolver-owned** (AU-01). No
+  `volume_set` from the automation directly.
 - Debounce: ignore transient flaps; a new interaction starting before restore **coalesces** to the
   original snapshot (AU-01 §6).
+- **Dead-man's-switch (HA-side gap, distinct from AU-01 §6):** if the satellite aborts / times out / drops
+  and **never emits the `→ idle` transition**, the duck fired but restore never will → ceiling stranded at
+  the floor. Require a **resolver-side max-duck timeout → auto-restore** (belt-and-suspenders: an HA
+  automation timeout too) so a lost turn self-heals. AU-01 §6 covers *resolver restart*; this covers
+  *"the restore trigger never arrives."*
 
 ## 6. Duck + restore semantics
 
@@ -83,8 +106,12 @@ resolver-restart safety (never leave the zone stuck at the floor).
 ## 7. Tunables (AU-01 §7, `config.json`)
 
 - `interaction_floor` (%) — single ceiling floor while interacting. **Default: low/near-quiet** so the
-  mic hears and the satellite reply is audible. The XVF3800's hardware AEC/beamforming may allow raising
-  this later (validate — §10).
+  in-room mic and the satellite reply win. Raising it later depends on the XVF3800's **beamforming +
+  noise suppression** (directional pickup / uncorrelated-noise rejection) — **not AEC**: the echo canceller
+  only cancels the *device's own* playback (it needs that as a reference), and the ceiling is a separate
+  device with no reference into the satellite, so AEC cannot reject ceiling music. That is precisely *why*
+  near-quiet is the correct conservative default (validate — §10). (AEC only becomes relevant in **S1b**,
+  where the satellite's own reply plays while it is still listening — that reply *is* its own reference.)
 - `fade_ms` — optional fade on duck-down/restore-up.
 - `interaction_ignore_when_idle` (bool) — ceiling not playing → ignore.
 
@@ -100,24 +127,29 @@ resolver-restart safety (never leave the zone stuck at the floor).
 
 | Piece | Track / item | Notes |
 |---|---|---|
-| Duck/restore mechanism (resolver) | **AU-03** (duck) + **AU-02** (restore) | Prerequisite for S1a's build; S1a calls it. |
+| Duck/restore mechanism (resolver) | **AU-02** (restore) → **AU-03** (duck) | Prerequisite for S1a's build; S1a calls it. Order per BACKLOG §5 (AU-03's dependency is AU-02). |
 | Resolver `interaction` intent (`duck`/`restore`, zone) | **S1a** build (resolver) | Thin wrapper over AU-02/03 for the ceiling zone. |
 | HA automation (satellite state → resolver interaction) | **S1a** build (HA-live) | The trigger. |
 | Satellite reply on ceiling (universal relay) | **S1b** | Follows S1a. |
 
-- **Build gate:** S1a's build is a **resolver change + HA automation** → claims the single live gate
-  (host-live/HA) **under approval**, after AU-02/AU-03. **This design claims no gate.**
+- **Serialized gate chain (the real scheduling constraint):** AU-02, AU-03, and S1a are **three separate
+  live-gate-claiming builds** (resolver / HA). The live gate (BACKLOG §10) admits **one at a time**, so they
+  run **AU-02 → AU-03 → S1a**, each claiming and releasing the single gate under approval — a stronger
+  constraint than "AU first." **This design claims no gate.**
+- **BACKLOG note (INF to reconcile, per §9 shared-file rule):** this doc **decomposes `S1`** into **S1a**
+  (duck/restore) + **S1b** (reply-on-ceiling relay); the board currently carries `S1`–`S4` as one row.
 - **Feeds:** proves the satellite→zone trigger that S1b (reply-on-ceiling) and S2–S4 (multi-zone) build on.
 
 ## 10. Open questions / validation (before build)
 
 - `TODO:` Confirm `assist_satellite` emits **reliable, ordered** state transitions (idle→listening→…→idle)
   usable as duck/restore triggers, and that a barge-in / re-trigger mid-turn coalesces cleanly.
-- `TODO:` Tune `interaction_floor` against the **XVF3800 AEC** — can the mic hear at a higher floor (less
-  disruptive duck), or is near-quiet needed?
-- `TODO:` Confirm AU-02/AU-03 exist (or sequence them first) before S1a's build.
-- `TODO:` Decide the satellite's conversation agent for the interaction (deterministic **Home Assistant**
-  vs **ChatGPT**) — affects S1b more than S1a, but note it now.
+- `TODO:` Tune `interaction_floor` against the XVF3800's **beamforming + noise suppression** (not AEC — see
+  §7): can the mic tolerate a higher floor (less disruptive duck), or is near-quiet required? If even
+  near-quiet residual music defeats Whisper STT, fall back to **PAUSE** (§4).
+- `TODO:` Sequence **AU-02 → AU-03** before S1a's build (serialized gate chain, §9).
+- *(Conversation agent is **not** an S1a question: S0 §4 fixes the satellite on "Living Room Voice" —
+  local HA + Piper — and a state-keyed duck is agent-independent. Deferred wholly to **S1b**.)*
 
 ---
 
