@@ -90,6 +90,12 @@ pause carries stop-wedge-adjacent risk and empty-queue/resume edge cases, while 
   `volume_set` from the automation directly.
 - Debounce: ignore transient flaps; a new interaction starting before restore **coalesces** to the
   original snapshot (AU-01 §6).
+- **Dead-man refresh (AU-02/AU-03 handshake).** The resolver arms a **dead-man timeout** (default 120 s,
+  `max_duck_timeout`) that auto-restores if the `→ idle` restore trigger never arrives. A single reply can
+  outrun that window, so S1a's automation should **re-fire `duck` on each intermediate transition**
+  (`listening → processing → responding`), not only on leaving idle. Re-ducks **coalesce** (keep the
+  original baseline) and **re-arm** the dead-man, keeping it alive for the whole turn. See the AU-02/AU-03
+  plan (`plans/2026-07-14-au-02-03-interaction-duck-restore-plan.md`, Round-2 invariants).
 - **Dead-man's-switch (HA-side gap, distinct from AU-01 §6):** if the satellite aborts / times out / drops
   and **never emits the `→ idle` transition**, the duck fired but restore never will → ceiling stranded at
   the floor. Require a **resolver-side max-duck timeout → auto-restore** (belt-and-suspenders: an HA
