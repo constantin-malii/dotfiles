@@ -20,7 +20,9 @@
 (`media_player.ceiling_speakers`): (a) a new satellite **pipeline** (LLM agent that prefers local commands +
 Piper TTS), (b) a **firmware redirect** so the reply audio leaves the satellite instead of playing locally,
 and (c) a **resolver ceiling-announce** that overlays the reply on the ceiling (auto-resume) during the S1a
-duck. Chosen mechanism: **hybrid C+A** (§4).
+duck. Chosen mechanism: **hybrid C+A** (§4). Sliced for delivery — **S1b-1** (resolver `say` + duck-ownership,
+no firmware) then **S1b-2** (pipeline + firmware); see §9. Duck ownership for reply turns is decided in the
+companion **ADR** `2026-07-15-s1b-duck-ownership-adr.md` (resolves review finding **B1**).
 
 **Out of scope:**
 - The duck/restore trigger itself → **S1a** (live). S1b plays the reply *inside* the window S1a already ducks.
@@ -39,6 +41,9 @@ duck. Chosen mechanism: **hybrid C+A** (§4).
   existing tool-calls. **Open Q&A** falls through to the **LLM** (ChatGPT / `conversation.openai_conversation`).
 - **The satellite says nothing on its own speaker** — every spoken reply comes out of the ceiling, overlaid
   on the (S1a-ducked) music and auto-resumed after.
+- **Explicit behavior change (not just TTS routing):** this **swaps the satellite's conversation agent** from
+  today's local `conversation.home_assistant` to the **LLM** — open Q&A now runs on the **live conversation
+  surface**. Keep `assistant-capabilities.md` / the prompt in lockstep (NL-01/NL-02); this is exposure-adjacent.
 
 ## 3. Constraints that shape it
 
@@ -74,9 +79,11 @@ takes the best of each:
   auto-played on `external_media_player`** (no double-speak) and `on_tts_end` **hands the URI to the resolver**
   (HA event or `homeassistant.service` → resolver `say`). Local wake/feedback sounds stay on-device. Requires
   an ESPHome YAML edit + **OTA reflash** (reversible by reflashing the current YAML).
-- **A (playback, resolver):** a new resolver intent **`say`** (or an extension of `interaction`) takes the
-  **URI** and plays it on the ceiling via **MA announce** (overlay + auto-resume). Because the URI is
-  already-synthesized Piper audio, the resolver **replays it — no re-synthesis**. Resolver stays sole TTS owner.
+- **A (playback, resolver):** a new resolver intent **`say`** takes the **URI** and plays it on the ceiling.
+  This is a **new playback primitive** — `media_player.play_media(announce=true)` with the URI (an overlay
+  that auto-reverts), **not** the AU `tts.speak` path (which *synthesizes*): it shares the duck-composition
+  concept, not the code. Because the URI is already-synthesized Piper audio, the resolver **replays it — no
+  re-synthesis**. Resolver stays sole TTS owner, and **owns the duck lifetime for reply turns** (ADR — §5, §7).
 
 ## 5. Components
 
@@ -84,8 +91,8 @@ takes the best of each:
 |---|---|---|---|
 | 1 | **New satellite pipeline** "Living Room ChatGPT" | HA | Whisper STT + `conversation.openai_conversation` (**prefer handling commands locally** ON) + **Piper TTS**. Assigned to the reSpeaker. |
 | 2 | **Firmware redirect** | device (ESPHome) | Suppress local TTS playback; `on_tts_end` → hand URI to the resolver. OTA reflash. |
-| 3 | **Resolver `say` (URI → ceiling announce)** | resolver | New capability: play a given audio URI on `media_player.ceiling_speakers` via MA announce (overlay + resume). Silent contract otherwise. Reuses AU announce path. |
-| 4 | **S1a duck reconciliation** | HA/resolver | Reply overlays during the ducked window; restore on `idle` unchanged. Ensure announce overlays at normal level over the ducked floor and completes before restore. |
+| 3 | **Resolver `say` (URI → ceiling)** | resolver | New capability: `media_player.play_media(announce=true)` of a given audio URI on `media_player.ceiling_speakers` (overlay + auto-revert). **New primitive, not `tts.speak`.** Silent contract otherwise. |
+| 4 | **Duck ownership (reply turns)** | resolver | Per **ADR `2026-07-15-s1b-duck-ownership-adr.md` (Option H)**: `say` holds the duck when the announce starts and issues **restore on playback-end** (await MA completion, else duration-hold — never ceiling state-watch). **S1a's `idle→restore` is removed for this satellite**, repurposed to arm a ~2–3 s grace fallback; 120 s dead-man unchanged as backstop; barge-in → new `say` interrupts, restore after the latest reply. |
 
 ## 6. Command vs Q&A on the ceiling (decision)
 
@@ -100,9 +107,13 @@ noisy. Open Q&A always speaks.
 - **Ceiling announce fails** (URI unreachable / MA error) → reply is **dropped + logged**; do **not** fall back
   to the satellite speaker (that needs un-suppressing local playback → reintroduces double-speak). The command's
   action still happened; a lost *spoken* answer is the accepted failure.
-- **URI never arrives** (firmware/pipeline issue) → nothing plays; the S1a dead-man still restores the music.
-- **Reply longer than the S1a dead-man (120 s):** the S1a re-fire keeps the duck alive; the announce itself is
-  bounded by the reply length. Validate long-answer behaviour (§10).
+- **URI never arrives** (firmware/pipeline issue) → no `say` becomes active → the repurposed `idle` **grace G
+  (~2–3 s)** restores the music (no long quiet gap); 120 s dead-man is the ultimate backstop (ADR).
+- **Reply longer than the dead-man (120 s):** `say` holds the duck for the reply and issues restore on
+  playback-end; the dead-man is only the failure backstop. Validate long-answer behaviour (§10).
+- **Dropped Q&A reply UX:** a command's silent drop is fine (the action happened), but a dropped *open-Q&A*
+  answer is total silence with no signal. Consider a **local error chirp / LED** on the satellite (feedback
+  stays local per §4) so a lost answer is at least perceptible. (Tunable; decide at plan time.)
 
 ## 8. What S1b does NOT do
 
@@ -121,9 +132,16 @@ noisy. Open Q&A always speaks.
 | Firmware redirect (`on_tts_end` + suppress local) | **S1b** (device/firmware) | ESPHome edit + OTA reflash. |
 | Resolver `say` (URI → ceiling announce) | **S1b** (resolver) | New capability + deploy (single live gate). |
 
-- **Build order:** resolver `say` (behind the gate, deployable + testable via `/command` with a test URI) →
-  new pipeline (HA) → firmware redirect (device) → end-to-end. Each live step is **approval-gated**; S1b touches
-  **HA + firmware + resolver** — the highest-surface S-item so far.
+- **Slices / build order (review recommendation):**
+  - **S1b-1** = resolver `say` (URI → ceiling) **+ the ADR duck-ownership mechanism** (reply-active hold,
+    restore-on-playback-end, `idle`→grace-G, dead-man) **+ Spike 2**. Fully testable over `/command` with a
+    **test URI — no firmware.** This proves the entire duck/announce/restore choreography (all of **B1**)
+    behind one resolver gate.
+  - **S1b-2** = new pipeline (OpenAI prefer-local + Piper) + firmware redirect (`on_tts_end` → `say`, suppress
+    local) **+ Spike 1** — only once S1b-1 is green (firmware/brick-risk last).
+  - Each live step is **approval-gated**; S1b touches **HA + firmware + resolver** — the highest-surface S-item.
+- **S1b modifies S1a's live automation** (drops `idle→restore` for this satellite, repurposes `idle` to arm
+  grace G — per ADR). A **behavior change to a live automation**, not additive; call it out in the plan.
 - **NL overlap:** the "LLM prefers local commands" behaviour overlaps **NL-01** (thin routing over deterministic
   caps) and **NL-02** (prompt/`assistant-capabilities.md` lockstep). Keep the capability set + prompt in lockstep
   when the satellite gains open Q&A.
@@ -133,12 +151,20 @@ noisy. Open Q&A always speaks.
 - `TODO:` **Spike 1 (go/no-go):** in the reSpeaker firmware, can local TTS playback be **suppressed** while
   `on_tts_end` still delivers the URI (keeping wake/feedback sounds local)? If clean suppression proves
   impractical, fall back to **muting the satellite `media_player` during `responding`** (racy) or reconsider B.
-- `TODO:` **Spike 2:** the resolver **announce of the URI** overlays + auto-resumes on the ceiling MA player
-  (does not replace the stream), and composes with the S1a duck (reply audible over the floor; restore only
-  after the announce completes).
+- `TODO:` **Spike 2 (S1b-1 — three concrete things, per ADR):** (1) does MA `play_media(announce=true)` give a
+  **completion signal**, or must we use **duration-hold** (`clip_len + margin`)? (2) MA's auto-revert targets
+  the **live floor** volume (0.15), **not a stale capture**; (3) the resolver-issued restore lands cleanly
+  **after** MA's revert (duck → announce boost/revert → restore, sequential). **Plus:** the reply URI is
+  **fetchable by MA and outlives the fetch** (internal-URL/LAN + TTS-cache-TTL, per S0 §5).
+- `TODO:` **Barge-in default:** a re-trigger during a ceiling reply → new `say` **interrupts/replaces** the
+  in-flight announce; restore after the latest reply (confirm MA replace semantics).
+- `TODO:` **Reflash precondition (S1b-2):** capture the reSpeaker's **current running ESPHome YAML** before any
+  edit — the "reversible by reflashing current YAML" rollback depends on having it in hand.
 - `TODO:` **ChatGPT prefer-local**: verify device/media commands stay **deterministic** (not LLM-paraphrased or
   dropped) and the exposed tools still fire — the NL-01/NL-02 concern; keep `assistant-capabilities.md` in lockstep.
-- `TODO:` **Latency / cost:** LLM round-trip + URI relay hop acceptable for spoken replies; per-query LLM cost.
+- `TODO:` **Latency budget + cost:** the reply path is long (STT → OpenAI → Piper → URI → firmware → resolver
+  → MA). Set a **time-to-first-audio target (≤2–3 s)** and a stance if exceeded (accept / local "working…"
+  chirp); track per-query LLM cost. Q&A can *feel* broken even when correct if this is unbudgeted.
 - `TODO:` **Wake-slot choice:** primary wake → this pipeline, or the 2nd on-device wake-word slot (S0 dual-slot
   note) so the local-only pipeline stays available. Decide at plan time.
 
