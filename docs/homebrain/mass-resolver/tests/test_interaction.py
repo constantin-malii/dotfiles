@@ -212,9 +212,41 @@ class SayTest(unittest.TestCase):
         ha._state = playing(0.15)
         run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
         first = FakeTimer.created[-1]
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in
+        r2 = run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in
         self.assertTrue(first.cancelled)                        # old reply timer cancelled
         self.assertAlmostEqual(self.cap._snaps[self.zone]["volume"], 0.40)   # baseline preserved
+        self.assertTrue(r2["metadata"]["held"])
+        self.assertNotEqual(FakeTimer.created[-1], first)        # a NEW reply timer was armed
+        self.assertTrue(FakeTimer.created[-1].started)
+        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])   # still active
+
+    def test_say_bad_hold_ms_does_not_strand(self):                # F1: bad hold_ms must not permanently strand
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, dead-man armed
+        ha._state = playing(0.15); ha.calls = []; FakeTimer.created = []
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": "8s"})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["held"])
+        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])
+        self.assertEqual(len(FakeTimer.created), 1)                 # reply timer armed at the default hold
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 9.5)   # 8000 default + 1500 margin -> 9.5s
+        self.assertIn(self.zone, self.cap._snaps)                    # snapshot still present, not stranded
+        ha.calls = []
+        FakeTimer.created[0].fire()                                  # reply completes
+        self.assertNotIn(self.zone, self.cap._snaps)                 # cleared, not stranded
+        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_writes), 1)
+        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # baseline restored
+
+    def test_say_play_media_failure_leaves_deadman(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, dead-man armed
+        deadman = FakeTimer.created[0]
+        ctx.ha = FakeHA(playing(0.15), write_boom=IOError("boom"))
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
+        self.assertFalse(r["ok"])
+        self.assertFalse(self.cap._snaps[self.zone].get("reply_active"))
+        self.assertFalse(deadman.cancelled)                          # dead-man still armed
 
 
 class RestoreTest(unittest.TestCase):

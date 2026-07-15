@@ -147,6 +147,16 @@ class InteractionCapability(capability.Capability):
 
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
+        margin = int(getattr(ctx.settings, "say_margin_ms", 1500))
+        default_hold = int(getattr(ctx.settings, "say_hold_default_ms", 8000))
+        hold_ms = resolved.get("hold_ms")
+        try:
+            hold = default_hold if hold_ms is None else int(hold_ms)
+        except (TypeError, ValueError):
+            LOG.warning("SAY req=%s zone=%s bad hold_ms=%r; falling back to default %sms",
+                        rid, zone, hold_ms, default_hold)
+            hold = default_hold
+        hold += margin
         with self._lock:
             ctx.ha.call_service_rest("media_player", "play_media",
                                      {"entity_id": zone, "media_content_id": uri,
@@ -156,12 +166,8 @@ class InteractionCapability(capability.Capability):
                 LOG.info("SAY req=%s zone=%s uri=%s (no active duck)", rid, zone, uri)
                 return cr.ok(self.name, rid, "Said.", spoken_text=None,
                              metadata={"said": True, "held": False, "zone": zone})
-            snap["reply_active"] = True                        # reply turn: hold the duck until playback ends
-            margin = int(getattr(ctx.settings, "say_margin_ms", 1500))
-            hold = resolved.get("hold_ms")
-            hold = (int(hold) if hold is not None
-                    else int(getattr(ctx.settings, "say_hold_default_ms", 8000))) + margin
-            self._arm_reply_timer(ctx, zone, hold / 1000.0)
+            self._arm_reply_timer(ctx, zone, hold / 1000.0)     # arm-then-flag: no window where reply_active is
+            snap["reply_active"] = True                         #   set without a timer backing it
             LOG.info("SAY req=%s zone=%s uri=%s hold=%sms", rid, zone, uri, hold)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "held": True, "zone": zone})
