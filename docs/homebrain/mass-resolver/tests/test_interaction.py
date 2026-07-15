@@ -2,7 +2,7 @@
 """AU-02/03 InteractionCapability unit tests. Run: python tests/test_interaction.py"""
 import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import capability, interaction
+import capability, interaction, core
 
 
 class FakeHA(object):
@@ -23,6 +23,13 @@ class FakeSettings(object):
     interaction_floor = 15
     max_duck_timeout = 45000
     interaction_ignore_when_idle = True
+    announce_failures = True
+
+
+class FakeSpeaker(object):
+    def __init__(self): self.said = []
+    def speak(self, text):
+        if text: self.said.append(text)
 
 
 class FakeCtx(object):
@@ -166,6 +173,23 @@ class DeadManTest(unittest.TestCase):
         self.assertEqual(len(ha.calls), 1)
         _, _, data = ha.calls[0]
         self.assertAlmostEqual(data["volume_level"], 0.40)         # restored to baseline
+
+
+class CoreWiringTest(unittest.TestCase):
+    def test_interaction_registered_in_caps_not_stubs(self):
+        self.assertIn("interaction", core.CAPS)
+        self.assertIsInstance(core.CAPS["interaction"], interaction.InteractionCapability)
+        self.assertNotIn("interaction", core._STUBS)
+
+    def test_dispatch_duck_is_silent(self):
+        ha = FakeHA(playing(0.40))
+        spk = FakeSpeaker()
+        ctx = core.Ctx(ma_factory=lambda: None, ha=ha, settings=FakeSettings(),
+                       radio_cfg={}, news_cfg={}, speaker=spk)
+        r = core.dispatch(ctx, "interaction", {"mode": "duck"})
+        self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "interaction")
+        self.assertTrue(r["metadata"]["ducked"])
+        self.assertEqual(spk.said, [])                              # silent: no TTS
 
 
 if __name__ == "__main__":

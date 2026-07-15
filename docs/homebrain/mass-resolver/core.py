@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 # Dispatch registry + CommandResult routing. Python 3.5 safe.
 import logging, uuid
-import music, radio, status, news, capability, command_result as cr
+import music, radio, status, news, interaction, capability, command_result as cr
 
 LOG = logging.getLogger("resolver")
 
-# Capability registry (stateless singletons; re-instantiated per capability call via capability.run)
+# Capability registry (singletons; dispatch reuses one instance per intent — InteractionCapability keeps state)
 CAPS = {
     "music": music.MusicCapability(),
     "radio": radio.RadioCapability(),
     "status": status.StatusCapability(),
     "news": news.NewsCapability(),
+    "interaction": interaction.InteractionCapability(),
 }
 
 # Stub intents: name -> human-friendly label for "not available yet" message
