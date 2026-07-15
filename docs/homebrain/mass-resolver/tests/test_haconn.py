@@ -65,5 +65,18 @@ class HaConnTest(unittest.TestCase):
             h.announce("hello", s)
 
 
+class SendLockTest(unittest.TestCase):
+    def test_call_service_holds_lock_during_send(self):
+        ha = haconn.HA("h", 1, "tok")
+        held = {"during_send": None}
+        class FakeSock(object):
+            def sendall(self, b):
+                held["during_send"] = ha._send_lock.locked()
+        ha.s = FakeSock()
+        ha.call_service("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        self.assertTrue(held["during_send"])          # lock held while sending
+        self.assertFalse(ha._send_lock.locked())      # released after
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

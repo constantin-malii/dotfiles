@@ -3,6 +3,7 @@
 import logging
 import http.client
 import json
+import threading
 import wsutil
 
 LOG = logging.getLogger("resolver")
@@ -12,6 +13,7 @@ class HA(object):
     def __init__(self, host, port, token):
         self.host = host; self.port = port; self.token = token
         self.s = None; self.box = None; self.cmd_id = 100
+        self._send_lock = threading.Lock()
 
     def connect(self):
         self.s, self.box = wsutil.ws_connect(self.host, self.port, "/api/websocket"); self.s.settimeout(None)
@@ -30,9 +32,10 @@ class HA(object):
         return wsutil.ws_read(self.s, self.box)
 
     def call_service(self, domain, service, data):
-        self.cmd_id += 1
-        wsutil.ws_send(self.s, {"id": self.cmd_id, "type": "call_service",
-                                "domain": domain, "service": service, "service_data": data})
+        with self._send_lock:
+            self.cmd_id += 1
+            wsutil.ws_send(self.s, {"id": self.cmd_id, "type": "call_service",
+                                    "domain": domain, "service": service, "service_data": data})
 
     def get_entity_state(self, entity_id):
         """Read-only HA REST GET /api/states/<entity_id>.
