@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """AU-02/03 InteractionCapability unit tests. Run: python tests/test_interaction.py"""
-import os, sys, unittest
+import os, sys, threading, time, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import capability, interaction, core
 
@@ -230,6 +230,138 @@ class Round2FindingsTest(unittest.TestCase):
         ctx = FakeCtx(ha)
         run(cap, ctx, {"mode": "duck"})
         self.assertTrue(held["locked"])
+
+
+class Round3FindingsTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_c1_failed_first_duck_write_still_snapshots_and_arms(self):
+        zone = "media_player.ceiling_speakers"
+        ha = FakeHA(playing(0.40), write_boom=IOError("nope"))
+        ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "duck"})
+        self.assertFalse(r["ok"])
+        self.assertIn(zone, self.cap._snaps)                        # snapshot survives the failed write
+        self.assertTrue(FakeTimer.created[0].started)
+        self.assertFalse(FakeTimer.created[0].cancelled)
+        # dead-man later reconciles: swap in a working HA and fire the armed timer.
+        ctx.ha = FakeHA(playing(0.40))
+        FakeTimer.created[0].fire()
+        self.assertNotIn(zone, self.cap._snaps)                     # cleaned up, no permanent strand
+
+    def test_c2_re_duck_syncs_target_avoids_false_override(self):
+        zone = "media_player.ceiling_speakers"
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # baseline 0.40, target 0.15
+        ha._state = playing(0.05)                                   # user dropped further
+        r2 = run(self.cap, ctx, {"mode": "duck"})                   # re-duck: writes 0.05
+        self.assertTrue(r2["metadata"]["ducked"])
+        self.assertAlmostEqual(self.cap._snaps[zone]["target"], 0.05)
+        ha._state = playing(0.05)                                   # device now at our last-written value
+        ha.calls = []
+        r3 = run(self.cap, ctx, {"mode": "restore"})
+        self.assertTrue(r3["metadata"]["restored"])                 # not a false user_override
+        self.assertEqual(len(ha.calls), 1)
+        _, _, data = ha.calls[0]
+        self.assertAlmostEqual(data["volume_level"], 0.40)          # reaches the real baseline
+
+    def test_f3_rearm_loop_survives_repeated_auto_restore_failure(self):
+        zone = "media_player.ceiling_speakers"
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, target 0.15
+        ha._state = playing(0.15)                                   # still at floor, not a user override
+        ha.calls = []
+        first_timer = FakeTimer.created[0]
+        real_write = ha.call_service_rest
+        calls = {"n": 0}
+        def flaky_write(domain, service, data):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise IOError("first restore write fails")
+            return real_write(domain, service, data)
+        ha.call_service_rest = flaky_write
+        first_timer.fire()                                          # _auto_restore -> _restore raises -> re-arm
+        self.assertEqual(len(FakeTimer.created), 2)                 # a NEW timer was armed
+        self.assertIn(zone, self.cap._snaps)                        # snapshot still present
+        second_timer = FakeTimer.created[1]
+        self.assertFalse(second_timer.cancelled)
+        second_timer.fire()                                         # second fire succeeds
+        self.assertNotIn(zone, self.cap._snaps)                     # cleaned up
+        self.assertEqual(len(ha.calls), 1)                          # only the successful write recorded
+
+    def test_f5_restore_logs_and_recovers_from_read_failure(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
+        ctx.ha = FakeHA(boom=IOError("read broke"))                 # get_entity_state raises; write still ok
+        with self.assertLogs("resolver", level="WARNING") as cm:
+            r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["metadata"]["restored"])                  # fail-safe: still restores baseline
+        self.assertAlmostEqual(r["metadata"]["to"], 0.40)
+        self.assertTrue(any("read failed" in m for m in cm.output))  # logged, not silent
+
+    def test_user_override_cancels_timer_and_pops_snapshot(self):
+        zone = "media_player.ceiling_speakers"
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # target 0.15
+        ha._state = playing(0.55)                                   # user bumped it away from our target
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertFalse(r["metadata"]["restored"])
+        self.assertEqual(r["metadata"]["reason"], "user_override")
+        self.assertEqual(ha.calls, [])                               # never clobbers the user's value
+        self.assertTrue(FakeTimer.created[0].cancelled)              # dead-man cancelled
+        self.assertNotIn(zone, self.cap._snaps)                      # snapshot popped, no permanent strand
+
+
+class RealThreadingTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+
+    def test_lock_provides_true_mutual_exclusion_across_threads(self):
+        started = threading.Event()
+        release = threading.Event()
+        b_done = threading.Event()
+
+        class BlockingHA(object):
+            def __init__(self):
+                self.calls = []
+                self._n = 0
+            def get_entity_state(self, entity_id):
+                return playing(0.40)
+            def call_service_rest(self, domain, service, data):
+                self._n += 1
+                if self._n == 1:                                    # first writer (thread A) blocks here
+                    started.set()
+                    release.wait(5)
+                self.calls.append((domain, service, data))
+
+        ha = BlockingHA()
+        ctx = FakeCtx(ha)
+
+        def thread_a():
+            run(self.cap, ctx, {"mode": "duck"})
+
+        def thread_b():
+            run(self.cap, ctx, {"mode": "duck"})
+            b_done.set()
+
+        ta = threading.Thread(target=thread_a)
+        ta.start()
+        self.assertTrue(started.wait(5), "thread A never reached the blocking write")
+        tb = threading.Thread(target=thread_b)
+        tb.start()
+        time.sleep(0.1)                                              # give B a chance to try to acquire _lock
+        self.assertFalse(b_done.is_set(), "thread B completed while A still held the lock")
+        release.set()                                                # let A finish, then B can proceed
+        ta.join(5)
+        tb.join(5)
+        self.assertFalse(ta.is_alive(), "thread A join timed out")
+        self.assertFalse(tb.is_alive(), "thread B join timed out")
+        self.assertTrue(b_done.is_set(), "thread B never completed after A released the lock")
+        self.assertEqual(len(ha.calls), 2)
 
 
 class CoreWiringTest(unittest.TestCase):
