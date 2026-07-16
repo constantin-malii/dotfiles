@@ -395,7 +395,10 @@ it claims the single live gate (BACKLOG §10) and follows `runbooks/resolver-dep
    - `POST /command interaction {mode: duck}` → ceiling to floor (0.15).
    - `POST /command interaction {mode: say, uri: <a reachable test audio URL>, hold_ms: <clip length>}` →
      confirm: (a) the clip **overlays** (music keeps playing, doesn't stop) and MA **auto-reverts to the live
-     floor 0.15**, not a stale value; (b) whether MA gives a **completion signal** or we must rely on the
+     floor 0.15 BEFORE the reply timer's restore reads the volume** (H2: if the announce boost hasn't reverted
+     when `_restore` reads `cur`, the last-writer-wins check misreads the boost as a user override and keeps it
+     — verify the revert lands within the hold, i.e. before `hold+margin`); (b) whether MA gives a **completion
+     signal** or we must rely on the
      duration-hold (this plan assumes duration-hold — the robust default); (c) the **test URI is fetchable by
      MA** and long-lived (internal-URL/LAN + TTS-cache-TTL, S0 §5). Use a **host-hosted** URL first to isolate
      the announce mechanics from the TTS-cache question, then an HA `/api/tts_proxy/...` URL.
@@ -443,3 +446,19 @@ added that fail against the pre-fix code):
   **safety net, not the intended path** — a wrong default un-ducks mid-reply (early) or holds too long (late).
 - **Spike 2 must confirm** the `say_hold_default_ms` default is adequate for a typical reply, and that S1b-2's
   derived `hold_ms` matches actual playback length within `say_margin_ms`.
+
+**N2 — reply-hold clamped (commit `ce75556`).** `_say` now clamps the hold to `[0, max_duck_timeout]`: a
+negative `hold_ms` → default (a negative interval would fire the reply timer immediately → instant un-duck);
+`hold + margin` capped at `max_duck_timeout` (a runaway value must not outlive the dead-man it replaces).
+Protects the S1b-2 clip-length-derivation path (0 / negative / runaway).
+
+**Open, tracked (intentionally NOT in S1b-1):**
+- **H2 — announce-boost vs restore-read timing.** If MA's announce boost has not reverted to the floor when
+  the reply timer's `_restore` reads `cur`, the last-writer-wins check misreads it as a user override and
+  keeps the boosted value instead of restoring the baseline. Mitigated by `say_margin_ms` (revert should land
+  within the hold); **the Spike-2 (a) check above is tightened to assert this ordering.** If Spike 2 shows the
+  revert can lag past the margin, S1b-2 must key restore off a completion signal rather than pure duration-hold.
+- **N1 — `_reply_complete` clear-then-relock race.** `_reply_complete` clears `reply_active` under `_lock`,
+  releases, then `_restore` re-acquires; a `say` racing into that window could re-set `reply_active` (its own
+  new reply timer would then own restore). Theoretical, benign under single-satellite serialized turns; track
+  for S1b-2 when real concurrent triggers exist.
