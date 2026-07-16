@@ -197,14 +197,22 @@ mechanism assumption**. Measured on the live ceiling (MA Universal → Squeezeli
   announce call spans the whole reply). S1a's duck remains only for the *listening* phase.
 - **UX:** pause→reply→resume is acceptable (arguably clearer) for a conversational answer.
 
-### Open decision — radio policy (needed before the new plan)
-`play_announcement` stops radio with no resume. Options:
-- **(a) Local-music-only reply-on-ceiling (recommended):** route the reply to the ceiling only when it's playing
-  **resumable local music**; for **radio**/idle, keep the reply on the **satellite's own speaker** (S1a
-  behaviour). Simplest; avoids the wedge; no "resume radio" logic.
-- **(b) Resolver re-issues the station** after the reply (must capture + replay "what was playing"). More
-  capability + failure surface.
-- **(c) Accept radio stops** on a reply — poor UX; not recommended.
+### Radio policy — DECIDED 2026-07-15: (b) resolver re-plays the station
+Reply always goes to the ceiling; after it, the resolver re-issues the station that was playing. (Considered,
+not chosen: (a) local-music-only — reply on the satellite for radio; (c) accept radio stops.)
+
+**Replay mechanism (grounded by a read-only check 2026-07-15):** while playing radio, the ceiling exposes a
+**stable, re-playable MA id — `media_content_id = library://radio/2`** (type `music`, source "Music Assistant
+Queue"; `media_title` = the current track, **not** the identifier). So `say` will:
+1. **Before** the announce, read the ceiling state; capture `media_content_id` (and whether it was `playing`).
+2. `music_assistant.play_announcement` (blocking).
+3. **After**, if the ceiling did **not** auto-resume (state ≠ `playing` — the radio case), **re-play the
+   captured `media_content_id`** via `music_assistant.play_media`. Local music auto-resumes → this is a no-op.
+   Reacting to the *actual* post-announce state handles radio vs local uniformly, without pre-classifying.
+
+**Spike-3 (validate before/with the new plan):** re-playing a captured `library://radio/…` id via `play_media`
+actually restarts the station; the announce-then-replay timing/UX is acceptable; and local music auto-resumes
+(no double-play). Same "prove the mechanism first" discipline Spike-2 enforced.
 
 ### Impact
 - **S1b-1 as built is superseded** — `say` must be reworked to `play_announcement` + the blocking model,
