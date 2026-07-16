@@ -452,12 +452,15 @@ negative `hold_ms` → default (a negative interval would fire the reply timer i
 `hold + margin` capped at `max_duck_timeout` (a runaway value must not outlive the dead-man it replaces).
 Protects the S1b-2 clip-length-derivation path (0 / negative / runaway).
 
+**H2 — reply-timer restore bypasses user-override (FIXED, commit `5a299f3`).** `_reply_complete` passes
+`ignore_user_override=True`, so a not-yet-reverted announce boost isn't misread as a user override — the
+baseline is restored, not "Kept". Scoped to the reply path only (the dead-man `force=True` and the external
+`idle→restore` still honor genuine user volume changes). **Accepted trade-off:** a user physically changing
+ceiling volume *during* a reply is reset to baseline (the lesser evil vs an H2 strand; reply windows are
+short). Defense-in-depth — it does **not** remove the Spike-2 (a) obligation to confirm the boost reverts
+within `say_margin_ms`.
+
 **Open, tracked (intentionally NOT in S1b-1):**
-- **H2 — announce-boost vs restore-read timing.** If MA's announce boost has not reverted to the floor when
-  the reply timer's `_restore` reads `cur`, the last-writer-wins check misreads it as a user override and
-  keeps the boosted value instead of restoring the baseline. Mitigated by `say_margin_ms` (revert should land
-  within the hold); **the Spike-2 (a) check above is tightened to assert this ordering.** If Spike 2 shows the
-  revert can lag past the margin, S1b-2 must key restore off a completion signal rather than pure duration-hold.
 - **N1 — `_reply_complete` clear-then-relock race.** `_reply_complete` clears `reply_active` under `_lock`,
   releases, then `_restore` re-acquires; a `say` racing into that window could re-set `reply_active` (its own
   new reply timer would then own restore). Theoretical, benign under single-satellite serialized turns; track
