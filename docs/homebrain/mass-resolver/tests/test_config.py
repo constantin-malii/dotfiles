@@ -69,13 +69,11 @@ class InteractionTunablesTest(unittest.TestCase):
 class SayTunablesTest(unittest.TestCase):
     def test_defaults(self):
         s = config.Settings({})
-        self.assertEqual(s.say_hold_default_ms, 8000)
-        self.assertEqual(s.say_margin_ms, 1500)
+        self.assertEqual(s.say_announce_timeout_ms, 30000)
 
-    def test_overrides(self):
-        s = config.Settings({"say_hold_default_ms": 5000, "say_margin_ms": 500})
-        self.assertEqual(s.say_hold_default_ms, 5000)
-        self.assertEqual(s.say_margin_ms, 500)
+    def test_override(self):
+        s = config.Settings({"say_announce_timeout_ms": 20000})
+        self.assertEqual(s.say_announce_timeout_ms, 20000)
 
 
 if __name__ == "__main__":
