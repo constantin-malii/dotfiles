@@ -66,5 +66,17 @@ class InteractionTunablesTest(unittest.TestCase):
         self.assertFalse(s.interaction_ignore_when_idle)
 
 
+class SayTunablesTest(unittest.TestCase):
+    def test_defaults(self):
+        s = config.Settings({})
+        self.assertEqual(s.say_hold_default_ms, 8000)
+        self.assertEqual(s.say_margin_ms, 1500)
+
+    def test_overrides(self):
+        s = config.Settings({"say_hold_default_ms": 5000, "say_margin_ms": 500})
+        self.assertEqual(s.say_hold_default_ms, 5000)
+        self.assertEqual(s.say_margin_ms, 500)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

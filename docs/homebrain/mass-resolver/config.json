@@ -8,6 +8,8 @@
   "fade_ms": 0,
   "max_duck_timeout": 120000,
   "interaction_ignore_when_idle": true,
+  "say_hold_default_ms": 8000,
+  "say_margin_ms": 1500,
   "ha_url": "http://192.168.122.10:8123",
   "event_type": "mass_play_request",
   "sync_event_type": "mass_sync_request",
