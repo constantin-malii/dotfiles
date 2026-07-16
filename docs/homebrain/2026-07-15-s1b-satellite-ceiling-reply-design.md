@@ -168,6 +168,64 @@ noisy. Open Q&A always speaks.
 - `TODO:` **Wake-slot choice:** primary wake → this pipeline, or the 2nd on-device wake-word slot (S0 dual-slot
   note) so the local-only pipeline stays available. Decide at plan time.
 
+## 11. Spike 2 results + design revision (VALIDATED 2026-07-15) — supersedes §4 mechanism
+
+S1b-1 (resolver `say`) shipped, and its Spike-2 live validation over `/command` **disproved the core
+mechanism assumption**. Measured on the live ceiling (MA Universal → Squeezelite, radio playing):
+
+| Probe | Result |
+|---|---|
+| `media_player.play_media(announce=true)` (a URI) | **synchronous ~14 s block**, **stops the stream**, **clip inaudible**, then resumes → wrong primitive |
+| `music_assistant.play_announcement` (a URI) | **synchronous ~7 s block**, **audible ✅**, but **pause → reply → resume** (music stops *before* the reply — NOT an overlay), and **radio cannot resume → drops to `idle`** |
+
+**Three §4 assumptions were wrong:**
+1. **Not an overlay** — the player **pauses**, plays the reply, resumes. (AU-01's duck-under-TTS overlay was
+   the resolver's `tts.speak` path, not URL playback.)
+2. **Synchronous + slow (7–14 s)** — the call **blocks** until the reply finishes. This breaks the
+   "`say` returns fast, a reply timer restores later" model — and with it, most of S1b-1's machinery
+   (`reply_active`, duration-hold reply timer, deferred `idle→restore`, H2 `ignore_user_override`, N1 gen-id)
+   exists to solve problems a **blocking, self-pausing, self-resuming** call does not have.
+3. **Radio wedges** — a live stream can't resume after an announcement (RQ-01/RQ-02).
+
+### Revised mechanism (replaces the §4 hybrid C+A reply-timer model)
+- **Primitive:** `music_assistant.play_announcement` (URI, audible) — **not** `media_player.play_media`.
+- **Model:** `say` = a **blocking** call (MA pauses → plays the reply → resumes); on return the reply is done
+  and resumable content is back. Needs a **long/adequate timeout** (≥ longest reply; today's `call_service_rest`
+  5 s is far too short) or a non-blocking variant with a completion signal.
+- **Simplification:** the reply timer / duration-hold / `reply_active` defer / H2 / N1 machinery is **no longer
+  needed** for the reply — **restore-on-return is exact**. The B1 duck-ownership problem largely dissolves (the
+  announce call spans the whole reply). S1a's duck remains only for the *listening* phase.
+- **UX:** pause→reply→resume is acceptable (arguably clearer) for a conversational answer.
+
+### Radio policy — DECIDED 2026-07-15: (b) resolver re-plays the station
+Reply always goes to the ceiling; after it, the resolver re-issues the station that was playing. (Considered,
+not chosen: (a) local-music-only — reply on the satellite for radio; (c) accept radio stops.)
+
+**Replay mechanism (grounded by a read-only check 2026-07-15):** while playing radio, the ceiling exposes a
+**stable, re-playable MA id — `media_content_id = library://radio/2`** (type `music`, source "Music Assistant
+Queue"; `media_title` = the current track, **not** the identifier). So `say` will:
+1. **Before** the announce, read the ceiling state; capture `media_content_id` (and whether it was `playing`).
+2. `music_assistant.play_announcement` (blocking).
+3. **After**, if the ceiling did **not** auto-resume (state ≠ `playing` — the radio case), **re-play the
+   captured `media_content_id`** via `music_assistant.play_media`. Local music auto-resumes → this is a no-op.
+   Reacting to the *actual* post-announce state handles radio vs local uniformly, without pre-classifying.
+
+**Spike-3 — VALIDATED 2026-07-15 (live):** capture→announce→replay confirmed on radio — captured
+`library://radio/2` → `music_assistant.play_announcement` (audible, blocked **8.2 s**) → ceiling `idle` (radio
+didn't auto-resume) → `music_assistant.play_media {media_id: library://radio/2}` → **radio restarted**
+(`playing library://radio/2`). So (b) is proven. **Not yet** explicitly tested: local-music **auto-resume**
+(the easy case — `play_announcement` resumes resumable content, so the post-announce state is `playing` and the
+replay step is skipped) — confirm in the S1b-1′ validation. The **reply-on-ceiling mechanism is now fully
+grounded**: audible reply + radio survives via capture/replay + blocking restore-on-return.
+
+### Impact
+- **S1b-1 as built is superseded** — `say` must be reworked to `play_announcement` + the blocking model,
+  dropping the now-unneeded timer machinery. The deployed code is dormant/harmless meanwhile (nothing invokes it).
+- The duck-ownership ADR (`2026-07-15-s1b-duck-ownership-adr.md`) is largely mooted by the blocking model (see
+  its superseded note).
+- **Next:** decide the radio policy → a new, much simpler **S1b-1′ plan** (`say` → `play_announcement`, long
+  timeout, restore-on-return, radio-policy branch), re-validated by a fresh Spike before S1b-2.
+
 ---
 
 > **Rollback for this document:** `git revert` on `homebrain/s1b-satellite-ceiling-reply`, or delete this file.
