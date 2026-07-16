@@ -16,6 +16,13 @@ duck/restore (AU-02/03) is unchanged and composes cleanly — during a reply the
 `idle→restore` un-duck is inaudible (this is why B1 dissolves). Net: the duck/restore reverts to its AU-02/03
 form and `say` is a small standalone capability.
 
+**Mechanism — VALIDATED by Spike-2/3 (2026-07-15; design §11 / merged PR #23):** `music_assistant.play_announcement`
+is **audible**, **synchronous/blocking ~7–14 s** (measured), and **pauses → plays → resumes** (not an overlay);
+radio does not auto-resume, so the captured `media_content_id` (e.g. `library://radio/2`) is re-played after —
+proven live end-to-end (heard by ear + state-verified). `media_player.play_media(announce=true)` was **rejected**
+(stops the stream, inaudible, ~14 s). This plan builds only on that validated behavior; the one case still to
+confirm at deploy is **local-music auto-resume** (low risk — resumable content resumes on its own).
+
 **Tech Stack:** Python 3.5 (host 3.5.2), stdlib `unittest`, resolver modules under `docs/homebrain/mass-resolver/`.
 
 ## Global Constraints
@@ -112,7 +119,7 @@ git commit -m "config(resolver): say_announce_timeout_ms"
 
 ---
 
-### Task 3: Rework `_say` → capture + play_announcement + replay
+### Task 3: Replace the say model — `_say` via `play_announcement` + strip superseded machinery (ONE atomic task)
 
 **Files:** `interaction.py`, `tests/test_interaction.py`.
 
@@ -186,36 +193,102 @@ class SayAnnounceTest(unittest.TestCase):
 ```
   Also drop `hold_ms` from `resolve` (return `{"mode","zone","uri"}`); keep the `say` requires-`uri` check in `validate`.
 
-- [ ] **Step 4: Run, verify pass.**
-- [ ] **Step 5: Commit** — `git commit -m "feat(resolver): say via play_announcement + capture/replay (Spike-2/3 model)"`
+- [ ] **Step 4: Run the NEW tests** — `python tests/test_interaction.py` shows `SayAnnounceTest` green.
+  (The old reply-timer say tests now fail against the new `_say` — expected. **Steps 3–9 are ONE atomic
+  model-swap with a single green checkpoint at Step 8**; do not commit or gate a review between them. This is
+  why the machinery strip + test swap live in the same task — a split would leave the suite red at the boundary.)
+
+- [ ] **Step 5: Strip the superseded machinery — REMOVE-ONLY (do NOT check out an old snapshot).**
+  Reverting via `git show d466475` (or any pre-Round-3 snapshot) would **silently drop the Round-3 hardening**
+  — F3 (`_auto_restore`'s guarded re-arm) and F5 (`_restore`'s read-failure log). Instead delete only the
+  S1b-1 additions from the **current** file; keep everything else:
+  - `__init__`: delete `self._gen = 0`; revert the `_snaps` comment to
+    `# zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}`.
+  - Delete methods `_arm_reply_timer` and `_reply_complete` (their only caller left `_say` in Step 3).
+  - `_arm_timer` — drop the `secs` param and gen stamping; final form:
+```python
+    def _arm_timer(self, ctx, zone):
+        snap = self._snaps.get(zone)
+        if snap is None:
+            return
+        self._cancel_timer(snap)
+        secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0
+        t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
+        snap["timer"] = t
+        t.start()
+```
+  - `_auto_restore` — drop the `gen` param + gen-guard and `force=True`; **KEEP the inner try/except re-arm (F3)**:
+```python
+    def _auto_restore(self, ctx, zone):
+        LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
+        try:
+            self._restore(ctx, zone, "deadman")
+        except Exception as e:
+            LOG.error("auto-restore failed zone=%s: %r; re-arming", zone, e)
+            try:
+                with self._lock:                       # KEEP: F3 guarded re-arm
+                    if zone in self._snaps:
+                        self._arm_timer(ctx, zone)
+            except Exception as e2:
+                LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
+```
+  - `_restore` — signature `(self, ctx, zone, rid)`; delete the `reply_active` deferral; drop
+    `not ignore_user_override` from the guard; **KEEP the read try/except WARNING (F5)** and write-before-discard body:
+```python
+    def _restore(self, ctx, zone, rid):
+        with self._lock:
+            snap = self._snaps.get(zone)                              # peek; discard only after write
+            if snap is None:
+                return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                             metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
+            try:
+                state = ctx.ha.get_entity_state(zone) or {}
+                cur = (state.get("attributes") or {}).get("volume_level")
+            except Exception as e:
+                LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)  # KEEP: F5
+                cur = None
+            applied = snap.get("target")
+            if cur is not None and applied is not None and abs(cur - applied) > 0.01:
+                self._cancel_timer(snap); self._snaps.pop(zone, None)
+                LOG.info("RESTORE req=%s zone=%s user_override cur=%s (kept)", rid, zone, cur)
+                return cr.ok(self.name, rid, "Kept.", spoken_text=None,
+                             metadata={"restored": False, "reason": "user_override", "zone": zone})
+            target = snap.get("volume")
+            if target is None:
+                self._cancel_timer(snap); self._snaps.pop(zone, None)
+                return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
+                             metadata={"restored": False, "reason": "no_baseline", "zone": zone})
+            ctx.ha.call_service_rest("media_player", "volume_set",
+                                     {"entity_id": zone, "volume_level": target})
+            self._cancel_timer(snap); self._snaps.pop(zone, None)
+            LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
+            return cr.ok(self.name, rid, "Restored.", spoken_text=None,
+                         metadata={"restored": True, "to": target, "zone": zone})
+```
+
+- [ ] **Step 6: Swap the tests** — remove `SayTest`, `SayHoldClampTest`, `Round3FindingsTest`, and the
+  `Round2FindingsTest` reply-timer cases; **keep** the AU-02/03 duck/restore/dead-man cases (`RestoreTest`,
+  `DeadManTest`, `Round2FindingsTest`'s duck cases), the `say` resolve/validate tests, and `SayAnnounceTest`.
+
+- [ ] **Step 7: Grep-gate** (cheap insurance — fails loudly if the revert was too aggressive or a remnant survived):
+```bash
+grep -nE "reply_active|ignore_user_override|_gen|_arm_reply_timer|_reply_complete|force=" interaction.py   # expect: no matches
+grep -c "read failed" interaction.py      # expect: 1   (F5 kept)
+grep -c "re-arm failed" interaction.py    # expect: 1   (F3 kept)
+```
+
+- [ ] **Step 8: Run** `python tests/test_interaction.py` → PASS (duck/restore/dead-man + say). **The single
+  green checkpoint for Steps 3–8.**
+
+- [ ] **Step 9: Commit** (one commit for the whole model-swap):
+```bash
+git add interaction.py tests/test_interaction.py
+git commit -m "feat(resolver): say via play_announcement; strip superseded reply-timer machinery; keep AU-02/03 Round-3 form"
+```
 
 ---
 
-### Task 4: Remove the superseded reply-timer machinery; revert duck/restore to AU-02/03
-
-**Files:** `interaction.py`, `tests/test_interaction.py`.
-
-The old fast-return model's machinery is now dead. `git show` the pre-S1b-1 (`d466475`-era) `interaction.py`
-as the reference for the AU-02/03 form of `_restore`/`_auto_restore`/`_arm_timer`.
-
-- [ ] **Step 1: Remove** methods `_arm_reply_timer` and `_reply_complete`; remove `self._gen` and the `"gen"`
-  stamping; remove the `reply_active` field from the `_snaps` schema comment.
-- [ ] **Step 2: Revert `_restore`** to the AU-02/03 form — drop the `force` and `ignore_user_override` params
-  and the `reply_active` guard (peek snapshot → user-override check vs `target` → write → cancel timer → pop).
-- [ ] **Step 3: Revert `_auto_restore`** — signature `(self, ctx, zone)`, plain `self._restore(ctx, zone, "deadman")`,
-  keep the except/re-arm.
-- [ ] **Step 4: Revert `_arm_timer`** — signature `(self, ctx, zone)`, no `secs` param, no `gen` stamping
-  (dead-man interval from `max_duck_timeout`).
-- [ ] **Step 5: Remove obsolete tests** — delete `SayTest` (old reply-timer), `SayHoldClampTest`,
-  `Round2FindingsTest`'s reply-timer cases, and the H2/N1/dead-man-override cases that tested the removed
-  machinery. **Keep** the AU-02/03 duck/restore/dead-man tests, the `say` resolve/validate tests, and the new
-  `SayAnnounceTest`.
-- [ ] **Step 6: Run** `python tests/test_interaction.py` — PASS (duck/restore/dead-man + say).
-- [ ] **Step 7: Commit** — `git commit -m "refactor(resolver): drop superseded say reply-timer machinery; revert duck/restore to AU-02/03"`
-
----
-
-### Task 5: Dispatch (silent) + full-suite regression
+### Task 4: Dispatch (silent) + full-suite regression
 
 - [ ] **Step 1:** ensure a `say` dispatch test asserts `core.dispatch(ctx, "interaction", {"mode":"say","uri":…})`
   returns `said:True` and is silent (`spk.said == []`). (Adapt the existing `SayDispatchTest`; `FakeSettings`
