@@ -14,8 +14,9 @@ class InteractionCapability(capability.Capability):
     def __init__(self, timer_factory=None, clock=None):
         self._timer_factory = timer_factory or threading.Timer
         self._clock = clock or time.time
-        self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
+        self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None, "gen": int, "reply_active"?: bool}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
+        self._gen = 0                                # monotonic timer generation; a fired callback acts only if still current (N1)
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -74,7 +75,8 @@ class InteractionCapability(capability.Capability):
         self._cancel_timer(snap)
         if secs is None:
             secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0
-        t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
+        self._gen += 1; snap["gen"] = self._gen                # supersede any already-fired-but-waiting callback (N1)
+        t = self._timer_factory(secs, self._auto_restore, [ctx, zone, self._gen])
         snap["timer"] = t
         t.start()
 
@@ -83,7 +85,8 @@ class InteractionCapability(capability.Capability):
         if snap is None:
             return
         self._cancel_timer(snap)                               # replace the dead-man with the reply timer
-        t = self._timer_factory(secs, self._reply_complete, [ctx, zone])
+        self._gen += 1; snap["gen"] = self._gen                # supersede any already-fired-but-waiting callback (N1)
+        t = self._timer_factory(secs, self._reply_complete, [ctx, zone, self._gen])
         snap["timer"] = t
         t.start()
 
@@ -95,7 +98,11 @@ class InteractionCapability(capability.Capability):
             except Exception:
                 pass
 
-    def _auto_restore(self, ctx, zone):
+    def _auto_restore(self, ctx, zone, gen):
+        with self._lock:
+            snap = self._snaps.get(zone)
+            if snap is None or snap.get("gen") != gen:         # a newer timer superseded this one -> bail (N1)
+                return
         LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
         try:
             self._restore(ctx, zone, "deadman", force=True)
@@ -184,12 +191,13 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "held": True, "zone": zone})
 
-    def _reply_complete(self, ctx, zone):
-        LOG.info("SAY reply complete: restoring zone=%s", zone)
+    def _reply_complete(self, ctx, zone, gen):
         with self._lock:
             snap = self._snaps.get(zone)
-            if snap is not None:
-                snap["reply_active"] = False                   # clear so _restore proceeds
+            if snap is None or snap.get("gen") != gen:         # a newer reply/duck superseded this timer -> bail (N1)
+                return
+            snap["reply_active"] = False                       # current owner -> clear so _restore proceeds
+        LOG.info("SAY reply complete: restoring zone=%s", zone)
         try:
             self._restore(ctx, zone, "reply", ignore_user_override=True)   # our own announce boost != a user change (H2)
         except Exception as e:

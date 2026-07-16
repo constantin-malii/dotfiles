@@ -494,6 +494,19 @@ class SayHoldClampTest(unittest.TestCase):
         self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # reaches the real baseline
         self.assertNotIn(self.zone, self.cap._snaps)                # cleared
 
+    def test_stale_reply_complete_does_not_clobber_bargein(self):
+        # N1: a superseded reply timer's callback must bail, not clobber the barge-in reply.
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})   # reply timer T1
+        stale = FakeTimer.created[-1]                               # T1
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in: T2 (T1 cancelled)
+        ha.calls = []
+        stale.fire()                                                # T1's _reply_complete fires despite cancel
+        self.assertIn(self.zone, self.cap._snaps)                   # barge-in reply's duck NOT clobbered
+        self.assertTrue(self.cap._snaps[self.zone].get("reply_active"))
+        self.assertEqual([c for c in ha.calls if c[1] == "volume_set"], [])   # no premature restore
+
 
 class RealThreadingTest(unittest.TestCase):
     def setUp(self):
