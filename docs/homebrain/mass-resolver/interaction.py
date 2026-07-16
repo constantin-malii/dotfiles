@@ -149,14 +149,23 @@ class InteractionCapability(capability.Capability):
         zone = resolved["zone"]; uri = resolved["uri"]
         margin = int(getattr(ctx.settings, "say_margin_ms", 1500))
         default_hold = int(getattr(ctx.settings, "say_hold_default_ms", 8000))
+        deadman_ms = int(getattr(ctx.settings, "max_duck_timeout", 120000))
         hold_ms = resolved.get("hold_ms")
         try:
             hold = default_hold if hold_ms is None else int(hold_ms)
         except (TypeError, ValueError):
-            LOG.warning("SAY req=%s zone=%s bad hold_ms=%r; falling back to default %sms",
+            LOG.warning("SAY req=%s zone=%s bad hold_ms=%r; using default %sms",
+                        rid, zone, hold_ms, default_hold)
+            hold = default_hold
+        if hold < 0:                                           # negative would fire the reply timer immediately
+            LOG.warning("SAY req=%s zone=%s negative hold_ms=%r; using default %sms",
                         rid, zone, hold_ms, default_hold)
             hold = default_hold
         hold += margin
+        if hold > deadman_ms:                                  # never arm a reply timer past the dead-man ceiling
+            LOG.warning("SAY req=%s zone=%s hold+margin=%sms exceeds max_duck_timeout=%sms; clamping",
+                        rid, zone, hold, deadman_ms)
+            hold = deadman_ms
         with self._lock:
             ctx.ha.call_service_rest("media_player", "play_media",
                                      {"entity_id": zone, "media_content_id": uri,

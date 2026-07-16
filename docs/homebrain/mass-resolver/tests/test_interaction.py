@@ -455,6 +455,32 @@ class Round3FindingsTest(unittest.TestCase):
         self.assertNotIn(zone, self.cap._snaps)                      # snapshot popped, no permanent strand
 
 
+class SayHoldClampTest(unittest.TestCase):
+    def setUp(self):
+        FakeTimer.created = []
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        self.zone = "media_player.ceiling_speakers"
+
+    def _duck_then_reset(self, ha, ctx):
+        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40, dead-man armed
+        ha._state = playing(0.15); FakeTimer.created = []       # isolate the reply timer
+
+    def test_negative_hold_ms_falls_back_to_default(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        self._duck_then_reset(ha, ctx)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": -5000})
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertGreater(FakeTimer.created[0].interval, 0)         # never a past/zero interval
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 9.5)   # default 8000 + 1500 margin
+
+    def test_oversized_hold_ms_clamped_to_deadman_ceiling(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        self._duck_then_reset(ha, ctx)
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": 600000})
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # clamped to max_duck_timeout (45000ms)
+
+
 class RealThreadingTest(unittest.TestCase):
     def setUp(self):
         FakeTimer.created = []
