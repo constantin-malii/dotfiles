@@ -3,6 +3,34 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-16 — S1b-1′ resolver `say` (play_announcement) deployed — Spike-2 NOT passed (announce silent on ceiling)
+
+- **What:** deployed the S1b-1′ resolver rework — `interaction` `say` mode via
+  `music_assistant.play_announcement` (blocking) + capture/replay, reply-timer machinery removed,
+  duck/restore reverted to the AU-02/AU-03 form. Files: `haconn.py`, `config.py`, `config.json`,
+  `interaction.py` (+ changed tests). Backup `~/mass-resolver/.bak/20260716-171148/`. Host `py_compile`
+  + tests **OK on Python 3.5.2**; clean restart (`SERVICE: /command HTTP server on 192.168.122.1:8770` +
+  `connected; subscribed …`, no bind-race, no traceback). Deploy is healthy.
+- **Spike-2 validation — NOT passed.** With music playing, `/command interaction {mode:say, uri}`
+  runs the pause/resume choreography (~13 s) but the reply is **inaudible**, over **both radio and local
+  music**. Reproduced via a **direct HA `music_assistant.play_announcement` call** (bypassing the
+  resolver) → **not a resolver bug**. The **same Piper clip via plain `media_player.play_media` is
+  clearly audible**, and normal music/radio play fine → it is the **announce primitive specifically**
+  that is silent on the ceiling zone (MA **Universal → Squeezelite**). Contradicts the earlier spike
+  (announcement was audible then); the spike's exact conditions were never recorded.
+- **Secondary findings:** HA `tts_get_url` returns the **external** base (`192.168.1.104`, unreachable
+  from the playback path) — had to rewrite to the internal `192.168.122.10`; the URI fed to `say` in
+  S1b-2 must be MA-reachable. `play_announcement` blocks **~13 s for a ~3 s clip** (UX).
+- **State:** deploy **retained** — harmless (nothing in production invokes `say`; duck/restore is the
+  working AU-02/AU-03 form). No rollback. **Reply-on-ceiling is blocked** pending an audible-announce fix.
+- **Rollback (if ever needed):** `cp ~/mass-resolver/.bak/20260716-171148/*.py ~/mass-resolver/ &&
+  cp ~/mass-resolver/.bak/20260716-171148/config.json ~/mass-resolver/ && sudo systemctl restart mass-resolver`.
+- **Next:** root-cause the announce silence — leading hypothesis: the resolver announces to the MA
+  **Universal** player (`media_player.ceiling_speakers`), while the spike may have targeted the underlying
+  **Squeezelite** player; also recover the spike's conditions and check the MA add-on log during an
+  announce. Fallback: rework `_say` to pause → plain `play_media` → replay. **Hold S1b-2** until an
+  audible ceiling reply is proven. Plan: `plans/2026-07-15-s1b-1p-say-announcement.md`.
+
 ## 2026-07-15 — S1a satellite→ceiling duck/restore trigger (HA automation)
 
 - **What:** installed an HA automation (`automation.s1a_satellite_ceiling_duck_restore`) that fires the

@@ -182,7 +182,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | `S0` | Inventory satellites (entities/rooms/pipelines/TTS-reach/identity) | S | done | research | P2 | HA | hardware installed ✅ (reSpeaker Living Room, 2026-07-14) | none (read-only) | `s0-satellite-inventory.md` | read-only | n/a | **DELIVERED 2026-07-14** (`s0-satellite-inventory.md`): 1 satellite, `Living Room Voice` pipeline (Whisper+Piper), local TTS ✅; **gaps → S1**: area unassigned + no satellite→ceiling route | PCL §6A.8 · CHANGELOG 2026-07-14 · s0-satellite-inventory |
 | `S1a` | Satellite→ceiling interaction duck/restore **trigger** (HA automation → resolver `interaction` intent) | S | done | HA-live | P2 | HA | S0 ✅ · AU-02/AU-03 ✅ | one HA automation | HA automation | HA-live (claimed+released 2026-07-15) | disable/delete automation | **DONE 2026-07-15** — `automation.s1a_satellite_ceiling_duck_restore` installed + live-validated (duck 0.32→0.15 on wake, coalesced re-ducks, restore→0.32, silent). See `CHANGELOG.md` 2026-07-15 · `plans/2026-07-15-s1a-satellite-ceiling-trigger.md` | 2026-07-14-s1a design |
-| `S1b`–`S4` | reply-on-ceiling relay (`S1b`) → `ResponseRoutingPolicy` → privacy gating → household announce/targeting | S | later | design→repo-code | later | PCL/HA | S1a ✅ | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | **S1b next** = universal resolver TTS relay so replies play on the ceiling (F1/F1-R-grade, no double-speak) | PCL §6A, C§7 · 2026-07-14-s1a §2 |
+| `S1b`–`S4` | reply-on-ceiling relay (`S1b`) → `ResponseRoutingPolicy` → privacy gating → household announce/targeting | S | blocked | design→repo-code | later | PCL/HA | S1a ✅ | privacy + delivery surface | design docs → `homebrain-companion` repo + HA | per-phase | `git revert` / revert HA delivery | **S1b-1′ deployed 2026-07-16, Spike-2 NOT passed** — `music_assistant.play_announcement` is silent on the ceiling (Universal→Squeezelite); plain `play_media` audible. **Reply-on-ceiling blocked** on an audible-announce fix (root-cause announce path/entity: Universal vs Squeezelite; or rework `say` to plain play+replay). **Hold S1b-2.** See `CHANGELOG.md` 2026-07-16 · `plans/2026-07-15-s1b-1p-say-announcement.md` | PCL §6A, C§7 · 2026-07-14-s1a §2 |
 
 ### AU — Interaction Audio Policy *(AU / Track S boundary — not PCL P0 mechanics)*
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |
@@ -303,7 +303,7 @@ Serialize edits to these conflict-and-truth magnets — at most one track edits 
 
 | Gate | Holder | Status |
 |---|---|---|
-| **host-live / HA-live / exposure** | *(none)* | **FREE** — `S1a` claimed it to install the satellite duck/restore automation and released it on completion (2026-07-15). |
+| **host-live / HA-live / exposure** | *(none)* | **FREE** — `S1b-1′` claimed it to deploy the resolver `say` rework and released it on completion (2026-07-16; **Spike-2 not passed** — `play_announcement` silent on the ceiling, see `CHANGELOG.md` 2026-07-16). Prior: `S1a` (2026-07-15). |
 
 **To claim the gate:** record the track ID + branch here in the claiming PR; release it on merge or
 abandonment. The first recommended tracks (§7) are all read-only/design/decision and **do not claim
