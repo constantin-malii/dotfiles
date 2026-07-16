@@ -151,6 +151,18 @@ class CallServiceRestTest(unittest.TestCase):
         ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
         self.assertIsNone(ha.s)
 
+    def test_timeout_parameter_is_passed_to_connection(self):
+        ha = haconn.HA("host", 1, "tok")
+        FakeHTTPConnection.created = []
+        ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1}, timeout=30)
+        self.assertEqual(FakeHTTPConnection.created[0].timeout, 30)
+
+    def test_timeout_defaults_to_5_when_omitted(self):
+        ha = haconn.HA("host", 1, "tok")
+        FakeHTTPConnection.created = []
+        ha.call_service_rest("media_player", "volume_set", {"entity_id": "x", "volume_level": 0.1})
+        self.assertEqual(FakeHTTPConnection.created[0].timeout, 5)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
