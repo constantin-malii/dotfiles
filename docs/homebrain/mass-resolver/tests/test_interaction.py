@@ -12,6 +12,7 @@ class FakeHA(object):
         self._write_boom = write_boom
         self._states = None
         self.calls = []                              # (domain, service, data)
+        self.timeouts = []                           # (service, timeout)
     def set_states(self, states):
         self._states = list(states)
     def get_entity_state(self, entity_id):
@@ -24,6 +25,7 @@ class FakeHA(object):
         if self._write_boom is not None:
             raise self._write_boom
         self.calls.append((domain, service, data))
+        self.timeouts.append((service, timeout))
 
 
 class FakeSettings(object):
@@ -179,6 +181,7 @@ class SayAnnounceTest(unittest.TestCase):
         self.assertEqual(ann[0][0], "music_assistant")
         self.assertEqual(ann[0][2]["entity_id"], self.zone)
         self.assertEqual(ann[0][2]["url"], "http://x/a.mp3")
+        self.assertIn(("play_announcement", 30.0), ha.timeouts)
 
     def test_say_replays_station_when_not_resumed(self):     # radio: idle after announce -> re-play captured id
         ha = FakeHA(); ctx = FakeCtx(ha)
