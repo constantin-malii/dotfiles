@@ -419,3 +419,27 @@ it claims the single live gate (BACKLOG §10) and follows `runbooks/resolver-dep
   resolver-side and tested via `/command`; the *automation* that sends `idle→restore`+grace-G is S1b-2.
 - **Deferred/YAGNI:** MA completion-signal path (if Spike 2 finds one, swap duration-hold later); dropped-Q&A
   chirp/LED and latency budget are S1b-2 (they need the real pipeline/firmware).
+
+## Post-review fixes (whole-branch reviews, 2026-07-15)
+
+Two strand-at-floor bugs were found by review and fixed on-branch before merge (both had regression tests
+added that fail against the pre-fix code):
+
+- **F1 — bad `hold_ms` poisoned `reply_active` (commit `62ff4c6`).** `_say` set `reply_active=True` *before*
+  computing `int(hold_ms)`; a non-numeric `hold_ms` raised after the flag was set but before the reply timer
+  was armed → flag stuck True, dead-man deferred → permanent strand. Fix: compute the hold **up-front** with a
+  `try/except (TypeError, ValueError)` fallback to `say_hold_default_ms`, and **arm-then-flag** (arm the reply
+  timer before setting `reply_active`, with `play_media` still first so its failure leaves the dead-man intact).
+- **Dead-man vs `reply_active` composition (commit `9e38d82`).** A barge-in `duck` while a reply is active
+  re-arms the 120 s dead-man (replacing the reply timer) but does not clear `reply_active`; the dead-man's
+  `_restore` then **deferred** (a normal result, not an exception) → no re-arm → strand. Fix: `_restore` gains
+  `force=False`; the `reply_active` guard is `and not force`; **`_auto_restore` (the dead-man) passes
+  `force=True`** so the ultimate backstop always breaks through, while the external `idle→restore` path still
+  defers. (Re-arm-on-deferral was rejected — it would strand-and-loop instead of letting the backstop win.)
+
+**S1b-2 precondition / Spike-2 checks (write down so they aren't silently inherited):**
+- S1b-2 must supply a **valid numeric `hold_ms`** for each reply (derived from the reply clip length, e.g.
+  `on_tts_end` duration / `Content-Length` / HEAD). The resolver's fallback to `say_hold_default_ms` is a
+  **safety net, not the intended path** — a wrong default un-ducks mid-reply (early) or holds too long (late).
+- **Spike 2 must confirm** the `say_hold_default_ms` default is adequate for a typical reply, and that S1b-2's
+  derived `hold_ms` matches actual playback length within `say_margin_ms`.
