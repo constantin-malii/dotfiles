@@ -10,12 +10,17 @@ class FakeHA(object):
         self._state = state
         self._boom = boom
         self._write_boom = write_boom
+        self._states = None
         self.calls = []                              # (domain, service, data)
+    def set_states(self, states):
+        self._states = list(states)
     def get_entity_state(self, entity_id):
         if self._boom is not None:
             raise self._boom
+        if self._states:
+            return self._states.pop(0)
         return self._state
-    def call_service_rest(self, domain, service, data):
+    def call_service_rest(self, domain, service, data, timeout=5):
         if self._write_boom is not None:
             raise self._write_boom
         self.calls.append((domain, service, data))
@@ -27,8 +32,7 @@ class FakeSettings(object):
     max_duck_timeout = 45000
     interaction_ignore_when_idle = True
     announce_failures = True
-    say_hold_default_ms = 8000
-    say_margin_ms = 1500
+    say_announce_timeout_ms = 30000
 
 
 class FakeSpeaker(object):
@@ -45,6 +49,18 @@ class FakeCtx(object):
 
 def playing(vol):
     return {"state": "playing", "attributes": {"volume_level": vol}}
+
+
+def radio_playing(mid):
+    return {"state": "playing", "attributes": {"media_content_id": mid}}
+
+
+def idle_state():
+    return {"state": "idle", "attributes": {}}
+
+
+def playing_with_id(vol, mid):
+    return {"state": "playing", "attributes": {"volume_level": vol, "media_content_id": mid}}
 
 
 def run(cap, ctx, params):
@@ -149,122 +165,36 @@ class DuckTest(unittest.TestCase):
         self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # FakeSettings max_duck_timeout 45000ms -> 45s
 
 
-class SayTest(unittest.TestCase):
+class SayAnnounceTest(unittest.TestCase):
     def setUp(self):
-        FakeTimer.created = []
-        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        self.cap = interaction.InteractionCapability()
         self.zone = "media_player.ceiling_speakers"
 
-    def test_say_plays_uri_as_announcement(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"])
-        self.assertTrue(r["metadata"]["said"])
-        dom, svc, data = ha.calls[-1]
-        self.assertEqual((dom, svc), ("media_player", "play_media"))
-        self.assertEqual(data["entity_id"], self.zone)
-        self.assertEqual(data["media_content_id"], "http://x/a.flac")
-        self.assertTrue(data["announce"])
+    def test_say_calls_play_announcement_with_uri(self):
+        ha = FakeHA(playing(0.5)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
+        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"]); self.assertTrue(r["metadata"]["said"])
+        ann = [c for c in ha.calls if c[1] == "play_announcement"]
+        self.assertEqual(len(ann), 1)
+        self.assertEqual(ann[0][0], "music_assistant")
+        self.assertEqual(ann[0][2]["entity_id"], self.zone)
+        self.assertEqual(ann[0][2]["url"], "http://x/a.mp3")
 
-    def test_say_without_active_duck_does_not_hold(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)           # no prior duck -> no snapshot
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        self.assertTrue(r["ok"]); self.assertFalse(r["metadata"]["held"])
-        self.assertEqual(len(FakeTimer.created), 0)             # no reply timer armed
+    def test_say_replays_station_when_not_resumed(self):     # radio: idle after announce -> re-play captured id
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([radio_playing("library://radio/2"), idle_state()])   # before=playing radio, after=idle
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
+        self.assertTrue(r["metadata"]["replayed"])
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm), 1)
+        self.assertEqual(pm[0][2]["media_id"], "library://radio/2")
 
-    def test_say_during_duck_holds_and_arms_reply_timer(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40, dead-man armed
-        ha._state = playing(0.15); ha.calls = []; FakeTimer.created = []
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": 4000})
-        self.assertTrue(r["metadata"]["held"])
-        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])
-        self.assertEqual(len(FakeTimer.created), 1)             # reply timer replaces the dead-man
-        self.assertAlmostEqual(FakeTimer.created[0].interval, 5.5)   # 4000 + 1500 margin -> 5.5s
-
-    def test_restore_defers_while_reply_active(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})
-        ha._state = playing(0.15)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        ha.calls = []
-        r = run(self.cap, ctx, {"mode": "restore"})             # simulates the future idle trigger
-        self.assertFalse(r["metadata"]["restored"])
-        self.assertEqual(r["metadata"]["reason"], "reply_active")
-        self.assertIn(self.zone, self.cap._snaps)               # NOT restored yet
-        self.assertEqual(ha.calls, [])                          # no volume write
-
-    def test_reply_timer_restores_baseline_on_playback_end(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40
-        ha._state = playing(0.15)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        ha.calls = []
-        FakeTimer.created[-1].fire()                            # playback-end
-        self.assertNotIn(self.zone, self.cap._snaps)            # cleared
-        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
-        self.assertEqual(len(vol_writes), 1)
-        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # restored baseline
-
-    def test_barge_in_rearms_reply_timer_keeps_baseline(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})
-        ha._state = playing(0.15)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        first = FakeTimer.created[-1]
-        r2 = run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in
-        self.assertTrue(first.cancelled)                        # old reply timer cancelled
-        self.assertAlmostEqual(self.cap._snaps[self.zone]["volume"], 0.40)   # baseline preserved
-        self.assertTrue(r2["metadata"]["held"])
-        self.assertNotEqual(FakeTimer.created[-1], first)        # a NEW reply timer was armed
-        self.assertTrue(FakeTimer.created[-1].started)
-        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])   # still active
-
-    def test_say_bad_hold_ms_does_not_strand(self):                # F1: bad hold_ms must not permanently strand
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, dead-man armed
-        ha._state = playing(0.15); ha.calls = []; FakeTimer.created = []
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": "8s"})
-        self.assertTrue(r["ok"])
-        self.assertTrue(r["metadata"]["held"])
-        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])
-        self.assertEqual(len(FakeTimer.created), 1)                 # reply timer armed at the default hold
-        self.assertAlmostEqual(FakeTimer.created[0].interval, 9.5)   # 8000 default + 1500 margin -> 9.5s
-        self.assertIn(self.zone, self.cap._snaps)                    # snapshot still present, not stranded
-        ha.calls = []
-        FakeTimer.created[0].fire()                                  # reply completes
-        self.assertNotIn(self.zone, self.cap._snaps)                 # cleared, not stranded
-        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
-        self.assertEqual(len(vol_writes), 1)
-        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # baseline restored
-
-    def test_deadman_overrides_reply_active_hold(self):
-        # A barge-in duck while a reply is active re-arms the dead-man (replacing the reply
-        # timer) but leaves reply_active True. When the dead-man fires it MUST force the
-        # restore through, not defer forever -> strand.
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                       # snapshot 0.40; dead-man = created[0]
-        ha._state = playing(0.15)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})  # reply timer = created[1] (replaces created[0]); reply_active
-        run(self.cap, ctx, {"mode": "duck"})                       # barge-in: dead-man = created[2] (replaces created[1])
-        self.assertTrue(self.cap._snaps[self.zone]["reply_active"])   # still active (duck doesn't clear it)
-        self.assertTrue(FakeTimer.created[1].cancelled)               # reply timer cancelled by the barge-in
-        ha.calls = []
-        FakeTimer.created[-1].fire()                               # dead-man fires
-        self.assertNotIn(self.zone, self.cap._snaps)               # forced through -> restored, not stranded
-        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
-        self.assertEqual(len(vol_writes), 1)
-        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)  # baseline
-
-    def test_say_play_media_failure_leaves_deadman(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, dead-man armed
-        deadman = FakeTimer.created[0]
-        ctx.ha = FakeHA(playing(0.15), write_boom=IOError("boom"))
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})
-        self.assertFalse(r["ok"])
-        self.assertFalse(self.cap._snaps[self.zone].get("reply_active"))
-        self.assertFalse(deadman.cancelled)                          # dead-man still armed
+    def test_say_no_replay_when_music_resumed(self):         # local music: playing after announce -> no re-play
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([playing_with_id(0.5, "library://track/9"), playing_with_id(0.5, "library://track/9")])
+        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
+        self.assertFalse(r["metadata"]["replayed"])
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
 
 
 class RestoreTest(unittest.TestCase):
@@ -453,59 +383,6 @@ class Round3FindingsTest(unittest.TestCase):
         self.assertEqual(ha.calls, [])                               # never clobbers the user's value
         self.assertTrue(FakeTimer.created[0].cancelled)              # dead-man cancelled
         self.assertNotIn(zone, self.cap._snaps)                      # snapshot popped, no permanent strand
-
-
-class SayHoldClampTest(unittest.TestCase):
-    def setUp(self):
-        FakeTimer.created = []
-        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
-        self.zone = "media_player.ceiling_speakers"
-
-    def _duck_then_reset(self, ha, ctx):
-        run(self.cap, ctx, {"mode": "duck"})                    # snapshot 0.40, dead-man armed
-        ha._state = playing(0.15); FakeTimer.created = []       # isolate the reply timer
-
-    def test_negative_hold_ms_falls_back_to_default(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        self._duck_then_reset(ha, ctx)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": -5000})
-        self.assertEqual(len(FakeTimer.created), 1)
-        self.assertGreater(FakeTimer.created[0].interval, 0)         # never a past/zero interval
-        self.assertAlmostEqual(FakeTimer.created[0].interval, 9.5)   # default 8000 + 1500 margin
-
-    def test_oversized_hold_ms_clamped_to_deadman_ceiling(self):
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        self._duck_then_reset(ha, ctx)
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac", "hold_ms": 600000})
-        self.assertEqual(len(FakeTimer.created), 1)
-        self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # clamped to max_duck_timeout (45000ms)
-
-
-    def test_reply_restore_ignores_boost_not_yet_reverted(self):
-        # H2: an announce boost not yet reverted must not read as a user override.
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, target 0.15
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})  # reply_active, reply timer armed
-        ha._state = playing(0.70)                                   # announce boost NOT yet reverted when timer fires
-        ha.calls = []
-        FakeTimer.created[-1].fire()                                # reply timer -> _reply_complete -> restore
-        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
-        self.assertEqual(len(vol_writes), 1)                        # restored, not "Kept" as a false user_override
-        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # reaches the real baseline
-        self.assertNotIn(self.zone, self.cap._snaps)                # cleared
-
-    def test_stale_reply_complete_does_not_clobber_bargein(self):
-        # N1: a superseded reply timer's callback must bail, not clobber the barge-in reply.
-        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
-        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})   # reply timer T1
-        stale = FakeTimer.created[-1]                               # T1
-        run(self.cap, ctx, {"mode": "say", "uri": "http://x/b.flac"})   # barge-in: T2 (T1 cancelled)
-        ha.calls = []
-        stale.fire()                                                # T1's _reply_complete fires despite cancel
-        self.assertIn(self.zone, self.cap._snaps)                   # barge-in reply's duck NOT clobbered
-        self.assertTrue(self.cap._snaps[self.zone].get("reply_active"))
-        self.assertEqual([c for c in ha.calls if c[1] == "volume_set"], [])   # no premature restore
 
 
 class RealThreadingTest(unittest.TestCase):

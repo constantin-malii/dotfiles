@@ -22,8 +22,7 @@ class InteractionCapability(capability.Capability):
         mode = (params.get("mode") or "").strip().lower()
         zone = params.get("zone") or getattr(ctx.settings, "ceiling_entity", "")
         uri = params.get("uri") or params.get("media_content_id") or ""
-        hold_ms = params.get("hold_ms")
-        return {"mode": mode, "zone": zone, "uri": uri, "hold_ms": hold_ms}
+        return {"mode": mode, "zone": zone, "uri": uri}
 
     def validate(self, ctx, resolved):
         if resolved["mode"] not in _MODES:
@@ -157,39 +156,31 @@ class InteractionCapability(capability.Capability):
 
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
-        margin = int(getattr(ctx.settings, "say_margin_ms", 1500))
-        default_hold = int(getattr(ctx.settings, "say_hold_default_ms", 8000))
-        deadman_ms = int(getattr(ctx.settings, "max_duck_timeout", 120000))
-        hold_ms = resolved.get("hold_ms")
-        try:
-            hold = default_hold if hold_ms is None else int(hold_ms)
-        except (TypeError, ValueError):
-            LOG.warning("SAY req=%s zone=%s bad hold_ms=%r; using default %sms",
-                        rid, zone, hold_ms, default_hold)
-            hold = default_hold
-        if hold < 0:                                           # negative would fire the reply timer immediately
-            LOG.warning("SAY req=%s zone=%s negative hold_ms=%r; using default %sms",
-                        rid, zone, hold_ms, default_hold)
-            hold = default_hold
-        hold += margin
-        if hold > deadman_ms:                                  # never arm a reply timer past the dead-man ceiling
-            LOG.warning("SAY req=%s zone=%s hold+margin=%sms exceeds max_duck_timeout=%sms; clamping",
-                        rid, zone, hold, deadman_ms)
-            hold = deadman_ms
-        with self._lock:
-            ctx.ha.call_service_rest("media_player", "play_media",
-                                     {"entity_id": zone, "media_content_id": uri,
-                                      "media_content_type": "music", "announce": True})
-            snap = self._snaps.get(zone)
-            if snap is None:                                   # music wasn't ducked -> just play the reply
-                LOG.info("SAY req=%s zone=%s uri=%s (no active duck)", rid, zone, uri)
-                return cr.ok(self.name, rid, "Said.", spoken_text=None,
-                             metadata={"said": True, "held": False, "zone": zone})
-            self._arm_reply_timer(ctx, zone, hold / 1000.0)     # arm-then-flag: no window where reply_active is
-            snap["reply_active"] = True                         #   set without a timer backing it
-            LOG.info("SAY req=%s zone=%s uri=%s hold=%sms", rid, zone, uri, hold)
-            return cr.ok(self.name, rid, "Said.", spoken_text=None,
-                         metadata={"said": True, "held": True, "zone": zone})
+        timeout = int(getattr(ctx.settings, "say_announce_timeout_ms", 30000)) / 1000.0
+        # capture what's playing so we can re-play it if the announcement doesn't auto-resume (radio/live)
+        try:                                                  # best-effort capture; a read blip must not swallow the reply
+            before = ctx.ha.get_entity_state(zone) or {}
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s capture read failed (%r); replay skipped", rid, zone, e)
+            before = {}
+        was_playing = before.get("state") == "playing"
+        media_id = (before.get("attributes") or {}).get("media_content_id")
+        # blocking: MA pauses the music, plays the reply, resumes resumable content
+        ctx.ha.call_service_rest("music_assistant", "play_announcement",
+                                 {"entity_id": zone, "url": uri}, timeout=timeout)
+        replayed = False
+        if was_playing and media_id:
+            try:
+                after = ctx.ha.get_entity_state(zone) or {}
+            except Exception:
+                after = {}
+            if after.get("state") != "playing":               # radio/live didn't auto-resume -> re-play the station
+                ctx.ha.call_service_rest("music_assistant", "play_media",
+                                         {"entity_id": zone, "media_id": media_id})
+                replayed = True
+        LOG.info("SAY req=%s zone=%s uri=%s replayed=%s", rid, zone, uri, replayed)
+        return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                     metadata={"said": True, "replayed": replayed, "zone": zone})
 
     def _reply_complete(self, ctx, zone, gen):
         with self._lock:
