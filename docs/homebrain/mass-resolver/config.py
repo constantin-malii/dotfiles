@@ -46,9 +46,8 @@ class Settings(object):
         self.fade_ms = int(cfg.get("fade_ms", 0))                               # reserved (no fade v1)
         self.max_duck_timeout = int(cfg.get("max_duck_timeout", 120000))        # ms dead-man auto-restore (>= longest reply)
         self.interaction_ignore_when_idle = bool(cfg.get("interaction_ignore_when_idle", True))
-        # S1b-1 say (ceiling reply) tunables
-        self.say_hold_default_ms = int(cfg.get("say_hold_default_ms", 8000))   # duration-hold when clip length unknown
-        self.say_margin_ms = int(cfg.get("say_margin_ms", 1500))               # added to the hold before restore
+        # S1b-1' say (ceiling reply) - play_announcement is blocking (~7-14s); allow a long timeout
+        self.say_announce_timeout_ms = int(cfg.get("say_announce_timeout_ms", 30000))
 
 
 def load_settings(here):

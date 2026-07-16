@@ -59,14 +59,14 @@ class HA(object):
             except Exception:
                 pass
 
-    def call_service_rest(self, domain, service, data):
+    def call_service_rest(self, domain, service, data, timeout=5):
         """Call an HA service over a FRESH REST connection (POST /api/services/<d>/<s>).
 
         Like get_entity_state: fresh per-call HTTPConnection, safe from any thread, never touches the
         shared event WebSocket self.s, raises on non-2xx so callers confirm the write before discarding
         state. Never logs the token.
         """
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=5)
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
         try:
             headers = {"Authorization": "Bearer " + (self.token or ""),
                        "Content-Type": "application/json"}
