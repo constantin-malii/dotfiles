@@ -210,9 +210,13 @@ Queue"; `media_title` = the current track, **not** the identifier). So `say` wil
    captured `media_content_id`** via `music_assistant.play_media`. Local music auto-resumes → this is a no-op.
    Reacting to the *actual* post-announce state handles radio vs local uniformly, without pre-classifying.
 
-**Spike-3 (validate before/with the new plan):** re-playing a captured `library://radio/…` id via `play_media`
-actually restarts the station; the announce-then-replay timing/UX is acceptable; and local music auto-resumes
-(no double-play). Same "prove the mechanism first" discipline Spike-2 enforced.
+**Spike-3 — VALIDATED 2026-07-15 (live):** capture→announce→replay confirmed on radio — captured
+`library://radio/2` → `music_assistant.play_announcement` (audible, blocked **8.2 s**) → ceiling `idle` (radio
+didn't auto-resume) → `music_assistant.play_media {media_id: library://radio/2}` → **radio restarted**
+(`playing library://radio/2`). So (b) is proven. **Not yet** explicitly tested: local-music **auto-resume**
+(the easy case — `play_announcement` resumes resumable content, so the post-announce state is `playing` and the
+replay step is skipped) — confirm in the S1b-1′ validation. The **reply-on-ceiling mechanism is now fully
+grounded**: audible reply + radio survives via capture/replay + blocking restore-on-return.
 
 ### Impact
 - **S1b-1 as built is superseded** — `say` must be reworked to `play_announcement` + the blocking model,
