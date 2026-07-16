@@ -168,6 +168,52 @@ noisy. Open Q&A always speaks.
 - `TODO:` **Wake-slot choice:** primary wake → this pipeline, or the 2nd on-device wake-word slot (S0 dual-slot
   note) so the local-only pipeline stays available. Decide at plan time.
 
+## 11. Spike 2 results + design revision (VALIDATED 2026-07-15) — supersedes §4 mechanism
+
+S1b-1 (resolver `say`) shipped, and its Spike-2 live validation over `/command` **disproved the core
+mechanism assumption**. Measured on the live ceiling (MA Universal → Squeezelite, radio playing):
+
+| Probe | Result |
+|---|---|
+| `media_player.play_media(announce=true)` (a URI) | **synchronous ~14 s block**, **stops the stream**, **clip inaudible**, then resumes → wrong primitive |
+| `music_assistant.play_announcement` (a URI) | **synchronous ~7 s block**, **audible ✅**, but **pause → reply → resume** (music stops *before* the reply — NOT an overlay), and **radio cannot resume → drops to `idle`** |
+
+**Three §4 assumptions were wrong:**
+1. **Not an overlay** — the player **pauses**, plays the reply, resumes. (AU-01's duck-under-TTS overlay was
+   the resolver's `tts.speak` path, not URL playback.)
+2. **Synchronous + slow (7–14 s)** — the call **blocks** until the reply finishes. This breaks the
+   "`say` returns fast, a reply timer restores later" model — and with it, most of S1b-1's machinery
+   (`reply_active`, duration-hold reply timer, deferred `idle→restore`, H2 `ignore_user_override`, N1 gen-id)
+   exists to solve problems a **blocking, self-pausing, self-resuming** call does not have.
+3. **Radio wedges** — a live stream can't resume after an announcement (RQ-01/RQ-02).
+
+### Revised mechanism (replaces the §4 hybrid C+A reply-timer model)
+- **Primitive:** `music_assistant.play_announcement` (URI, audible) — **not** `media_player.play_media`.
+- **Model:** `say` = a **blocking** call (MA pauses → plays the reply → resumes); on return the reply is done
+  and resumable content is back. Needs a **long/adequate timeout** (≥ longest reply; today's `call_service_rest`
+  5 s is far too short) or a non-blocking variant with a completion signal.
+- **Simplification:** the reply timer / duration-hold / `reply_active` defer / H2 / N1 machinery is **no longer
+  needed** for the reply — **restore-on-return is exact**. The B1 duck-ownership problem largely dissolves (the
+  announce call spans the whole reply). S1a's duck remains only for the *listening* phase.
+- **UX:** pause→reply→resume is acceptable (arguably clearer) for a conversational answer.
+
+### Open decision — radio policy (needed before the new plan)
+`play_announcement` stops radio with no resume. Options:
+- **(a) Local-music-only reply-on-ceiling (recommended):** route the reply to the ceiling only when it's playing
+  **resumable local music**; for **radio**/idle, keep the reply on the **satellite's own speaker** (S1a
+  behaviour). Simplest; avoids the wedge; no "resume radio" logic.
+- **(b) Resolver re-issues the station** after the reply (must capture + replay "what was playing"). More
+  capability + failure surface.
+- **(c) Accept radio stops** on a reply — poor UX; not recommended.
+
+### Impact
+- **S1b-1 as built is superseded** — `say` must be reworked to `play_announcement` + the blocking model,
+  dropping the now-unneeded timer machinery. The deployed code is dormant/harmless meanwhile (nothing invokes it).
+- The duck-ownership ADR (`2026-07-15-s1b-duck-ownership-adr.md`) is largely mooted by the blocking model (see
+  its superseded note).
+- **Next:** decide the radio policy → a new, much simpler **S1b-1′ plan** (`say` → `play_announcement`, long
+  timeout, restore-on-return, radio-policy branch), re-validated by a fresh Spike before S1b-2.
+
 ---
 
 > **Rollback for this document:** `git revert` on `homebrain/s1b-satellite-ceiling-reply`, or delete this file.

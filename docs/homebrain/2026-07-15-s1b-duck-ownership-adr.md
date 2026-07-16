@@ -1,8 +1,11 @@
 # ADR — S1b Duck-Ownership: who restores the ceiling after a reply
 
 > **Design / research only. No implementation, no live change, no gate.**
-> **Status:** Accepted (resolves S1b review finding **B1**). **Supersedes** S1b design §5 comp-4 and the
-> under-specified "ensure the announce completes before restore" in §10 Spike-2.
+> **Status:** Accepted, then **largely SUPERSEDED by Spike 2 (2026-07-15).** The spike proved
+> `music_assistant.play_announcement` is **synchronous/blocking** (it pauses → plays the reply → resumes),
+> so the reply-timer duck-ownership mechanism below is **unnecessary — restore-on-return replaces it**, and the
+> B1 timing race largely dissolves. Kept for the reasoning record. See S1b design **§11**. (Originally resolved
+> review finding **B1**; superseded S1b design §5 comp-4 + the §10 Spike-2 wording.)
 > Parent: `2026-07-15-s1b-satellite-ceiling-reply-design.md`. Builds on S1a (live) + AU-02/AU-03 (live).
 
 ## Context
