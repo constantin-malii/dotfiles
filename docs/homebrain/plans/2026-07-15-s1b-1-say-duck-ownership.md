@@ -460,8 +460,14 @@ ceiling volume *during* a reply is reset to baseline (the lesser evil vs an H2 s
 short). Defense-in-depth — it does **not** remove the Spike-2 (a) obligation to confirm the boost reverts
 within `say_margin_ms`.
 
-**Open, tracked (intentionally NOT in S1b-1):**
-- **N1 — `_reply_complete` clear-then-relock race.** `_reply_complete` clears `reply_active` under `_lock`,
-  releases, then `_restore` re-acquires; a `say` racing into that window could re-set `reply_active` (its own
-  new reply timer would then own restore). Theoretical, benign under single-satellite serialized turns; track
-  for S1b-2 when real concurrent triggers exist.
+**N1 — superseded timer callbacks bail via generation id (FIXED, commit `1a1bb73`).** A `threading.Timer`
+that has already fired can't be cancelled, so a barge-in that re-arms a new timer could let the stale
+`_reply_complete`/`_auto_restore` clobber the fresh reply (clear `reply_active`, pop the snapshot). Fix: a
+global monotonic `_gen`, stamped on the snapshot under `_lock` at every arm site and passed to the callback;
+a callback whose `gen` no longer matches the snapshot **bails**. Both callbacks are stamped (a stale dead-man
+would otherwise force-restore over a fresh reply). Composes with the `reply_active`-defer (which covers the
+barge-in-after-clear window) — together they fully close N1.
+
+**Only remaining review item is non-code:** the **Spike-2 (a)** check — confirm the announce boost reverts to
+the floor within `say_margin_ms` (before the reply-timer restore reads volume). H2's `ignore_user_override` is
+defense-in-depth; Spike 2 still confirms the margin is adequate.
