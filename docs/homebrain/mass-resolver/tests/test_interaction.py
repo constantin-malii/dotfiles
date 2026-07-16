@@ -460,6 +460,13 @@ class SayDispatchTest(unittest.TestCase):
         self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "interaction")
         self.assertTrue(r["metadata"]["said"])
         self.assertEqual(spk.said, [])                              # silent: no TTS
+        # End-to-end: verify _say mechanism fired through dispatch
+        ann = [c for c in ha.calls if c[1] == "play_announcement"]
+        self.assertEqual(len(ann), 1)
+        self.assertEqual(ann[0][0], "music_assistant")
+        self.assertEqual(ann[0][2]["url"], "http://x/a.flac")
+        self.assertIn("replayed", r["metadata"])                    # capture/replay metadata present
+        self.assertFalse(r["metadata"]["replayed"])                 # no media_content_id -> no replay
 
 
 if __name__ == "__main__":
