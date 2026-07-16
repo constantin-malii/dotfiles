@@ -14,9 +14,8 @@ class InteractionCapability(capability.Capability):
     def __init__(self, timer_factory=None, clock=None):
         self._timer_factory = timer_factory or threading.Timer
         self._clock = clock or time.time
-        self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None, "gen": int, "reply_active"?: bool}
+        self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
-        self._gen = 0                                # monotonic timer generation; a fired callback acts only if still current (N1)
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -67,25 +66,13 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
                          metadata={"ducked": True, "from": vol, "to": target, "zone": zone})
 
-    def _arm_timer(self, ctx, zone, secs=None):
+    def _arm_timer(self, ctx, zone):
         snap = self._snaps.get(zone)
         if snap is None:
             return
         self._cancel_timer(snap)
-        if secs is None:
-            secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0
-        self._gen += 1; snap["gen"] = self._gen                # supersede any already-fired-but-waiting callback (N1)
-        t = self._timer_factory(secs, self._auto_restore, [ctx, zone, self._gen])
-        snap["timer"] = t
-        t.start()
-
-    def _arm_reply_timer(self, ctx, zone, secs):
-        snap = self._snaps.get(zone)
-        if snap is None:
-            return
-        self._cancel_timer(snap)                               # replace the dead-man with the reply timer
-        self._gen += 1; snap["gen"] = self._gen                # supersede any already-fired-but-waiting callback (N1)
-        t = self._timer_factory(secs, self._reply_complete, [ctx, zone, self._gen])
+        secs = int(getattr(ctx.settings, "max_duck_timeout", 120000)) / 1000.0
+        t = self._timer_factory(secs, self._auto_restore, [ctx, zone])
         snap["timer"] = t
         t.start()
 
@@ -97,47 +84,33 @@ class InteractionCapability(capability.Capability):
             except Exception:
                 pass
 
-    def _auto_restore(self, ctx, zone, gen):
-        with self._lock:
-            snap = self._snaps.get(zone)
-            if snap is None or snap.get("gen") != gen:         # a newer timer superseded this one -> bail (N1)
-                return
+    def _auto_restore(self, ctx, zone):
         LOG.warning("DUCK dead-man timeout: auto-restoring zone=%s", zone)
         try:
-            self._restore(ctx, zone, "deadman", force=True)
+            self._restore(ctx, zone, "deadman")
         except Exception as e:
             LOG.error("auto-restore failed zone=%s: %r; re-arming", zone, e)
             try:
-                with self._lock:
+                with self._lock:                       # KEEP: F3 guarded re-arm
                     if zone in self._snaps:
                         self._arm_timer(ctx, zone)
             except Exception as e2:
                 LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
 
-    def _restore(self, ctx, zone, rid, force=False, ignore_user_override=False):
-        with self._lock:                                               # read + write stay under _lock together
-                                                                        # (intentional: serializes HTTP threads
-                                                                        # against the timer thread)
+    def _restore(self, ctx, zone, rid):
+        with self._lock:
             snap = self._snaps.get(zone)                              # peek; discard only after write
             if snap is None:
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
-            if snap.get("reply_active") and not force:          # a ceiling reply is playing; the reply timer owns restore
-                LOG.info("RESTORE req=%s zone=%s deferred (reply active)", rid, zone)
-                return cr.ok(self.name, rid, "Deferred.", spoken_text=None,
-                             metadata={"restored": False, "reason": "reply_active", "zone": zone})
             try:
                 state = ctx.ha.get_entity_state(zone) or {}
                 cur = (state.get("attributes") or {}).get("volume_level")
             except Exception as e:
-                LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)
+                LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)  # KEEP: F5
                 cur = None
             applied = snap.get("target")
-            # last-writer-wins vs the value WE set (not the config floor); never treats our own duck as a user change.
-            # ignore_user_override: the reply-timer restore skips this -- a not-yet-reverted announce boost reads as a
-            # volume change and would otherwise be misread as a user override, stranding the baseline (H2).
-            if (cur is not None and applied is not None and not ignore_user_override
-                    and abs(cur - applied) > 0.01):
+            if cur is not None and applied is not None and abs(cur - applied) > 0.01:
                 self._cancel_timer(snap); self._snaps.pop(zone, None)
                 LOG.info("RESTORE req=%s zone=%s user_override cur=%s (kept)", rid, zone, cur)
                 return cr.ok(self.name, rid, "Kept.", spoken_text=None,
@@ -147,9 +120,9 @@ class InteractionCapability(capability.Capability):
                 self._cancel_timer(snap); self._snaps.pop(zone, None)
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_baseline", "zone": zone})
-            ctx.ha.call_service_rest("media_player", "volume_set",    # write first (raises on failure)
+            ctx.ha.call_service_rest("media_player", "volume_set",
                                      {"entity_id": zone, "volume_level": target})
-            self._cancel_timer(snap); self._snaps.pop(zone, None)     # confirmed -> safe to discard
+            self._cancel_timer(snap); self._snaps.pop(zone, None)
             LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
             return cr.ok(self.name, rid, "Restored.", spoken_text=None,
                          metadata={"restored": True, "to": target, "zone": zone})
@@ -181,21 +154,3 @@ class InteractionCapability(capability.Capability):
         LOG.info("SAY req=%s zone=%s uri=%s replayed=%s", rid, zone, uri, replayed)
         return cr.ok(self.name, rid, "Said.", spoken_text=None,
                      metadata={"said": True, "replayed": replayed, "zone": zone})
-
-    def _reply_complete(self, ctx, zone, gen):
-        with self._lock:
-            snap = self._snaps.get(zone)
-            if snap is None or snap.get("gen") != gen:         # a newer reply/duck superseded this timer -> bail (N1)
-                return
-            snap["reply_active"] = False                       # current owner -> clear so _restore proceeds
-        LOG.info("SAY reply complete: restoring zone=%s", zone)
-        try:
-            self._restore(ctx, zone, "reply", ignore_user_override=True)   # our own announce boost != a user change (H2)
-        except Exception as e:
-            LOG.error("reply-complete restore failed zone=%s: %r; re-arming", zone, e)
-            try:
-                with self._lock:
-                    if zone in self._snaps:
-                        self._arm_timer(ctx, zone)             # fall back to the dead-man backstop
-            except Exception as e2:
-                LOG.error("reply re-arm failed zone=%s: %r", zone, e2)
