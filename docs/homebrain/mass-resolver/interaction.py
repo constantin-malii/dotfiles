@@ -108,7 +108,7 @@ class InteractionCapability(capability.Capability):
             except Exception as e2:
                 LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
 
-    def _restore(self, ctx, zone, rid, force=False):
+    def _restore(self, ctx, zone, rid, force=False, ignore_user_override=False):
         with self._lock:                                               # read + write stay under _lock together
                                                                         # (intentional: serializes HTTP threads
                                                                         # against the timer thread)
@@ -127,8 +127,11 @@ class InteractionCapability(capability.Capability):
                 LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)
                 cur = None
             applied = snap.get("target")
-            # last-writer-wins vs the value WE set (not the config floor); never treats our own duck as a user change
-            if cur is not None and applied is not None and abs(cur - applied) > 0.01:
+            # last-writer-wins vs the value WE set (not the config floor); never treats our own duck as a user change.
+            # ignore_user_override: the reply-timer restore skips this -- a not-yet-reverted announce boost reads as a
+            # volume change and would otherwise be misread as a user override, stranding the baseline (H2).
+            if (cur is not None and applied is not None and not ignore_user_override
+                    and abs(cur - applied) > 0.01):
                 self._cancel_timer(snap); self._snaps.pop(zone, None)
                 LOG.info("RESTORE req=%s zone=%s user_override cur=%s (kept)", rid, zone, cur)
                 return cr.ok(self.name, rid, "Kept.", spoken_text=None,
@@ -188,7 +191,7 @@ class InteractionCapability(capability.Capability):
             if snap is not None:
                 snap["reply_active"] = False                   # clear so _restore proceeds
         try:
-            self._restore(ctx, zone, "reply")
+            self._restore(ctx, zone, "reply", ignore_user_override=True)   # our own announce boost != a user change (H2)
         except Exception as e:
             LOG.error("reply-complete restore failed zone=%s: %r; re-arming", zone, e)
             try:

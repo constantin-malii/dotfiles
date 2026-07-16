@@ -481,6 +481,20 @@ class SayHoldClampTest(unittest.TestCase):
         self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # clamped to max_duck_timeout (45000ms)
 
 
+    def test_reply_restore_ignores_boost_not_yet_reverted(self):
+        # H2: an announce boost not yet reverted must not read as a user override.
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                        # snapshot 0.40, target 0.15
+        run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.flac"})  # reply_active, reply timer armed
+        ha._state = playing(0.70)                                   # announce boost NOT yet reverted when timer fires
+        ha.calls = []
+        FakeTimer.created[-1].fire()                                # reply timer -> _reply_complete -> restore
+        vol_writes = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_writes), 1)                        # restored, not "Kept" as a false user_override
+        self.assertAlmostEqual(vol_writes[0][2]["volume_level"], 0.40)   # reaches the real baseline
+        self.assertNotIn(self.zone, self.cap._snaps)                # cleared
+
+
 class RealThreadingTest(unittest.TestCase):
     def setUp(self):
         FakeTimer.created = []
