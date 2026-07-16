@@ -119,7 +119,7 @@ git commit -m "config(resolver): say_announce_timeout_ms"
 
 ---
 
-### Task 3: Replace the say model — `_say` via `play_announcement` + strip superseded machinery (ONE atomic task)
+### Task 3: Rework `_say` → `play_announcement` + capture/replay (drops obsolete say tests; green commit)
 
 **Files:** `interaction.py`, `tests/test_interaction.py`.
 
@@ -174,7 +174,11 @@ class SayAnnounceTest(unittest.TestCase):
         zone = resolved["zone"]; uri = resolved["uri"]
         timeout = int(getattr(ctx.settings, "say_announce_timeout_ms", 30000)) / 1000.0
         # capture what's playing so we can re-play it if the announcement doesn't auto-resume (radio/live)
-        before = ctx.ha.get_entity_state(zone) or {}
+        try:                                                  # best-effort capture; a read blip must not swallow the reply
+            before = ctx.ha.get_entity_state(zone) or {}
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s capture read failed (%r); replay skipped", rid, zone, e)
+            before = {}
         was_playing = before.get("state") == "playing"
         media_id = (before.get("attributes") or {}).get("media_content_id")
         # blocking: MA pauses the music, plays the reply, resumes resumable content
@@ -182,8 +186,11 @@ class SayAnnounceTest(unittest.TestCase):
                                  {"entity_id": zone, "url": uri}, timeout=timeout)
         replayed = False
         if was_playing and media_id:
-            after = ctx.ha.get_entity_state(zone) or {}
-            if after.get("state") != "playing":               # radio didn't auto-resume -> re-play the station
+            try:
+                after = ctx.ha.get_entity_state(zone) or {}
+            except Exception:
+                after = {}
+            if after.get("state") != "playing":               # radio/live didn't auto-resume -> re-play the station
                 ctx.ha.call_service_rest("music_assistant", "play_media",
                                          {"entity_id": zone, "media_id": media_id})
                 replayed = True
@@ -193,15 +200,34 @@ class SayAnnounceTest(unittest.TestCase):
 ```
   Also drop `hold_ms` from `resolve` (return `{"mode","zone","uri"}`); keep the `say` requires-`uri` check in `validate`.
 
-- [ ] **Step 4: Run the NEW tests** — `python tests/test_interaction.py` shows `SayAnnounceTest` green.
-  (The old reply-timer say tests now fail against the new `_say` — expected. **Steps 3–9 are ONE atomic
-  model-swap with a single green checkpoint at Step 8**; do not commit or gate a review between them. This is
-  why the machinery strip + test swap live in the same task — a split would leave the suite red at the boundary.)
+- [ ] **Step 4: Delete the tests that fed the OLD `_say`** (the rework breaks them, so they go in THIS commit):
+  `SayTest` (whole class), `SayHoldClampTest` (whole class — the N2/H2/N1 cases), and
+  `Round3FindingsTest::test_deadman_overrides_reply_active_hold` (only that case — it asserts the
+  `reply_active`/`force` interaction the new `_say` no longer creates). **Keep** everything else:
+  `SayResolveValidateTest`, `SayDispatchTest`, `RestoreTest`, `DeadManTest`, `Round2FindingsTest`, and the rest of
+  `Round3FindingsTest` (`test_c1_/c2_/f3_/f5_/user_override_` — `_duck`/`_restore`/`_auto_restore` behavior that
+  survives the Task-4 revert).
 
-- [ ] **Step 5: Strip the superseded machinery — REMOVE-ONLY (do NOT check out an old snapshot).**
-  Reverting via `git show d466475` (or any pre-Round-3 snapshot) would **silently drop the Round-3 hardening**
-  — F3 (`_auto_restore`'s guarded re-arm) and F5 (`_restore`'s read-failure log). Instead delete only the
-  S1b-1 additions from the **current** file; keep everything else:
+- [ ] **Step 5: Run, verify pass** — `python tests/test_interaction.py` → PASS (`SayAnnounceTest` + all kept
+  AU-02/03 and say-resolve/dispatch tests). The dead reply-timer machinery is still present but unused/untested;
+  it's removed in Task 4.
+
+- [ ] **Step 6: Commit**
+```bash
+git add interaction.py tests/test_interaction.py
+git commit -m "feat(resolver): say via play_announcement + capture/replay (Spike-2/3 model); drop obsolete reply-timer tests"
+```
+
+---
+
+### Task 4: Remove the dead reply-timer machinery; keep AU-02/03 Round-3 (remove-only)
+
+**Files:** `interaction.py`. The machinery is now unused (Task 3 removed its caller + its tests). The suite stays
+green because nothing tests the removed machinery anymore.
+
+- [ ] **Step 1: Strip — REMOVE-ONLY (do NOT check out an old snapshot).** Reverting via `git show d466475` (or any
+  pre-Round-3 snapshot) would **silently drop the Round-3 hardening** — F3 (`_auto_restore`'s guarded re-arm) and
+  F5 (`_restore`'s read-failure log). Delete only the S1b-1 additions from the **current** file; keep everything else:
   - `__init__`: delete `self._gen = 0`; revert the `_snaps` comment to
     `# zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}`.
   - Delete methods `_arm_reply_timer` and `_reply_complete` (their only caller left `_say` in Step 3).
@@ -266,29 +292,24 @@ class SayAnnounceTest(unittest.TestCase):
                          metadata={"restored": True, "to": target, "zone": zone})
 ```
 
-- [ ] **Step 6: Swap the tests** — remove `SayTest`, `SayHoldClampTest`, `Round3FindingsTest`, and the
-  `Round2FindingsTest` reply-timer cases; **keep** the AU-02/03 duck/restore/dead-man cases (`RestoreTest`,
-  `DeadManTest`, `Round2FindingsTest`'s duck cases), the `say` resolve/validate tests, and `SayAnnounceTest`.
-
-- [ ] **Step 7: Grep-gate** (cheap insurance — fails loudly if the revert was too aggressive or a remnant survived):
+- [ ] **Step 2: Grep-gate** (cheap insurance — fails loudly if a remnant survived or a guard was lost):
 ```bash
 grep -nE "reply_active|ignore_user_override|_gen|_arm_reply_timer|_reply_complete|force=" interaction.py   # expect: no matches
 grep -c "read failed" interaction.py      # expect: 1   (F5 kept)
 grep -c "re-arm failed" interaction.py    # expect: 1   (F3 kept)
 ```
 
-- [ ] **Step 8: Run** `python tests/test_interaction.py` → PASS (duck/restore/dead-man + say). **The single
-  green checkpoint for Steps 3–8.**
+- [ ] **Step 3: Run** `python tests/test_interaction.py` → PASS (duck/restore/dead-man + say; nothing tested the removed machinery).
 
-- [ ] **Step 9: Commit** (one commit for the whole model-swap):
+- [ ] **Step 4: Commit**
 ```bash
-git add interaction.py tests/test_interaction.py
-git commit -m "feat(resolver): say via play_announcement; strip superseded reply-timer machinery; keep AU-02/03 Round-3 form"
+git add interaction.py
+git commit -m "refactor(resolver): drop dead reply-timer machinery; keep AU-02/03 Round-3 duck/restore (F3/F5)"
 ```
 
 ---
 
-### Task 4: Dispatch (silent) + full-suite regression
+### Task 5: Dispatch (silent) + full-suite regression
 
 - [ ] **Step 1:** ensure a `say` dispatch test asserts `core.dispatch(ctx, "interaction", {"mode":"say","uri":…})`
   returns `said:True` and is silent (`spk.said == []`). (Adapt the existing `SayDispatchTest`; `FakeSettings`
