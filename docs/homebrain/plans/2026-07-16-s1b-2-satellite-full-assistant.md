@@ -122,11 +122,20 @@ repurposes `idle` to arm grace-G) and **re-couples `_say` to the duck snapshot**
 deliberately kept lock-free. Both are deliberate and justified; both are behaviour changes to live pieces and
 are gated in Slice 5.
 
-**Fallback (validated at spike).** If the Slice-5 E2E spike shows S1a's `idle→restore` **converges cleanly**
-(MA's revert does **not** strand the music at the 0.15 floor — e.g. MA re-reads the live volume on resume, or
-the idle transition reliably lands *after* the announce returns), then keep the **simpler AU-02/03
-`idle→restore`**, drop the S1a edit, and make `_say`'s restore-on-return a no-op guarded by a config flag
-(`say_owns_restore=false`). The spike decides; the plan ships the robust primary by default.
+**Convergence spike — pull it forward (review refinement 2026-07-16).** The restore-ownership question is
+the load-bearing decision here, and it is **testable now, cheaply, with the already-deployed `say` + S1a
+duck — no firmware and no new pipeline**: over `/command`, `duck → say → idle-restore` and observe whether
+MA's post-announce revert strands the ceiling at the 0.15 floor or converges to baseline. **Run this
+convergence spike early (before the Slice-3 firmware OTA), not only in the Slice-5 E2E**, so
+`say_owns_restore` is decided before the brick-risk reflash.
+
+**Default (review refinement 2026-07-16): ship `say_owns_restore=false`** — the simpler, already-deployed,
+**lock-free** path (`_say` untouched from S1b-1′; S1a's `idle→restore` unchanged). Re-coupling `_say` to the
+`_snaps` snapshot is exactly the shared-state coupling S1b-1′ deliberately removed (the C1/H2/N1 class), so
+do **not** adopt it speculatively. The early convergence spike **promotes** to `say_owns_restore=true`
+(restore-on-return + the S1a `idle→restore`→grace-G edit) **only if** it demonstrates a strand. Slice 1
+still *builds* restore-on-return behind the flag (cheap, unit-tested); the spike, not the default, decides
+which path ships.
 
 ### (c) Prefer-local determinism + lockstep (NL-01/NL-02) — **prefer-local ON; commands stay tool-deterministic; capabilities doc kept in lockstep; no new exposure.**
 
