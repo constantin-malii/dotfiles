@@ -37,10 +37,17 @@ design live in the per-topic docs; this log is for discrete operational changes.
   {media_id: library://radio/2}` restarts it. The 07-16 "hold S1b-2" blocker was a confound, not an
   announce/URI defect.
 - **S1b-2 recommendation: GO** on the announce mechanism (audible over radio and healthy local music).
-  **Caveat:** the intermittent SMB / "produced no audio data" local-music degradation is a real reliability
-  risk — during its failing windows the ceiling is silent for **both music and replies**. It is not
-  announce-specific and is out of S1b scope; flagged for a separate investigation. Radio replies are
-  unaffected (no SMB).
+  **Caveat (corrected 2026-07-16):** an intermittent degradation silences replies, and the reproduced
+  trigger — SMB / "produced no audio data" local-music stall — is **not the whole story**. The original
+  07-16 silence includes announce **`531187df`**, fired over an **audibly-healthy radio** source with a
+  **reachable internal-base URL**, yet silent (~13 s) — **not** explained by an SMB/local stall (radio
+  isn't SMB), and **not reproduced** in this investigation (which only saw degraded-local→silent and
+  healthy-radio→audible). So the true failure is likely a **source-independent, intermittent announce
+  degradation** (it silenced radio *and* local on 07-16, including MA's own chime), of which the SMB stall
+  is one confirmed instance. **Do NOT assume radio replies are safe** — treat announce silence as possible
+  over any source until the degradation is characterized. Out of S1b scope; flagged for a separate
+  reliability investigation, and S1b-2 should **detect a likely-silent announce** (block > ~10 s) and
+  surface it rather than reporting success.
 - **Scope / safety:** read-only host diagnostics + coordinated live audio tests only — **no** resolver / HA
   / firmware / exposure change, **no** service restart. Live gate left **FREE**. Operator's playback
   restored (radio playing, per operator's choice).

@@ -253,9 +253,14 @@ read-only host + coordinated audio tests) **re-opened that finding and overturne
 **Net for the design:** §11's "audible via `play_announcement`" revised mechanism **stands**; §11's later
 S1b-1′ "silent" note is superseded by this re-open. **`_say` needs no URI-form change** — it already sends
 `play_announcement` with the tts_proxy internal-base URL and the radio replay branch. **S1b-2 is GO** on the
-announce mechanism, with one caveat carried forward: the intermittent SMB / "produced no audio data"
-local-music degradation makes the ceiling silent for **both music and replies** during its failing windows —
-track it as a **separate reliability item** (not S1b scope; radio replies are unaffected).
+announce mechanism, with one caveat carried forward: an intermittent degradation makes the ceiling silent
+for **both music and replies**. The reproduced trigger is an SMB / "produced no audio data" local-music
+stall, but that does **not** explain the original 07-16 announce `531187df` — silent over an
+audibly-healthy **radio** source with a reachable internal-base URL. So the degradation is likely
+**source-independent** (it silenced radio and local on 07-16, incl. MA's chime); the SMB stall is one
+confirmed instance, not the full trigger set. Track it as a **separate reliability item** (not S1b scope),
+**do not assume radio is safe**, and require S1b-2 to **detect a likely-silent announce** (block > ~10 s)
+and surface it rather than trusting `ok:true`.
 
 ---
 
