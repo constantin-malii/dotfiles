@@ -3,6 +3,48 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-16 — S1b announce-silence root-caused: URI form exonerated; silence tracks a degraded ceiling stream
+
+- **What:** live diagnostic investigation of the 2026-07-16 finding that `music_assistant.play_announcement`
+  renders **silent** on `media_player.ceiling_speakers`. **Result: the announce primitive and the URI form
+  are fine.** With the operator listening, `play_announcement` fed a plain `tts_proxy` URL (rewritten to the
+  internal base `192.168.122.10`) was **clearly audible over both radio and working local music**. The
+  earlier "silent" result was a **confound**: the announces measured silent were fired while the ceiling's
+  underlying queue was in a degraded **"produced no audio data"** state (intermittent SMB / local-music
+  failure); `play_announcement` overlays the current stream and inherits that stall.
+- **Evidence (operator-confirmed by ear, live):**
+
+  | Source at announce | URI form (base) | Block | Audible |
+  |---|---|---|---|
+  | local FLAC, degraded (`produced no audio data`) | tts_proxy (internal `192.168.122.10`) | 12.9 s | **No** |
+  | local FLAC, degraded | tts_proxy (external `192.168.1.104`, via `tts.speak`) | 12.9 s | **No** |
+  | radio (audible) | tts_proxy (internal) | 7.2 s | **Yes** |
+  | working local music (audible) | tts_proxy (internal) | 6.9 s | **Yes** |
+
+  A raw `media-source://tts/…` URI to `play_announcement` is rejected (HTTP 500, MA log
+  `players/cmd/play_announcement: Only URLs are supported for announcements`) — so "media-source vs
+  tts_proxy" is a non-distinction: `play_announcement` only takes a resolvable URL, and resolving a
+  media-source TTS URI yields the same `tts_proxy` URL.
+- **Block-duration diagnostic:** ~7 s block = healthy announce (audible); ~12–13 s block = announce fired
+  over a stalled/no-audio queue (silent). The 07-16 finding's ~13 s blocks are the degraded-stream
+  signature; even MA's own pre-announce chime was silent in that state.
+- **No infra regression:** host up since 2026-06-30 (no reboot), Squeezelite `v1.8` and MA `2.9.3` both
+  unchanged since 2026-06-30. The 07-15 audible spike vs 07-16 silent is **not** a restart regression — it
+  tracks the intermittent underlying-stream health at test time.
+- **`say` decision:** **no `_say` change needed.** `_say` already uses the correct primitive
+  (`music_assistant.play_announcement`) + the correct URI form (tts_proxy → internal base) + radio
+  capture→replay. **Spike-3 re-confirmed live:** radio → `idle` after the announce → `music_assistant.play_media
+  {media_id: library://radio/2}` restarts it. The 07-16 "hold S1b-2" blocker was a confound, not an
+  announce/URI defect.
+- **S1b-2 recommendation: GO** on the announce mechanism (audible over radio and healthy local music).
+  **Caveat:** the intermittent SMB / "produced no audio data" local-music degradation is a real reliability
+  risk — during its failing windows the ceiling is silent for **both music and replies**. It is not
+  announce-specific and is out of S1b scope; flagged for a separate investigation. Radio replies are
+  unaffected (no SMB).
+- **Scope / safety:** read-only host diagnostics + coordinated live audio tests only — **no** resolver / HA
+  / firmware / exposure change, **no** service restart. Live gate left **FREE**. Operator's playback
+  restored (radio playing, per operator's choice).
+
 ## 2026-07-16 — S1b-1′ resolver `say` (play_announcement) deployed — Spike-2 NOT passed (announce silent on ceiling)
 
 - **What:** deployed the S1b-1′ resolver rework — `interaction` `say` mode via

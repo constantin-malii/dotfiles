@@ -228,5 +228,36 @@ grounded**: audible reply + radio survives via capture/replay + blocking restore
 
 ---
 
+## 12. Spike-2 RE-OPENED (2026-07-16 investigation) — URI form exonerated, announce works
+
+The 2026-07-16 S1b-1′ deploy validation recorded `music_assistant.play_announcement` as **silent** on the
+ceiling (CHANGELOG 2026-07-16, and the "hold S1b-2" block). A follow-up live diagnostic (operator listening,
+read-only host + coordinated audio tests) **re-opened that finding and overturned it**:
+
+- **The URI form is NOT the cause.** The same plain `tts_proxy` URL (rewritten to the internal base
+  `192.168.122.10`) fed to `play_announcement` was **audible over both radio (7.2 s block) and working local
+  music (6.9 s block)** — confirmed by ear. The leading "media-source vs tts_proxy" hypothesis is dead: a raw
+  `media-source://tts/…` URI is rejected by `play_announcement` (HTTP 500 "Only URLs are supported"), and
+  resolving one just yields the same `tts_proxy` URL.
+- **The silence was a confound.** The announces measured silent were fired while the ceiling's underlying
+  queue was in a degraded **"produced no audio data"** state (intermittent SMB / local-music failure). In
+  that state the announce inherits the stalled stream and is silent; it also **blocks ~12–13 s** instead of
+  the healthy ~7 s. Even MA's own pre-announce chime was silent then. This is the block-duration tell:
+  **~7 s = audible / healthy; ~12–13 s = silent / degraded underlying stream.**
+- **No infra regression:** host, VM, Squeezelite (`v1.8`) and MA (`2.9.3`) are all unchanged since
+  2026-06-30 — the 07-15-audible vs 07-16-silent gap is the intermittent stream health, not a restart.
+- **Spike-3 (radio capture→replay) re-confirmed live:** radio → `idle` after the announce →
+  `play_media {media_id: library://radio/2}` restarts the station. `_say`'s existing capture→replay branch
+  is correct.
+
+**Net for the design:** §11's "audible via `play_announcement`" revised mechanism **stands**; §11's later
+S1b-1′ "silent" note is superseded by this re-open. **`_say` needs no URI-form change** — it already sends
+`play_announcement` with the tts_proxy internal-base URL and the radio replay branch. **S1b-2 is GO** on the
+announce mechanism, with one caveat carried forward: the intermittent SMB / "produced no audio data"
+local-music degradation makes the ceiling silent for **both music and replies** during its failing windows —
+track it as a **separate reliability item** (not S1b scope; radio replies are unaffected).
+
+---
+
 > **Rollback for this document:** `git revert` on `homebrain/s1b-satellite-ceiling-reply`, or delete this file.
 > No secrets, no implementation, no firmware/exposure change, no live gate.
