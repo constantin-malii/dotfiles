@@ -3,6 +3,108 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-17 — S1b announce silence ROOT-ISOLATED: it's the announce/OVERLAY path, not the ceiling — plain `play_media` of the same TTS clip is audible; source-independent; survives all restarts
+
+> **Headline:** the ceiling speaker, MA transcode, and tts_proxy MP3 all work — a plain
+> `media_player.play_media` of the exact TTS clip is **audible**. Only the **announce/overlay** mechanism
+> (`music_assistant.play_announcement` **and** `tts.speak`) is **silent**. So S1b-2 is **not hard-blocked**:
+> a working non-overlay route exists (play_media + capture/replay). Details below.
+
+- **What:** live diagnostic (operator listening) targeting the previously-unexplained **source-independent**
+  announce silence (the 07-16 `531187df` radio case). **Both open questions are now answered, and the
+  prior "intermittent SMB/local stall" framing is superseded.**
+- **(1) Source-independent — CONFIRMED live.** `music_assistant.play_announcement` (plain `tts_proxy` URL,
+  internal base `192.168.122.10`, verified **200 `audio/mpeg`** each trial) was **silent over an
+  audibly-healthy radio source AND audibly-healthy local music** — reproducing the 07-16 radio case that
+  the SMB theory could not explain. Radio is **not** safe.
+- **(2) NOT a transient degradation — it is persistent & deterministic.** The silence **survived every
+  intervention** (each an operator-approved live action; block stayed ~13 s throughout vs the ~7 s healthy
+  signature):
+
+  | Trial | Source | State | Block | Announce audible? (operator) |
+  |---|---|---|---|---|
+  | A1 | radio (healthy) | baseline (broken SMB provider looping) | 13.4 s | **No** (radio paused, no speech) |
+  | A3 | radio (healthy) | baseline | 13.3 s | **No** |
+  | B1 | local FLAC (healthy) | baseline | 12.9 s | **No** |
+  | C1 | radio (healthy) | after **disabling** broken SMB provider | 13.3 s | **No** |
+  | C2/C3 | radio (healthy) | after **full MA add-on restart** | 13.3 s | **No** |
+  | D1 | radio (healthy) | after **Squeezelite service restart** | 13.3 s | **No** |
+  | E1 | radio (healthy) | **pre-announce chime OFF** (`use_pre_announce=false`) | 14.4 s | **No** |
+  | G1 | (ceiling) | **`tts.speak`** via `script.ceiling_announce` (announce/overlay path) | 11.6 s | **No** |
+  | **G2** | (ceiling) | **plain `media_player.play_media`** of the *same* TTS clip (no overlay) | **0.1 s** | **YES ✅** |
+
+  (A2 void — TTS clip expired 404→500. F1/F3 were log-trace trials, also silent, ~13–17 s.)
+- **Root isolation (G1/G2 — the decisive pair):** the **identical** tts_proxy MP3 that is **silent** through
+  `play_announcement` and `tts.speak` is **audible** through plain `media_player.play_media`. `play_media`
+  returned **instantly (0.1 s, non-blocking)** and played the clip as a normal track; the announce/overlay
+  calls **block ~11–13 s and produce no audio**. So the ceiling output, the FLAC transcode, and the MP3
+  fetch/decode are all **fine** — the fault is **specific to the announcement/overlay mechanism** (pause the
+  current stream → play the announcement → resume) on this Universal→Squeezelite player. `tts.speak` is
+  silent because on an ANNOUNCE-capable MA player it routes to the same overlay path.
+- **Ruled out** (each tested, not assumed): source type · the broken SMB provider loop · MA process state ·
+  Squeezelite client state · pre-announce chime · muted volume (`announce_volume=85%`) · URL form/reach
+  (200 `audio/mpeg` every trial). Normal radio/local playback is **audible through the identical
+  MA→Squeezelite path** — only `play_announcement` is silent.
+- **The SMB provider loop was a coincidental correlate, now cleaned up.** MA had a **second, mis-pathed**
+  `filesystem_smb` provider instance **`yYrXcamj`** (`host=192.168.122.1`, `share=Music`, empty subfolder)
+  failing every ~2 min with **`mount error(2): No such file or directory`** on MainThread for 2+ hours —
+  distinct from the working library provider `kd66vco4` (`host=192.168.1.83`, `share=media`,
+  `subfolder=music`, mounts fine, plays local music). It never mounted and contributed nothing to playback;
+  **it was disabled** (see live changes). Disabling it stopped the log-flood but **did not** restore audio.
+- **MA logs the announce as accepted with NO error** at INFO (`players: Playback announcement to player
+  Ceiling Speakers …`) and nothing further — a fully silent failure. **Deep tracing is blocked by the
+  access model:** the HA add-on `/logs` proxy surfaces **INFO only** (0 SlimProto `strm`/`STM` lines even at
+  DEBUG/VERBOSE — verified), and there is **no VM/Docker shell** to read the MA container's stdout. Host
+  Squeezelite runs default logging (`-o hw:1,0 -s 192.168.122.10 -C 5`, no debug flags) so it shows no
+  `strm` detail either. **To trace the announce stream we need direct MA container log access** (or
+  squeezelite debug flags + restart) — a follow-up.
+- **Ruled out** (each tested, not assumed): source type · the broken SMB provider loop · MA process state ·
+  Squeezelite client state · pre-announce chime · muted volume (`announce_volume=85%`) · URL form/reach
+  (200 `audio/mpeg` every trial) · **TTS clip fetch/decode/transcode and ceiling output** (G2 audible).
+- **Verdict:** the ceiling silence is a **failure of MA 2.9.3's announcement/OVERLAY path specifically** on
+  this Universal → Squeezelite player (`flow_mode=true`, `http_profile=no_content_length`,
+  `output_codec=flac`) — **both** `play_announcement` and `tts.speak` (which routes to it). It is **not**
+  a broken speaker, transcode, clip, or a transient stall: the same clip via plain `play_media` is audible,
+  and the silence survived disabling the SMB provider + a full MA restart + a Squeezelite restart. The
+  *exact* internal mechanism is unproven (deep SlimProto trace is access-blocked); leading candidates: the
+  documented **HTTP/1.0 stream-termination / mid-stream-interruption family** for this SlimProto player, and
+  squeezelite **`-C 5`** (close ALSA output after 5 s idle) racing the announce pause→play gap. Note the
+  07-15/07-16 audible ~7 s `play_announcement` results mean the overlay path *has* worked before, so it
+  flips on a longer timescale and is sticky across restarts once broken.
+- **S1b-2 impact — NOT hard-blocked; use the working route.** Ceiling replies can ship via the audible path:
+  - **Route replies via plain `media_player.play_media`** of the reply URI (audible), **not** the announce
+    overlay. This is **replace-not-overlay** (music stops for the reply), so pair it with S1b's existing
+    **capture→replay** (radio → re-play `library://radio/2`; local music → re-play the prior item). This is
+    exactly the operator's "play the reply, then restore" instinct, and it sidesteps the broken overlay.
+    (Trade-off vs the overlay design in §11: no auto-resume, but it's audible today.) **Avoid `media_stop`**
+    on resume (stop-wedge) — use `play_media` replace + capture/replay.
+    - **Validated live end-to-end (operator-confirmed):** radio playing → capture `library://radio/2` →
+      `play_media` the reply clip (audible spoken sentence) → re-play `library://radio/2` → **radio resumed**.
+      Heard as *music → reply → music*, clean. (`media_duration` is not populated for the clip, so the replay
+      timing used a ~6 s fixed wait; S1b-2 should size the post-reply wait to the reply length or poll for the
+      clip to reach `idle`/end before replaying.)
+  - **Keep the block-duration guard:** if an announce/overlay path is used, block **> ~10 s ⇒ likely silent**
+    (healthy ~7 s); **never trust `ok:true`** (MA reports success while silent).
+  - **Radio is NOT safe** for the overlay path (deterministically silent here); the play_media route + replay
+    handles radio uniformly.
+  - Fixing the **overlay path itself** remains a **dedicated reliability item** (needs MA container log access
+    to trace; candidates: MA upgrade, player-config change, squeezelite `-C`/flags, upstream MA issue) — but
+    S1b-2 no longer depends on it.
+- **Live changes made (operator-approved; live gate CLAIMED then released):**
+  1. **Disabled** MA provider `filesystem_smb--yYrXcamj` via MA WS `config/providers/save {enabled:false}`
+     (its config was snapshotted read-only during the session; not needed for rollback — MA retains the
+     disabled provider's values). **Left disabled** (beneficial cleanup — ends the mount-error(2) loop).
+     **Rollback:** re-enable in MA UI (*Settings → Music Providers → the "requires attention" Filesystem
+     provider → enable*) or `config/providers/save {enabled:true}`.
+  2. **Restarted** the MA add-on (HA supervisor `hassio/addon_restart`) and, separately, the operator ran
+     `sudo systemctl restart squeezelite-ceiling`. Both transient; no lasting config change.
+  3. Squeezelite provider `log_level` toggled DEBUG→VERBOSE for tracing, **reverted to `GLOBAL`** (as-found).
+  4. Ceiling playback **restored** (radio playing, volume 0.47 — the pre-test level).
+- **Scope / safety:** MA reached read-mostly via its **on-host account token** (`~/mass-resolver/.ma_token`,
+  never echoed) over the MA WS API; HA reads via on-host `.ha_token`. No resolver code / HA-script /
+  exposure / firmware change. The provider-disable + restarts were explicit operator-approved live actions.
+  MA WS method captured in `ONBOARDING.md` §3 (auth + `config/providers/*`).
+
 ## 2026-07-16 — S1b announce-silence root-caused: URI form exonerated; silence tracks a degraded ceiling stream
 
 - **What:** live diagnostic investigation of the 2026-07-16 finding that `music_assistant.play_announcement`
