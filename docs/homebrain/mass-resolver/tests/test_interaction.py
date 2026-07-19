@@ -190,6 +190,10 @@ class SayPlayMediaTest(unittest.TestCase):
         FakeTimer.created = []
         self.zone = "media_player.ceiling_speakers"
         self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        # REALITY (live-captured): Music Assistant does not echo the raw URL back as
+        # media_content_id -- it wraps it, e.g. "builtin://radio/<url>". Poll matching
+        # must use containment, not equality; these tests script the prefixed form.
+        self.reply_mid = "builtin://radio/" + self.norm_uri
 
     def _cap(self, hook=None):
         cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
@@ -201,7 +205,7 @@ class SayPlayMediaTest(unittest.TestCase):
         ha = FakeHA()
         ha.set_states([
             idle_state(),                                   # capture (before)
-            playing_with_id(0.40, self.norm_uri),           # start-poll: reply started
+            playing_with_id(0.40, self.reply_mid),          # start-poll: MA-wrapped media_content_id
             idle_state(),                                   # finish-poll: reply ended
         ])
         ctx = FakeCtx(ha)
@@ -216,7 +220,7 @@ class SayPlayMediaTest(unittest.TestCase):
         ha = FakeHA()
         ha.set_states([
             playing_with_id(0.55, "library://track/9"),     # capture: was playing local track
-            playing_with_id(0.40, self.norm_uri),           # start-poll: reply started
+            playing_with_id(0.40, self.reply_mid),          # start-poll: MA-wrapped media_content_id
             idle_state(),                                   # finish-poll: reply ended
         ])
         ctx = FakeCtx(ha)
@@ -238,6 +242,13 @@ class SayPlayMediaTest(unittest.TestCase):
         # replay of the captured source happens after the clip ends
         replay_pm = ha.calls[pm_indices[1]]
         self.assertEqual(replay_pm[2]["media_id"], "library://track/9")
+
+    def test_ma_wrapped_media_content_id_is_not_exact_match(self):
+        # Documents the prefix behaviour: exact-equality against the raw normalised URI
+        # must NOT match the MA-wrapped form, but containment must. A future regression
+        # to exact-match would fail this assertion (and re-break start-poll detection).
+        self.assertNotEqual(self.reply_mid, self.norm_uri)
+        self.assertIn(self.norm_uri, self.reply_mid)
 
     def test_reply_never_starts_still_restores_and_replays(self):
         cap = self._cap()
@@ -288,7 +299,7 @@ class SayPlayMediaTest(unittest.TestCase):
         ha.calls = []
         ha.set_states([
             idle_state(),                                    # capture
-            playing_with_id(0.40, self.norm_uri),            # start-poll: started
+            playing_with_id(0.40, self.reply_mid),           # start-poll: MA-wrapped media_content_id
             idle_state(),                                    # finish-poll: ended
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -306,7 +317,7 @@ class SayPlayMediaTest(unittest.TestCase):
         ha.calls = []
         ha.set_states([
             playing(0.55),                                   # capture: prev_volume=0.55
-            playing_with_id(0.40, self.norm_uri),            # start-poll: started
+            playing_with_id(0.40, self.reply_mid),           # start-poll: MA-wrapped media_content_id
             idle_state(),                                    # finish-poll: ended
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -323,7 +334,7 @@ class SayPlayMediaTest(unittest.TestCase):
         ctx.settings = NoOwnRestoreSettings()
         ha.set_states([
             playing(0.62),                                   # capture: prev_volume=0.62, no media_content_id
-            playing_with_id(0.40, self.norm_uri),             # start-poll: started
+            playing_with_id(0.40, self.reply_mid),            # start-poll: MA-wrapped media_content_id
             idle_state(),                                     # finish-poll: ended
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -589,8 +600,9 @@ class CoreWiringTest(unittest.TestCase):
 class SayDispatchTest(unittest.TestCase):
     def test_dispatch_say_is_silent(self):
         norm_uri = "http://192.168.122.10:8123/a.flac"
+        reply_mid = "builtin://radio/" + norm_uri            # MA-wrapped media_content_id
         ha = FakeHA()
-        ha.set_states([idle_state(), playing_with_id(0.40, norm_uri), idle_state()])
+        ha.set_states([idle_state(), playing_with_id(0.40, reply_mid), idle_state()])
         spk = FakeSpeaker()
         ctx = core.Ctx(ma_factory=lambda: None, ha=ha, settings=FakeSettings(),
                        radio_cfg={}, news_cfg={}, speaker=spk)

@@ -172,7 +172,7 @@ class InteractionCapability(capability.Capability):
         # 3. normalise the reply URI to the MA-reachable internal base
         norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
 
-        poll_secs = int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0
+        poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
         start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
         reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
         reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
@@ -195,7 +195,9 @@ class InteractionCapability(capability.Capability):
                 LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
                 state = {}
             attrs = state.get("attributes") or {}
-            if state.get("state") == "playing" and attrs.get("media_content_id") == norm_uri:
+            # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
+            # "builtin://radio/<url>". Match by containment, not equality.
+            if state.get("state") == "playing" and norm_uri in (attrs.get("media_content_id") or ""):
                 reply_started = True
                 break
             self._sleeper(poll_secs)
@@ -216,7 +218,7 @@ class InteractionCapability(capability.Capability):
                     LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
                     state = {}
                 attrs = state.get("attributes") or {}
-                if state.get("state") != "playing" or attrs.get("media_content_id") != norm_uri:
+                if state.get("state") != "playing" or norm_uri not in (attrs.get("media_content_id") or ""):
                     break
                 self._sleeper(poll_secs)
                 elapsed += poll_secs
