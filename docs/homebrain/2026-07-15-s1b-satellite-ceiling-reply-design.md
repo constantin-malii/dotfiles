@@ -264,5 +264,56 @@ and surface it rather than trusting `ok:true`.
 
 ---
 
+## 13. Announce silence ROOT-ISOLATED (2026-07-17) — it's the announce/OVERLAY path, not the ceiling; S1b-2 NOT blocked (use `play_media` + replay)
+
+A follow-up live diagnostic (operator listening) targeted §12's open item — the source-independent 07-16
+radio silence — and **overturns the "intermittent SMB/local stall" framing**. See CHANGELOG 2026-07-17 for
+the full trials table.
+
+- **Source-independent: CONFIRMED live.** `play_announcement` (tts_proxy internal-base URL, 200 `audio/mpeg`
+  verified) was **silent over audibly-healthy radio AND audibly-healthy local music** — the 07-16 radio case,
+  reproduced. **Radio is not safe.**
+- **Persistent & deterministic, NOT transient.** The silence (block steady ~13 s vs ~7 s healthy) **survived
+  every intervention**: disabling the broken SMB provider, a **full MA add-on restart**, a **Squeezelite
+  service restart**, and firing with the **pre-announce chime off**. Ruled out: source type, the SMB provider
+  loop, MA process state, Squeezelite client state, the chime, muted volume (`announce_volume=85%`), and URL
+  form/reach. Normal radio/local playback is **audible through the identical MA→Squeezelite path**.
+- **ROOT-ISOLATED to the announce/OVERLAY path (decisive test):** the **same** tts_proxy MP3 that is silent
+  via `music_assistant.play_announcement` **and** `tts.speak` is **AUDIBLE via plain `media_player.play_media`**
+  (instant, non-blocking; plays it as a normal track). So the ceiling output + FLAC transcode + MP3
+  fetch/decode all work — the fault is **specific to the announcement/overlay mechanism** (pause current →
+  play announcement → resume), which blocks ~11–13 s and produces no audio. `tts.speak` is silent because on
+  an ANNOUNCE-capable MA player it routes to the same overlay. MA logs the overlay **accepted with no error**.
+- **The SMB "produced no audio data" stall (§12) is superseded as *the* trigger.** The correlated signature
+  today was a **second, mis-pathed** `filesystem_smb` provider (`yYrXcamj`, `mount error(2)`) — a coincidental
+  correlate that never mounted; disabling it did **not** restore audio. So the earlier SMB stall was a
+  *symptom class*, not the root trigger.
+- **Root mechanism unproven — tracing is access-blocked.** The HA add-on `/logs` proxy surfaces **INFO only**
+  (no SlimProto `strm`/`STM` even at DEBUG/VERBOSE, verified) and there is **no VM/Docker shell** for the MA
+  container. Leading candidates: the documented **HTTP/1.0 stream-termination** family for this SlimProto
+  player, and squeezelite **`-C 5`** (close ALSA output after 5 s idle) racing the announce pause→play gap.
+  A working state *does* exist (07-15/07-16 audible ~7 s), so the failure flips on a longer timescale and is
+  **sticky across restarts** once entered.
+
+**Net for the design — §12's "GO with a caveat" is NOT blocked, but the mechanism must change.** The
+`play_announcement` overlay `_say` shipped in S1b-1′ is **silent on this player** and cannot be used as-is.
+Revised route:
+- **Play the reply via plain `media_player.play_media`** of the reply URI (audible today), **not** the
+  announce overlay. It's **replace-not-overlay**, so pair it with S1b's existing **capture→replay** (radio →
+  re-play `library://radio/2`; local music → re-play the prior item). This matches the operator's "play the
+  reply, then restore" instinct and sidesteps the broken overlay. **No `media_stop`** (stop-wedge) — use
+  `play_media` replace + replay. Trade-off vs §11's overlay model: no auto-resume under the reply, but audible.
+  **Validated live end-to-end (operator-confirmed):** radio → capture `library://radio/2` → `play_media`
+  reply (audible) → re-play the station → radio resumed; heard as *music → reply → music*. Timing note:
+  `media_duration` is not populated for the clip, so size the post-reply wait to the reply length (or poll
+  the clip to `idle`/end) before replaying — a fixed ~6 s wait worked in the demo but isn't robust.
+- **If any overlay path is used, keep the guard:** block **> ~10 s ⇒ likely silent** (healthy ~7 s); **never
+  trust `ok:true`**. **Radio is not safe** for the overlay; the play_media+replay route handles it uniformly.
+- Fixing the **overlay path itself** is a **dedicated reliability item** (needs MA container log access to
+  trace — candidates: MA upgrade, player-config change, squeezelite `-C`/flags, upstream MA issue), but
+  **S1b-2 no longer depends on it**.
+
+---
+
 > **Rollback for this document:** `git revert` on `homebrain/s1b-satellite-ceiling-reply`, or delete this file.
 > No secrets, no implementation, no firmware/exposure change, no live gate.
