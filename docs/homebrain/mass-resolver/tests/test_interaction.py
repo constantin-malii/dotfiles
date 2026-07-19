@@ -34,7 +34,25 @@ class FakeSettings(object):
     max_duck_timeout = 45000
     interaction_ignore_when_idle = True
     announce_failures = True
-    say_announce_timeout_ms = 30000
+    reply_volume = 0.40
+    say_start_timeout_ms = 5000
+    say_reply_timeout_ms = 30000
+    say_poll_ms = 500
+    say_internal_base = "192.168.122.10:8123"
+    say_owns_restore = True
+
+
+class FakeSleeper(object):
+    """No-op sleeper for tests; records call count and optionally fires a hook per call
+    (used to simulate a barge-in gen bump mid-poll)."""
+    def __init__(self, hook=None):
+        self.calls = 0
+        self._hook = hook
+
+    def __call__(self, secs):
+        self.calls += 1
+        if self._hook is not None:
+            self._hook(self.calls)
 
 
 class FakeSpeaker(object):
@@ -167,37 +185,162 @@ class DuckTest(unittest.TestCase):
         self.assertAlmostEqual(FakeTimer.created[0].interval, 45.0)  # FakeSettings max_duck_timeout 45000ms -> 45s
 
 
-class SayAnnounceTest(unittest.TestCase):
+class SayPlayMediaTest(unittest.TestCase):
     def setUp(self):
-        self.cap = interaction.InteractionCapability()
+        FakeTimer.created = []
         self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        # REALITY (live-captured): Music Assistant does not echo the raw URL back as
+        # media_content_id -- it wraps it, e.g. "builtin://radio/<url>". Poll matching
+        # must use containment, not equality; these tests script the prefixed form.
+        self.reply_mid = "builtin://radio/" + self.norm_uri
 
-    def test_say_calls_play_announcement_with_uri(self):
-        ha = FakeHA(playing(0.5)); ctx = FakeCtx(ha)
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
-        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"]); self.assertTrue(r["metadata"]["said"])
-        ann = [c for c in ha.calls if c[1] == "play_announcement"]
-        self.assertEqual(len(ann), 1)
-        self.assertEqual(ann[0][0], "music_assistant")
-        self.assertEqual(ann[0][2]["entity_id"], self.zone)
-        self.assertEqual(ann[0][2]["url"], "http://x/a.mp3")
-        self.assertIn(("play_announcement", 30.0), ha.timeouts)
+    def _cap(self, hook=None):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper(hook))
+        return cap
 
-    def test_say_replays_station_when_not_resumed(self):     # radio: idle after announce -> re-play captured id
-        ha = FakeHA(); ctx = FakeCtx(ha)
-        ha.set_states([radio_playing("library://radio/2"), idle_state()])   # before=playing radio, after=idle
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
-        self.assertTrue(r["metadata"]["replayed"])
+    def test_uri_normalised_to_internal_base(self):
+        cap = self._cap()
+        ha = FakeHA()
+        ha.set_states([
+            idle_state(),                                   # capture (before)
+            playing_with_id(0.40, self.reply_mid),          # start-poll: MA-wrapped media_content_id
+            idle_state(),                                   # finish-poll: reply ended
+        ])
+        ctx = FakeCtx(ha)
+        r = run(cap, ctx, {"mode": "say", "uri": "http://192.168.1.104:8123/api/tts_proxy/x.mp3"})
+        self.assertTrue(r["ok"])
         pm = [c for c in ha.calls if c[1] == "play_media"]
         self.assertEqual(len(pm), 1)
-        self.assertEqual(pm[0][2]["media_id"], "library://radio/2")
+        self.assertEqual(pm[0][2]["media_id"], self.norm_uri)
 
-    def test_say_no_replay_when_music_resumed(self):         # local music: playing after announce -> no re-play
+    def test_happy_path_volume_before_play_then_replay_after_finish(self):
+        cap = self._cap()
+        ha = FakeHA()
+        ha.set_states([
+            playing_with_id(0.55, "library://track/9"),     # capture: was playing local track
+            playing_with_id(0.40, self.reply_mid),          # start-poll: MA-wrapped media_content_id
+            idle_state(),                                   # finish-poll: reply ended
+        ])
+        ctx = FakeCtx(ha)
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"]); self.assertIsNone(r["spoken_text"])
+        self.assertTrue(r["metadata"]["reply_started"])
+        self.assertFalse(r["metadata"]["likely_silent"])
+        self.assertTrue(r["metadata"]["replayed"])
+        self.assertFalse(r["metadata"]["superseded"])
+        # order: volume_set(reply_volume) BEFORE play_media(reply)
+        service_order = [c[1] for c in ha.calls]
+        vol_idx = service_order.index("volume_set")
+        pm_indices = [i for i, s in enumerate(service_order) if s == "play_media"]
+        self.assertTrue(vol_idx < pm_indices[0])
+        vol_call = ha.calls[vol_idx]
+        self.assertAlmostEqual(vol_call[2]["volume_level"], 0.40)          # FakeSettings.reply_volume
+        reply_pm = ha.calls[pm_indices[0]]
+        self.assertEqual(reply_pm[2]["media_id"], self.norm_uri)
+        # replay of the captured source happens after the clip ends
+        replay_pm = ha.calls[pm_indices[1]]
+        self.assertEqual(replay_pm[2]["media_id"], "library://track/9")
+
+    def test_ma_wrapped_media_content_id_is_not_exact_match(self):
+        # Documents the prefix behaviour: exact-equality against the raw normalised URI
+        # must NOT match the MA-wrapped form, but containment must. A future regression
+        # to exact-match would fail this assertion (and re-break start-poll detection).
+        self.assertNotEqual(self.reply_mid, self.norm_uri)
+        self.assertIn(self.norm_uri, self.reply_mid)
+
+    def test_reply_never_starts_still_restores_and_replays(self):
+        cap = self._cap()
+        ha = FakeHA()
+        # capture + 10 start-poll reads (say_start_timeout_ms=5000 / say_poll_ms=500), never matches
+        states = [playing_with_id(0.55, "library://track/9")] + [idle_state()] * 10
+        ha.set_states(states)
+        ctx = FakeCtx(ha)
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["reply_started"])
+        self.assertTrue(r["metadata"]["likely_silent"])
+        self.assertTrue(r["metadata"]["replayed"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 2)                 # reply volume, then restore
+        pm_calls = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm_calls), 2)                  # reply attempt, then source replay
+        self.assertEqual(pm_calls[1][2]["media_id"], "library://track/9")
+
+    def test_barge_in_supersede_aborts_restore_and_replay(self):
+        zone = self.zone
+
+        def bump_gen(n):
+            if n == 1:                                       # bump mid start-poll, on the first sleep
+                cap._say_gen[zone] = cap._say_gen.get(zone, 0) + 1
+
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        cap._sleeper = FakeSleeper(bump_gen)
+        ha = FakeHA()
+        ha.set_states([
+            playing_with_id(0.55, "library://track/9"),      # capture
+            idle_state(),                                     # start-poll #1: not started -> sleeps -> gen bumped
+            idle_state(),                                     # start-poll #2: superseded check trips here
+        ])
+        ctx = FakeCtx(ha)
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["superseded"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 1)                 # only the initial reply-volume set; no restore
+        pm_calls = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm_calls), 1)                  # only the reply attempt; no source replay
+
+    def test_restore_targets_duck_baseline_when_owns_restore(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(cap, ctx, {"mode": "duck"})                      # seed baseline 0.40 in cap._snaps
+        ha.calls = []
+        ha.set_states([
+            idle_state(),                                    # capture
+            playing_with_id(0.40, self.reply_mid),           # start-poll: MA-wrapped media_content_id
+            idle_state(),                                    # finish-poll: ended
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.40)     # restored to duck baseline
+
+    def test_restore_falls_back_to_prev_volume_when_snapshot_popped_concurrently(self):
+        # simulates a dead-man timer / S1a _restore() popping self._snaps[zone] mid-reply:
+        # say_owns_restore=True but the snapshot is gone by the time the restore step runs.
+        cap = self._cap()
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(cap, ctx, {"mode": "duck"})                      # seed baseline 0.40 in cap._snaps
+        cap._snaps.pop("media_player.ceiling_speakers", None)  # concurrent pop before restore step
+        ha.calls = []
+        ha.set_states([
+            playing(0.55),                                   # capture: prev_volume=0.55
+            playing_with_id(0.40, self.reply_mid),           # start-poll: MA-wrapped media_content_id
+            idle_state(),                                    # finish-poll: ended
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 2)                  # reply volume, then restore still happens
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.55)  # falls back to prev_volume, not skipped
+
+    def test_restore_targets_prev_volume_when_not_owns_restore(self):
+        class NoOwnRestoreSettings(FakeSettings):
+            say_owns_restore = False
+        cap = self._cap()
         ha = FakeHA(); ctx = FakeCtx(ha)
-        ha.set_states([playing_with_id(0.5, "library://track/9"), playing_with_id(0.5, "library://track/9")])
-        r = run(self.cap, ctx, {"mode": "say", "uri": "http://x/a.mp3"})
-        self.assertFalse(r["metadata"]["replayed"])
-        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
+        ctx.settings = NoOwnRestoreSettings()
+        ha.set_states([
+            playing(0.62),                                   # capture: prev_volume=0.62, no media_content_id
+            playing_with_id(0.40, self.reply_mid),            # start-poll: MA-wrapped media_content_id
+            idle_state(),                                     # finish-poll: ended
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.62)     # restored to captured prev_volume
 
 
 class RestoreTest(unittest.TestCase):
@@ -456,20 +599,24 @@ class CoreWiringTest(unittest.TestCase):
 
 class SayDispatchTest(unittest.TestCase):
     def test_dispatch_say_is_silent(self):
-        ha = FakeHA(playing(0.40)); spk = FakeSpeaker()
+        norm_uri = "http://192.168.122.10:8123/a.flac"
+        reply_mid = "builtin://radio/" + norm_uri            # MA-wrapped media_content_id
+        ha = FakeHA()
+        ha.set_states([idle_state(), playing_with_id(0.40, reply_mid), idle_state()])
+        spk = FakeSpeaker()
         ctx = core.Ctx(ma_factory=lambda: None, ha=ha, settings=FakeSettings(),
                        radio_cfg={}, news_cfg={}, speaker=spk)
         r = core.dispatch(ctx, "interaction", {"mode": "say", "uri": "http://x/a.flac"})
         self.assertTrue(r["ok"]); self.assertEqual(r["intent"], "interaction")
         self.assertTrue(r["metadata"]["said"])
         self.assertEqual(spk.said, [])                              # silent: no TTS
-        # End-to-end: verify _say mechanism fired through dispatch
-        ann = [c for c in ha.calls if c[1] == "play_announcement"]
-        self.assertEqual(len(ann), 1)
-        self.assertEqual(ann[0][0], "music_assistant")
-        self.assertEqual(ann[0][2]["url"], "http://x/a.flac")
+        # End-to-end: verify _say mechanism fired through dispatch via play_media
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm), 1)
+        self.assertEqual(pm[0][0], "music_assistant")
+        self.assertEqual(pm[0][2]["media_id"], norm_uri)
         self.assertIn("replayed", r["metadata"])                    # capture/replay metadata present
-        self.assertFalse(r["metadata"]["replayed"])                 # no media_content_id -> no replay
+        self.assertFalse(r["metadata"]["replayed"])                 # not playing before -> no replay
 
 
 if __name__ == "__main__":
