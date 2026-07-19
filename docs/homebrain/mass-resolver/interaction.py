@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # AU-02/AU-03: interaction duck/restore for a media zone. Silent. Python 3.5 safe.
 import logging, time, threading
+from urllib.parse import urlparse, urlunparse
 import capability
 import command_result as cr
 
@@ -11,11 +12,13 @@ _MODES = ("duck", "restore", "say")
 class InteractionCapability(capability.Capability):
     name = "interaction"
 
-    def __init__(self, timer_factory=None, clock=None):
+    def __init__(self, timer_factory=None, clock=None, sleeper=None):
         self._timer_factory = timer_factory or threading.Timer
         self._clock = clock or time.time
+        self._sleeper = sleeper or time.sleep
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
+        self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -127,30 +130,125 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Restored.", spoken_text=None,
                          metadata={"restored": True, "to": target, "zone": zone})
 
+    def _normalise_uri(self, uri, internal_base):
+        # Rewrite the reply URI's netloc (host:port) to an MA-reachable base; preserve scheme/path/query.
+        if not internal_base:
+            return uri
+        try:
+            parts = urlparse(uri)
+            return urlunparse((parts.scheme, internal_base, parts.path, parts.params,
+                               parts.query, parts.fragment))
+        except Exception:
+            return uri
+
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
-        timeout = int(getattr(ctx.settings, "say_announce_timeout_ms", 30000)) / 1000.0
-        # capture what's playing so we can re-play it if the announcement doesn't auto-resume (radio/live)
-        try:                                                  # best-effort capture; a read blip must not swallow the reply
+
+        # 1. capture before-state (best-effort; a read blip must not swallow the reply)
+        try:
             before = ctx.ha.get_entity_state(zone) or {}
         except Exception as e:
-            LOG.warning("SAY req=%s zone=%s capture read failed (%r); replay skipped", rid, zone, e)
+            LOG.warning("SAY req=%s zone=%s capture read failed (%r); proceeding with empty capture", rid, zone, e)
             before = {}
         was_playing = before.get("state") == "playing"
-        media_id = (before.get("attributes") or {}).get("media_content_id")
-        # blocking: MA pauses the music, plays the reply, resumes resumable content
-        ctx.ha.call_service_rest("music_assistant", "play_announcement",
-                                 {"entity_id": zone, "url": uri}, timeout=timeout)
-        replayed = False
-        if was_playing and media_id:
+        battrs = before.get("attributes") or {}
+        source_id = battrs.get("media_content_id")
+        prev_volume = battrs.get("volume_level")
+
+        # 2. barge-in gen-id: bump this zone's generation; a later say() will bump it again and
+        #    supersede us -- we then abort remaining steps rather than fight over the finish.
+        with self._lock:
+            my_gen = self._say_gen.get(zone, 0) + 1
+            self._say_gen[zone] = my_gen
+
+        def superseded():
+            return self._say_gen.get(zone) != my_gen
+
+        def superseded_result():
+            return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                         metadata={"said": False, "reply_started": False, "likely_silent": False,
+                                    "replayed": False, "superseded": True, "zone": zone})
+
+        # 3. normalise the reply URI to the MA-reachable internal base
+        norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
+
+        poll_secs = int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0
+        start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
+        reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
+        reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
+
+        # 4. set reply volume, then 5. play_media (reply)
+        ctx.ha.call_service_rest("media_player", "volume_set",
+                                 {"entity_id": zone, "volume_level": reply_volume})
+        ctx.ha.call_service_rest("music_assistant", "play_media",
+                                 {"entity_id": zone, "media_id": norm_uri})
+
+        # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
+        reply_started = False
+        elapsed = 0.0
+        while elapsed < start_timeout:
+            if superseded():
+                return superseded_result()
             try:
-                after = ctx.ha.get_entity_state(zone) or {}
-            except Exception:
-                after = {}
-            if after.get("state") != "playing":               # radio/live didn't auto-resume -> re-play the station
+                state = ctx.ha.get_entity_state(zone) or {}
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
+                state = {}
+            attrs = state.get("attributes") or {}
+            if state.get("state") == "playing" and attrs.get("media_content_id") == norm_uri:
+                reply_started = True
+                break
+            self._sleeper(poll_secs)
+            elapsed += poll_secs
+
+        likely_silent = not reply_started
+        if likely_silent:
+            LOG.warning("SAY req=%s reply did not start (likely silent)", rid)
+        else:
+            # 7. wait for finish: poll until the clip stops playing (or gets superseded)
+            elapsed = 0.0
+            while elapsed < reply_timeout:
+                if superseded():
+                    return superseded_result()
+                try:
+                    state = ctx.ha.get_entity_state(zone) or {}
+                except Exception as e:
+                    LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
+                    state = {}
+                attrs = state.get("attributes") or {}
+                if state.get("state") != "playing" or attrs.get("media_content_id") != norm_uri:
+                    break
+                self._sleeper(poll_secs)
+                elapsed += poll_secs
+
+        if superseded():
+            return superseded_result()
+
+        # 8. restore volume (best-effort; a restore failure must not swallow the reply result)
+        try:
+            owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
+            if owns_restore and zone in self._snaps:
+                restore_to = self._snaps[zone]["volume"]
+            else:
+                restore_to = prev_volume
+            if restore_to is not None:
+                ctx.ha.call_service_rest("media_player", "volume_set",
+                                         {"entity_id": zone, "volume_level": restore_to})
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s restore failed (%r)", rid, zone, e)
+
+        # 9. replay source: the reply replaced the queue, so replay for BOTH radio and local content
+        replayed = False
+        if was_playing and source_id and not superseded():
+            try:
                 ctx.ha.call_service_rest("music_assistant", "play_media",
-                                         {"entity_id": zone, "media_id": media_id})
+                                         {"entity_id": zone, "media_id": source_id})
                 replayed = True
-        LOG.info("SAY req=%s zone=%s uri=%s replayed=%s", rid, zone, uri, replayed)
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s replay failed (%r)", rid, zone, e)
+
+        LOG.info("SAY req=%s zone=%s reply_started=%s likely_silent=%s replayed=%s",
+                 rid, zone, reply_started, likely_silent, replayed)
         return cr.ok(self.name, rid, "Said.", spoken_text=None,
-                     metadata={"said": True, "replayed": replayed, "zone": zone})
+                     metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
+                                "replayed": replayed, "superseded": False, "zone": zone})
