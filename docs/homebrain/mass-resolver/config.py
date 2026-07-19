@@ -46,8 +46,13 @@ class Settings(object):
         self.fade_ms = int(cfg.get("fade_ms", 0))                               # reserved (no fade v1)
         self.max_duck_timeout = int(cfg.get("max_duck_timeout", 120000))        # ms dead-man auto-restore (>= longest reply)
         self.interaction_ignore_when_idle = bool(cfg.get("interaction_ignore_when_idle", True))
-        # S1b-1' say (ceiling reply) - play_announcement is blocking (~7-14s); allow a long timeout
-        self.say_announce_timeout_ms = int(cfg.get("say_announce_timeout_ms", 30000))
+        # S1b-2 say: play_media reply route (play_announcement retired — silent on this player)
+        self.reply_volume = float(cfg.get("reply_volume", 0.40))                 # ceiling volume for the reply clip
+        self.say_start_timeout_ms = int(cfg.get("say_start_timeout_ms", 5000))   # max wait for the clip to START playing
+        self.say_reply_timeout_ms = int(cfg.get("say_reply_timeout_ms", 30000))  # max wait for the clip to FINISH
+        self.say_poll_ms = int(cfg.get("say_poll_ms", 500))                      # poll interval
+        self.say_internal_base = cfg.get("say_internal_base", "192.168.122.10:8123")  # MA-reachable base for reply URI
+        self.say_owns_restore = bool(cfg.get("say_owns_restore", True))          # _say restores pre-duck baseline
 
 
 def load_settings(here):

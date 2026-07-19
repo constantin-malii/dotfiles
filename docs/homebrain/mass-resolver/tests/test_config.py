@@ -69,11 +69,32 @@ class InteractionTunablesTest(unittest.TestCase):
 class SayTunablesTest(unittest.TestCase):
     def test_defaults(self):
         s = config.Settings({})
-        self.assertEqual(s.say_announce_timeout_ms, 30000)
+        self.assertAlmostEqual(s.reply_volume, 0.40)
+        self.assertEqual(s.say_start_timeout_ms, 5000)
+        self.assertEqual(s.say_reply_timeout_ms, 30000)
+        self.assertEqual(s.say_poll_ms, 500)
+        self.assertEqual(s.say_internal_base, "192.168.122.10:8123")
+        self.assertTrue(s.say_owns_restore)
 
-    def test_override(self):
-        s = config.Settings({"say_announce_timeout_ms": 20000})
-        self.assertEqual(s.say_announce_timeout_ms, 20000)
+    def test_overrides(self):
+        s = config.Settings({
+            "reply_volume": 0.55,
+            "say_start_timeout_ms": 7000,
+            "say_reply_timeout_ms": 40000,
+            "say_poll_ms": 250,
+            "say_internal_base": "10.0.0.5:8123",
+            "say_owns_restore": False,
+        })
+        self.assertAlmostEqual(s.reply_volume, 0.55)
+        self.assertEqual(s.say_start_timeout_ms, 7000)
+        self.assertEqual(s.say_reply_timeout_ms, 40000)
+        self.assertEqual(s.say_poll_ms, 250)
+        self.assertEqual(s.say_internal_base, "10.0.0.5:8123")
+        self.assertFalse(s.say_owns_restore)
+
+    def test_say_announce_timeout_ms_retired(self):
+        s = config.Settings({})
+        self.assertFalse(hasattr(s, "say_announce_timeout_ms"))
 
 
 if __name__ == "__main__":
