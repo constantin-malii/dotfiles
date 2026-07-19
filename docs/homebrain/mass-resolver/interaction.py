@@ -227,8 +227,9 @@ class InteractionCapability(capability.Capability):
         # 8. restore volume (best-effort; a restore failure must not swallow the reply result)
         try:
             owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
-            if owns_restore and zone in self._snaps:
-                restore_to = self._snaps[zone]["volume"]
+            snap = self._snaps.get(zone)
+            if owns_restore and snap and "volume" in snap:
+                restore_to = snap["volume"]
             else:
                 restore_to = prev_volume
             if restore_to is not None:

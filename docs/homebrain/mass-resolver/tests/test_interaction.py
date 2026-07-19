@@ -296,6 +296,25 @@ class SayPlayMediaTest(unittest.TestCase):
         vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
         self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.40)     # restored to duck baseline
 
+    def test_restore_falls_back_to_prev_volume_when_snapshot_popped_concurrently(self):
+        # simulates a dead-man timer / S1a _restore() popping self._snaps[zone] mid-reply:
+        # say_owns_restore=True but the snapshot is gone by the time the restore step runs.
+        cap = self._cap()
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        run(cap, ctx, {"mode": "duck"})                      # seed baseline 0.40 in cap._snaps
+        cap._snaps.pop("media_player.ceiling_speakers", None)  # concurrent pop before restore step
+        ha.calls = []
+        ha.set_states([
+            playing(0.55),                                   # capture: prev_volume=0.55
+            playing_with_id(0.40, self.norm_uri),            # start-poll: started
+            idle_state(),                                    # finish-poll: ended
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 2)                  # reply volume, then restore still happens
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.55)  # falls back to prev_volume, not skipped
+
     def test_restore_targets_prev_volume_when_not_owns_restore(self):
         class NoOwnRestoreSettings(FakeSettings):
             say_owns_restore = False
