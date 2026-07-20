@@ -3,6 +3,39 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-20 — S1b-2 Slice 2: "Living Room ChatGPT" pipeline created + assigned to the satellite; prefer-local determinism validated live
+
+- **What:** shipped **Slice 2** of the S1b-2 plan — the reSpeaker satellite is now a **full LLM assistant**.
+  Created a new HA Assist pipeline **"Living Room ChatGPT"** (`id 01kxygpr39jas5hgsf28cph108`) =
+  `stt.faster_whisper` + **`conversation.openai_conversation`** (gpt-4o-mini) + **`tts.piper`**
+  (`en_US-amy-low`), **`prefer_local_intents=true`** — modelled exactly on the working "Living Room Voice"
+  pipeline but with the LLM agent. Assigned it to the satellite's primary slot
+  (`select.respeaker_living_room_assistant`: "Living Room Voice" → **"Living Room ChatGPT"**).
+- **Determinism validated live (operator-eared + log-confirmed) — the NL-01 check.** "Okay Nabu, play
+  Ramstein" → the LLM agent (prefer-local) fired the exposed **`script.play_music`** tool, resolver matched
+  `query='Ramstein'`→`Rammstein` (`decision=ACCEPTED`, `PLAYING …/artist/Rammstein`), ceiling switched to
+  Rammstein. Command handled as a **deterministic tool-call, not paraphrased/dropped**. S1a duck/restore
+  fired around the satellite turn as expected.
+- **No new exposure:** creating/assigning a pipeline changes no entity/tool exposure; `expose_new_entities`
+  stays off; the satellite's OpenAI agent shares the already-exposed tool set (no `assistant-capabilities.md`
+  change needed — tool-set lockstep already holds).
+- **Deferred to Slice 3 (firmware):** the satellite has **no speaker** (audio via its 3.5 mm/JST jack, none
+  attached), so **open-Q&A spoken replies are currently inaudible** (the reply plays on the satellite, not
+  the ceiling — that redirect is Slice 3). Commands are unaffected (their result plays on the ceiling).
+  The audible-Q&A + Piper check is therefore deferred to Slice 3/E2E.
+- **Decision — kept on ChatGPT (operator).** The satellite stays on the LLM pipeline (it's the long-term
+  target and keeps commands working). Interim downsides accepted: inaudible open-Q&A until Slice 3, ~10 s
+  command latency (STT→LLM→tool→play), small residual risk of an odd phrasing being LLM-paraphrased into a
+  silent no-op, no audible failure feedback until Slice 3's local error cue, negligible gpt-4o-mini cost.
+- **Live gate:** HA-live/exposure claimed for the assignment; **released → FREE**. No resolver/host change
+  (Slice 1 `_say` remains deployed + dormant until Slice 3 wires `on_tts_end` → `say`).
+- **Rollback:** set `select.respeaker_living_room_assistant` back to **"Living Room Voice"** (instant, local
+  agent); optionally delete the "Living Room ChatGPT" pipeline. No other undo.
+- **Next:** **Slice 3** — reSpeaker firmware redirect (`on_tts_end` → resolver `say`, suppress local TTS,
+  local working/error cue) via OTA reflash (highest-risk, gated, last), preceded by Slice 0 (capture current
+  YAML). Then Slice 5 E2E makes "Okay Nabu, <question>" audible on the ceiling. Plan:
+  `plans/2026-07-16-s1b-2-satellite-full-assistant.md`.
+
 ## 2026-07-19 — S1b-2 Slice 1 deployed: resolver `_say` reworked to the `play_media` route; convergence spike PASSED live
 
 - **What:** deployed **Slice 1** of the S1b-2 plan (`plans/2026-07-16-s1b-2-satellite-full-assistant.md`) —
