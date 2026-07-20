@@ -8,7 +8,7 @@
   "fade_ms": 0,
   "max_duck_timeout": 120000,
   "interaction_ignore_when_idle": true,
-  "reply_volume": 0.40,
+  "reply_volume": 0.60,
   "say_start_timeout_ms": 5000,
   "say_reply_timeout_ms": 30000,
   "say_poll_ms": 500,

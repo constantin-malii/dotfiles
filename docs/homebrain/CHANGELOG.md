@@ -3,6 +3,45 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-19 — S1b-2 Slice 1 deployed: resolver `_say` reworked to the `play_media` route; convergence spike PASSED live
+
+- **What:** deployed **Slice 1** of the S1b-2 plan (`plans/2026-07-16-s1b-2-satellite-full-assistant.md`) —
+  the resolver `interaction._say` capability reworked from the (silent) `music_assistant.play_announcement`
+  overlay to the audible **`play_media`** route: capture source (state/`media_content_id`/volume) → per-zone
+  barge-in gen-id → normalise reply URI to the internal base → set `reply_volume` → `play_media` → poll for
+  START then FINISH (injected sleeper) → reply-started guard (`reply_started`/`likely_silent`) → restore the
+  pre-duck baseline (`say_owns_restore`) → replay the captured source. New config tunables (`reply_volume`,
+  `say_start_timeout_ms` 5000, `say_reply_timeout_ms` 30000, `say_poll_ms` 500, `say_internal_base`, 
+  `say_owns_restore` true); `say_announce_timeout_ms` retired. Merged to `main` in PR #30 (237 unit tests).
+- **Deploy (gated):** files `interaction.py`, `config.py`, `config.json` copied to `~/mass-resolver/`
+  (backup `~/mass-resolver/.bak/20260719-154524/`); host **Python 3.5.2** `py_compile` + full suite **OK**;
+  user-run `sudo systemctl restart mass-resolver`; post-restart healthy (`/command` bound, 200/401, fresh
+  `SERVICE:` bind + `connected; subscribed`, no tracebacks).
+- **Convergence spike — PASSED (operator-eared, live).** Over `/command`: `duck → say(test URI) → restore`
+  with radio at baseline 0.30. Results:
+
+  | Reply length | `say` block | Audible? | Volume convergence |
+  |---|---|---|---|
+  | short (~2 s clip) | 2.4 s | (state-confirmed) | duck 0.30→0.15 → **back to 0.30**, radio replayed |
+  | long (counts 1→5) | 13.2 s | **YES — all five, not cut off, single reply** | duck→0.15 → **back to 0.30**, radio replayed |
+
+  The block scaling **2.4 s → 13.2 s** with clip length confirms the poll waits for the *actual* clip end
+  (not a fixed timeout); the operator heard the full reply (louder at `reply_volume` 0.70 during the test);
+  the ceiling **converged to the pre-duck baseline** with radio re-played, and a follow-up `restore` was a
+  clean no-op. **Decision (b) `say_owns_restore=true` is confirmed live** — `_say` owns the restore and lands
+  at baseline with no strand. The URI was fed external-base and correctly normalised to the internal base.
+- **`reply_volume` set to 0.60** (0.40 was too quiet; 0.70 tested well; 0.60 chosen). Applied on-host (takes
+  effect on the resolver's next restart — inconsequential now since `_say` is **dormant**: nothing in
+  production invokes it until the Slice-3 firmware redirect) and in the repo `config.json` (this change).
+- **State:** `_say` is deployed but **dormant** (no caller yet). Live gate **released → FREE**. Operator's
+  ceiling left playing radio at 0.30.
+- **Rollback:** `cp ~/mass-resolver/.bak/20260719-154524/* ~/mass-resolver/ && sudo systemctl restart
+  mass-resolver` (restores the pre-Slice-1 `_say`/config).
+- **Next (S1b-2):** Slice 2 (new "Living Room ChatGPT" pipeline, prefer-local + Piper) → Slice 3 (firmware
+  redirect, OTA — last) → Slice 4 (S1a `idle→restore`→grace-G — **may be unnecessary**: the spike showed the
+  ceiling converges cleanly with S1a's plain `idle→restore` as a no-op after `_say`'s own restore) → Slice 5
+  E2E. The announce/overlay-path silence remains a separate reliability item.
+
 ## 2026-07-17 — S1b announce silence ROOT-ISOLATED: it's the announce/OVERLAY path, not the ceiling — plain `play_media` of the same TTS clip is audible; source-independent; survives all restarts
 
 > **Headline:** the ceiling speaker, MA transcode, and tts_proxy MP3 all work — a plain
