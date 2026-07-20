@@ -3,6 +3,44 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-07-20 — S1b-2 Slice 3: satellite reply routed to the ceiling via HA automation (NO firmware); E2E works; volume-ratchet bug found → Slice 4
+
+- **Milestone: "Okay Nabu, &lt;question&gt;" → spoken answer on the ceiling works end-to-end** — satellite →
+  ChatGPT → Piper → `esphome.tts_uri` event → HA automation → resolver `_say` (`play_media`) → ceiling, with
+  the source replayed after. **No firmware flash** (see Slice 0 finding).
+- **Slice 0 (read-only) finding that de-risked Slice 3:** the reSpeaker's current ESPHome YAML (captured;
+  rollback image lives in the ESPHome dashboard) **already emits the reply URI** — `voice_assistant.on_tts_end`
+  runs `send_tts_uri_event` → HA event **`esphome.tts_uri {uri}`**. So the URI hand-off needs **no firmware
+  edit**; the only thing firmware would add is suppressing the satellite's *local* TTS playback, which is moot
+  while the satellite has no attached speaker (reply is ceiling-only). Brick-risk OTA **avoided**.
+- **Installed (HA config API, HTTP 200):** automation **`S1b-2 - Satellite Reply on Ceiling`**
+  (`id 1784200731`, mode `queued`/max 3): trigger `event: esphome.tts_uri` → action
+  `rest_command.resolver_command {intent: interaction, params: {mode: say, uri: "{{ trigger.event.data.uri }}"}}`
+  with `continue_on_error: true` (a long blocking reply must not fail the automation). Modeled on the S1a
+  automation's `rest_command` pattern.
+- **Validated live (operator):** "Okay Nabu, what time is it?" → answered on the ceiling. (First attempt
+  "couldn't understand" when speaking immediately after the wake word — inherent wake→listen window on the
+  ESPHome satellite, not a defect; pause ~0.5 s after "Okay Nabu", or tune wake sensitivity / finished-speaking
+  later.)
+- **KNOWN BUG (diagnosed) — ceiling volume RATCHETS up over conversations.** Resolver log:
+  `RESTORE … user_override cur=0.7 (kept)`. `_say` raises the ceiling to the reply volume for the clip, then
+  **S1a's `idle→restore` fires, sees a volume it didn't write, treats it as a user override, and keeps it** —
+  the baseline is never restored and the next duck captures the inflated value (0.3 → 0.7 → …). This is the
+  **S1a-vs-`_say` duck-ownership conflict** that **decision (b)/Slice 4** exists to fix (make `_say` the sole
+  reply-turn restore owner; stop S1a's `idle→restore` fighting it). Today's real E2E **proves Slice 4 is
+  required** (earlier flagged "may be unnecessary"). Minor contributors: the running resolver still holds
+  `reply_volume=0.70` (the 0.60 config loads on next restart — a restart alone does NOT fix the ratchet, the
+  conflict does); S1a's `user_override` guard misreads `_say`'s volume change as a human.
+- **Interim state (operator choice): reply automation LEFT ON**, accepting the volume creep until Slice 4
+  (turn the ceiling down manually as needed). Satellite stays on ChatGPT. Commands audible via ceiling; open
+  Q&A audible on the ceiling too (with the ratchet caveat).
+- **Live gate:** HA-live claimed for the automation install; **released → FREE**. No firmware/host change; the
+  Slice-1 `_say` deploy is unchanged.
+- **Rollback:** disable or delete automation `S1b-2 - Satellite Reply on Ceiling` (`id 1784200731`) in the HA
+  UI / config API. Nothing else to undo (no firmware touched).
+- **Next: Slice 4** — resolve the duck-ownership conflict (S1a `idle→restore` → grace-G / `_say`-owns-restore
+  per decision (b)), then Slice 5 E2E sign-off. Plan: `plans/2026-07-16-s1b-2-satellite-full-assistant.md`.
+
 ## 2026-07-20 — S1b-2 Slice 2: "Living Room ChatGPT" pipeline created + assigned to the satellite; prefer-local determinism validated live
 
 - **What:** shipped **Slice 2** of the S1b-2 plan — the reSpeaker satellite is now a **full LLM assistant**.
