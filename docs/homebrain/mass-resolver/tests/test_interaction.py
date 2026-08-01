@@ -619,5 +619,163 @@ class SayDispatchTest(unittest.TestCase):
         self.assertFalse(r["metadata"]["replayed"])                 # not playing before -> no replay
 
 
+class OwnershipSettings(FakeSettings):
+    """Production-shaped: reply_volume distinct from both the baseline and the duck floor,
+    so a restore to the wrong value is unambiguous in assertions."""
+    reply_volume = 0.70
+
+
+class DuckOwnershipSlice4Test(unittest.TestCase):
+    """S1b-2 Slice 4 -- the reply-turn volume ratchet/crater.
+
+    Root cause: S1a's `idle->restore` fires while `_say` is still polling the reply clip. It reads
+    `_say`'s reply volume, misreads it as a human change (`user_override`), and DISCARDS the duck
+    snapshot. `_say`'s own restore then finds no snapshot and falls back to `prev_volume` -- which is
+    the already-ducked floor -- so the ceiling craters; and with no surviving baseline the next turn
+    captures the inflated reply volume instead, so it ratchets. Decision (b): `_say` is the sole
+    reply-turn restore owner.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = OwnershipSettings()
+        return ctx
+
+    def test_idle_restore_during_reply_does_not_crater_or_ratchet(self):
+        # THE REPRO: full turn with S1a's idle->restore landing mid-reply.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                       # baseline 0.32 -> floor 0.15
+        ha.calls = []
+        seen = {}
+
+        def s1a_idle_restore(n):
+            if n == 1:                                        # first finish-poll sleep == satellite idle
+                seen["restore"] = run(cap, ctx, {"mode": "restore"})
+                seen["snap_after_restore"] = dict(cap._snaps.get(self.zone) or {})
+
+        cap._sleeper = FakeSleeper(s1a_idle_restore)
+        ha.set_states([
+            playing_with_id(0.15, "library://radio/2"),       # _say capture: prev_volume IS the duck floor
+            playing_with_id(0.70, self.reply_mid),             # start-poll: reply playing at reply_volume
+            playing_with_id(0.70, self.reply_mid),             # finish-poll #1: still playing -> sleep -> S1a fires
+            playing_with_id(0.70, self.reply_mid),             # the interleaved _restore's own read
+            idle_state(),                                      # finish-poll #2: clip ended
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["reply_started"])
+
+        # 1. the interleaved S1a restore must DEFER to the in-flight reply, not claim a user override
+        self.assertFalse(seen["restore"]["metadata"]["restored"])
+        self.assertEqual(seen["restore"]["metadata"]["reason"], "reply_active")
+        # 2. and it must NOT strip the baseline _say needs
+        self.assertAlmostEqual(seen["snap_after_restore"].get("volume"), 0.32)
+        # 3. so _say's own restore lands on the pre-duck baseline: no crater to 0.15, no strand at 0.70
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 2)                    # reply volume, then exactly one restore
+        self.assertAlmostEqual(vol_calls[0][2]["volume_level"], 0.70)
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.32)
+        # 4. the reply owner cleans up after itself: no stale snapshot, no stale reply marker
+        self.assertNotIn(self.zone, cap._snaps)
+        self.assertNotIn(self.zone, cap._replies)
+
+    def test_restore_defers_while_reply_active_and_rearms_dead_man(self):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                        # baseline 0.32, dead-man #1 armed
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32}  # a reply is in flight
+        ha._state = playing(0.70)                              # device sits at _say's reply volume
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["restored"])
+        self.assertEqual(r["metadata"]["reason"], "reply_active")
+        self.assertEqual(ha.calls, [])                         # never fights _say for the volume
+        self.assertAlmostEqual(cap._snaps[self.zone]["volume"], 0.32)   # baseline preserved
+        self.assertEqual(len(FakeTimer.created), 2)             # dead-man re-armed, not dropped
+        self.assertTrue(FakeTimer.created[1].started)
+
+    def test_duck_during_reply_inherits_baseline_not_reply_volume(self):
+        # Barge-in ratchet-up path: a fresh duck mid-reply must not snapshot _say's reply volume
+        # (0.70) as the "user baseline" -- that is what walked 0.3 -> 0.7 over conversations.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha = FakeHA(playing(0.70))                             # reply clip playing loud
+        ctx = self._ctx(ha)
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32}
+        r = run(cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["ok"])
+        self.assertAlmostEqual(cap._snaps[self.zone]["volume"], 0.32)   # inherited, not 0.70
+        self.assertAlmostEqual(cap._snaps[self.zone]["target"], 0.15)
+
+    def test_say_inherits_baseline_from_superseded_reply(self):
+        # Barge-in: reply #2 captures prev_volume == reply #1's volume. It must inherit the
+        # original pre-duck baseline instead, or each barge-in ratchets the zone up.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA()
+        ctx = self._ctx(ha)
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32}   # reply #1 in flight, no _snaps
+        ha.set_states([
+            playing_with_id(0.70, "builtin://radio/old-reply"),  # capture: prev_volume is reply #1's volume
+            playing_with_id(0.70, self.reply_mid),
+            idle_state(),
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.32)
+
+    def test_say_leaves_snapshot_for_s1a_when_not_owns_restore(self):
+        class NoOwnRestore(OwnershipSettings):
+            say_owns_restore = False
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        ctx.settings = NoOwnRestore()
+        ha.set_states([playing(0.15), playing_with_id(0.70, self.reply_mid), idle_state()])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertIn(self.zone, cap._snaps)                    # S1a still owns the baseline restore
+        self.assertNotIn(self.zone, cap._replies)               # but the reply marker is always released
+
+    def test_reply_marker_released_when_say_raises(self):
+        # A stuck marker would deafen _restore/_duck for this zone forever.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA(playing(0.32), write_boom=IOError("volume_set exploded"))
+        ctx = self._ctx(ha)
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertFalse(r["ok"])
+        self.assertNotIn(self.zone, cap._replies)
+
+    def test_superseded_say_does_not_release_the_newer_reply_marker(self):
+        zone = self.zone
+
+        def bump_gen(n):
+            if n == 1:
+                cap._say_gen[zone] = cap._say_gen.get(zone, 0) + 1
+                cap._replies[zone] = {"gen": cap._say_gen[zone], "baseline": 0.32}
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        cap._sleeper = FakeSleeper(bump_gen)
+        ha = FakeHA()
+        ctx = self._ctx(ha)
+        ha.set_states([playing_with_id(0.32, "library://radio/2"), idle_state(), idle_state()])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["superseded"])
+        self.assertIn(zone, cap._replies)                       # the newer reply still owns the zone
+        self.assertEqual(cap._replies[zone]["gen"], cap._say_gen[zone])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

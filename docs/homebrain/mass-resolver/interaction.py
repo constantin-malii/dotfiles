@@ -19,6 +19,9 @@ class InteractionCapability(capability.Capability):
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
+        self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
+                                                      #   turn is in flight; _say owns the zone's volume for its
+                                                      #   lifetime (S1b-2 decision (b)). Guarded by _lock.
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -59,7 +62,9 @@ class InteractionCapability(capability.Capability):
                              metadata={"ducked": False, "reason": "no_volume", "zone": zone})
             target = min(vol, floor)                                   # never raise volume
             if zone not in self._snaps:                                # first duck: capture baseline
-                self._snaps[zone] = {"volume": vol, "target": target, "ts": self._clock(), "timer": None}
+                baseline = self._reply_baseline(zone, vol)             # mid-reply, `vol` is _say's reply
+                self._snaps[zone] = {"volume": baseline, "target": target,   #   volume, NOT a user baseline --
+                                     "ts": self._clock(), "timer": None}     #   snapshotting it is the ratchet
             else:                                                      # coalesce: keep baseline, track last-written target
                 self._snaps[zone]["target"] = target
             self._arm_timer(ctx, zone)                                 # snapshot + timer BEFORE the write, so a
@@ -100,8 +105,33 @@ class InteractionCapability(capability.Capability):
             except Exception as e2:
                 LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
 
+    def _reply_baseline(self, zone, fallback):
+        # The pre-duck baseline to hand back at the end of a reply turn. Caller holds _lock.
+        # Order matters: the duck snapshot is the truest pre-duck value; an in-flight reply's
+        # baseline is next (it was resolved the same way, so it survives a chain of barge-ins);
+        # `fallback` (the live/captured volume) is last resort.
+        snap = self._snaps.get(zone)
+        if snap is not None and snap.get("volume") is not None:
+            return snap["volume"]
+        reply = self._replies.get(zone)
+        if reply is not None and reply.get("baseline") is not None:
+            return reply["baseline"]
+        return fallback
+
     def _restore(self, ctx, zone, rid):
         with self._lock:
+            if zone in self._replies:
+                # S1b-2 decision (b): a reply turn owns this zone's volume until its clip ends.
+                # Restoring here would read _say's reply volume, misread it as a human change
+                # (user_override below), and DISCARD the baseline _say still needs -- the reply-turn
+                # volume ratchet/crater. Defer instead, and keep a dead-man armed in case the reply
+                # never finishes, since we are declining to clear the snapshot.
+                snap = self._snaps.get(zone)
+                if snap is not None:
+                    self._arm_timer(ctx, zone)
+                LOG.info("RESTORE req=%s zone=%s deferred: reply active (say owns restore)", rid, zone)
+                return cr.ok(self.name, rid, "Reply in progress.", spoken_text=None,
+                             metadata={"restored": False, "reason": "reply_active", "zone": zone})
             snap = self._snaps.get(zone)                              # peek; discard only after write
             if snap is None:
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
@@ -157,101 +187,125 @@ class InteractionCapability(capability.Capability):
 
         # 2. barge-in gen-id: bump this zone's generation; a later say() will bump it again and
         #    supersede us -- we then abort remaining steps rather than fight over the finish.
+        #    Same critical section resolves and publishes the restore baseline: capturing it HERE
+        #    (not at the restore step) means a mid-reply snapshot discard cannot strip it, and
+        #    publishing it in _replies makes this zone reply-owned for _restore/_duck.
         with self._lock:
             my_gen = self._say_gen.get(zone, 0) + 1
             self._say_gen[zone] = my_gen
+            baseline = self._reply_baseline(zone, prev_volume)
+            self._replies[zone] = {"gen": my_gen, "baseline": baseline}
 
         def superseded():
             return self._say_gen.get(zone) != my_gen
+
+        def release_reply():
+            # Release reply ownership -- but only if it is still ours: a superseding say has
+            # already published its own marker and owns the zone now.
+            with self._lock:
+                reply = self._replies.get(zone)
+                if reply is not None and reply.get("gen") == my_gen:
+                    del self._replies[zone]
 
         def superseded_result():
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": False, "reply_started": False, "likely_silent": False,
                                     "replayed": False, "superseded": True, "zone": zone})
 
-        # 3. normalise the reply URI to the MA-reachable internal base
-        norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
+        # From here on the zone is reply-owned, so every exit path must hand it back.
+        try:
+            # 3. normalise the reply URI to the MA-reachable internal base
+            norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
 
-        poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
-        start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
-        reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
-        reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
+            poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
+            start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
+            reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
+            reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
 
-        # 4. set reply volume, then 5. play_media (reply)
-        ctx.ha.call_service_rest("media_player", "volume_set",
-                                 {"entity_id": zone, "volume_level": reply_volume})
-        ctx.ha.call_service_rest("music_assistant", "play_media",
-                                 {"entity_id": zone, "media_id": norm_uri})
+            # 4. set reply volume, then 5. play_media (reply)
+            ctx.ha.call_service_rest("media_player", "volume_set",
+                                     {"entity_id": zone, "volume_level": reply_volume})
+            ctx.ha.call_service_rest("music_assistant", "play_media",
+                                     {"entity_id": zone, "media_id": norm_uri})
 
-        # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
-        reply_started = False
-        elapsed = 0.0
-        while elapsed < start_timeout:
-            if superseded():
-                return superseded_result()
-            try:
-                state = ctx.ha.get_entity_state(zone) or {}
-            except Exception as e:
-                LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
-                state = {}
-            attrs = state.get("attributes") or {}
-            # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
-            # "builtin://radio/<url>". Match by containment, not equality.
-            if state.get("state") == "playing" and norm_uri in (attrs.get("media_content_id") or ""):
-                reply_started = True
-                break
-            self._sleeper(poll_secs)
-            elapsed += poll_secs
-
-        likely_silent = not reply_started
-        if likely_silent:
-            LOG.warning("SAY req=%s reply did not start (likely silent)", rid)
-        else:
-            # 7. wait for finish: poll until the clip stops playing (or gets superseded)
+            # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
+            reply_started = False
             elapsed = 0.0
-            while elapsed < reply_timeout:
+            while elapsed < start_timeout:
                 if superseded():
                     return superseded_result()
                 try:
                     state = ctx.ha.get_entity_state(zone) or {}
                 except Exception as e:
-                    LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
+                    LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
                     state = {}
                 attrs = state.get("attributes") or {}
-                if state.get("state") != "playing" or norm_uri not in (attrs.get("media_content_id") or ""):
+                # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
+                # "builtin://radio/<url>". Match by containment, not equality.
+                if state.get("state") == "playing" and norm_uri in (attrs.get("media_content_id") or ""):
+                    reply_started = True
                     break
                 self._sleeper(poll_secs)
                 elapsed += poll_secs
 
-        if superseded():
-            return superseded_result()
-
-        # 8. restore volume (best-effort; a restore failure must not swallow the reply result)
-        try:
-            owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
-            snap = self._snaps.get(zone)
-            if owns_restore and snap and "volume" in snap:
-                restore_to = snap["volume"]
+            likely_silent = not reply_started
+            if likely_silent:
+                LOG.warning("SAY req=%s reply did not start (likely silent)", rid)
             else:
-                restore_to = prev_volume
-            if restore_to is not None:
-                ctx.ha.call_service_rest("media_player", "volume_set",
-                                         {"entity_id": zone, "volume_level": restore_to})
-        except Exception as e:
-            LOG.warning("SAY req=%s zone=%s restore failed (%r)", rid, zone, e)
+                # 7. wait for finish: poll until the clip stops playing (or gets superseded)
+                elapsed = 0.0
+                while elapsed < reply_timeout:
+                    if superseded():
+                        return superseded_result()
+                    try:
+                        state = ctx.ha.get_entity_state(zone) or {}
+                    except Exception as e:
+                        LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
+                        state = {}
+                    attrs = state.get("attributes") or {}
+                    if state.get("state") != "playing" or norm_uri not in (attrs.get("media_content_id") or ""):
+                        break
+                    self._sleeper(poll_secs)
+                    elapsed += poll_secs
 
-        # 9. replay source: the reply replaced the queue, so replay for BOTH radio and local content
-        replayed = False
-        if was_playing and source_id and not superseded():
+            if superseded():
+                return superseded_result()
+
+            # 8. restore volume (best-effort; a restore failure must not swallow the reply result).
+            #    `baseline` was resolved back at step 2, so a snapshot discarded mid-reply cannot
+            #    strand us on the ducked prev_volume.
+            owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
             try:
-                ctx.ha.call_service_rest("music_assistant", "play_media",
-                                         {"entity_id": zone, "media_id": source_id})
-                replayed = True
+                restore_to = baseline if owns_restore else prev_volume
+                if restore_to is not None:
+                    ctx.ha.call_service_rest("media_player", "volume_set",
+                                             {"entity_id": zone, "volume_level": restore_to})
+                    if owns_restore:
+                        # As the reply-turn restore owner, retire the duck snapshot and its dead-man
+                        # here: leaving them armed carries a now-stale baseline into the next turn.
+                        with self._lock:
+                            snap = self._snaps.pop(zone, None)
+                            if snap is not None:
+                                self._cancel_timer(snap)
+                    LOG.info("SAY req=%s zone=%s restored -> %s (owns_restore=%s)",
+                             rid, zone, restore_to, owns_restore)
             except Exception as e:
-                LOG.warning("SAY req=%s zone=%s replay failed (%r)", rid, zone, e)
+                LOG.warning("SAY req=%s zone=%s restore failed (%r)", rid, zone, e)
 
-        LOG.info("SAY req=%s zone=%s reply_started=%s likely_silent=%s replayed=%s",
-                 rid, zone, reply_started, likely_silent, replayed)
-        return cr.ok(self.name, rid, "Said.", spoken_text=None,
-                     metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
-                                "replayed": replayed, "superseded": False, "zone": zone})
+            # 9. replay source: the reply replaced the queue, so replay for BOTH radio and local content
+            replayed = False
+            if was_playing and source_id and not superseded():
+                try:
+                    ctx.ha.call_service_rest("music_assistant", "play_media",
+                                             {"entity_id": zone, "media_id": source_id})
+                    replayed = True
+                except Exception as e:
+                    LOG.warning("SAY req=%s zone=%s replay failed (%r)", rid, zone, e)
+
+            LOG.info("SAY req=%s zone=%s reply_started=%s likely_silent=%s replayed=%s",
+                     rid, zone, reply_started, likely_silent, replayed)
+            return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                         metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
+                                    "replayed": replayed, "superseded": False, "zone": zone})
+        finally:
+            release_reply()
