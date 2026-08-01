@@ -3,6 +3,68 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-01 — S1b-2 early-use troubleshooting notes (satellite live on ChatGPT + ceiling replies)
+
+Live-use troubleshooting of the S1b-2 satellite→ceiling assistant (Slices 1-3 shipped 2026-07-19/20).
+Findings + the fixes applied, for future reference. Dates preserved.
+
+- **Observability (where to look — no change needed):**
+  - `~/mass-resolver/resolver.log` (INFO): resolver-backed commands (`play_music/radio/find/news/media_status`)
+    + the reply/duck flow (`DUCK`/`SAY reply_started=…/RESTORE`). Note: pure-HA ceiling scripts
+    (`volume_up/down`, `pause/resume/stop/next/previous`) do **not** hit the resolver — they are **not** in
+    `resolver.log`; use the HA side for those.
+  - **HA assist-pipeline debug traces** (per-turn STT text → tool/agent → TTS → errors), via WS
+    `assist_pipeline/pipeline_debug/list` + `…/get` for pipeline `01kxygpr39jas5hgsf28cph108` — the best
+    "what did Nabu hear + do" record; always captured (~last 20 runs).
+  - **MA add-on log** `GET /api/hassio/addons/d5369777_music_assistant/logs` — playback errors.
+  - HA log level raised to **DEBUG** at runtime (2026-08-01) for `conversation` / `assist_pipeline` /
+    `openai_conversation` via `logger.set_level` (no restart; reverts on restart or set back to `info`).
+    Those DEBUG lines go to `home-assistant.log` — viewable in the HA UI (Settings → System → Logs);
+    `/api/error_log` is **404** on this HA and there is no VM shell, so an agent cannot read that file.
+- **Request cut off / misheard (STT side) — one fix applied.** STT was ending capture too early
+  ("Play radio and or", "Give the volume a bit up. So we go.") and mis-hearing foreign station names
+  ("Moldova"→"Moved Over", "norok" garbled → LLM returns "couldn't find a station"). **Fix (2026-08-01):**
+  set `select.respeaker_living_room_finished_speaking_detection` → **`relaxed`** (waits longer before ending
+  capture). Reversible (→ `default`). The foreign-name mis-hearing is a Whisper accuracy limit (revisit STT
+  model separately if needed).
+- **Latency profile (measured 2026-08-01, from the pipeline traces):** wake → ready-to-listen ≈ **1-1.5 s**
+  (device wake ~0.3 s + pipeline spin-up + a short "waiting for command" window; inherent). The dominant
+  delay is the **LLM answer: ~3-13 s** (gpt-4o-mini). Total turn up to ~22 s on long answers. Lever to reduce
+  it: constrain answer length via the OpenAI agent instructions (decision (e) — not yet applied; gated prompt
+  change).
+- **Wake cue gap (no satellite speaker).** Audio is **ceiling-only** now (no speaker on the reSpeaker jack),
+  so the on-device **wake chime is inaudible** — the only "start talking" cue is the **LED ring** (beam
+  animation on `on_listening`). An audible ceiling "ready" chime is possible (the firmware already fires
+  `esphome.wake_word_detected`, same pattern as the reply) but adds another actor to the ceiling/volume flow —
+  **deferred to Slice 4/5** so it doesn't compound the volume bug.
+- **Volume churn / crater (the Slice-4 bug, actively degrading use).** Each satellite turn strands the ceiling
+  volume at a wrong level — observed bouncing 0.15 ↔ 0.25 ↔ 0.46 ↔ 0.70 and **cratering to 0.04 / 0.15**
+  (near-silent → "no music heard"). Root cause per the diagnostic subagent: S1a's `idle→restore` reads a
+  stale/racy volume, calls it `user_override`, and **discards the duck-snapshot baseline**; the next `_say`
+  then finds no snapshot and falls back to its own already-ducked `prev_volume`. Also seen: an
+  `interaction … timed out` error on a reply (`_say` blocking + streaming-TTS). **All of this is Slice 4**
+  (duck-ownership fix). **Interim workaround:** manual volume set — including by voice now (see below).
+- **`script.ceiling_set_volume` exposed (2026-08-01).** Added it to the conversation assistant exposure
+  (12→**14** exposed entities: also confirmed `ceiling_volume_up/down`, `media_status`, transport scripts were
+  already exposed). It sets an **absolute** level (`media_player.volume_set`, direct — immune to the duck
+  bug), so "set volume to 50 percent" now works and doubles as the **voice recovery** when the volume craters.
+  Rollback: un-expose `script.ceiling_set_volume`.
+- **Radio-stream failures (external, not our stack).** `play_media library://radio/2` (101 SMOOTH JAZZ) and
+  Moldova stations returned MA **`Playback failed … no more tracks available`** (500) — the station streams
+  were dead/unreachable at the time. **MA/ceiling/Squeezelite are healthy** — local SMB music (`play_music`)
+  plays fine; only specific RadioBrowser station streams failed. Likely transient / station-side; re-check the
+  station or refresh RadioBrowser if it persists.
+- **What's assistant-usable today (13→14 exposed):** `play_music`, `play_radio`, `find_stations`, `news`,
+  `media_status`, `ceiling_pause/resume/stop/next/previous`, `ceiling_volume_up/down`, **`ceiling_set_volume`**,
+  weather. Reliable: commands (audible via ceiling) + status readout. Degraded pending Slice 4: reply/duck
+  volume behaviour.
+- **Live changes made this session (all reversible, HA-live/exposure only — no resolver code / no firmware /
+  no restart):** `finished_speaking_detection`→`relaxed`; exposed `script.ceiling_set_volume`; HA runtime
+  DEBUG logging; several manual `volume_set` recoveries; started local music. Live gate FREE.
+- **Next:** **Slice 4** (duck-ownership fix — clears the volume churn, the long-reply cut, and the reply
+  timeout) then Slice 5 E2E; optional: constrain LLM answer length (latency) and a ceiling wake-chime.
+  Slice-4 kickoff prompt prepared this session. Plan: `plans/2026-07-16-s1b-2-satellite-full-assistant.md`.
+
 ## 2026-07-20 — S1b-2 Slice 3: satellite reply routed to the ceiling via HA automation (NO firmware); E2E works; volume-ratchet bug found → Slice 4
 
 - **Milestone: "Okay Nabu, &lt;question&gt;" → spoken answer on the ceiling works end-to-end** — satellite →
