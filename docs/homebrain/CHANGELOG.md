@@ -3,6 +3,57 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-01 — S1b-2 Slice 4: reply-turn duck ownership fixed in the resolver (`_say` is sole restore owner); NO HA automation edit needed
+
+- **Fixes the Slice-3 volume ratchet/crater** (the `RESTORE … user_override cur=0.7 (kept)` bug). Root
+  cause, traced in code and reproduced offline: S1a's `idle→restore` fires **while `_say` is still polling
+  the reply clip**, reads `_say`'s elevated reply volume, misreads it as a human change (`user_override`)
+  and **discards the duck snapshot**; `_say`'s restore step then finds no snapshot and falls back to
+  `prev_volume` — which is the **already-ducked floor** — so the ceiling **craters** (0.15/0.04). With no
+  surviving baseline the next turn captures the inflated reply volume instead, so it also **ratchets**
+  (0.3 → 0.7 → …). One defect, both symptoms.
+- **Deterministic repro before any fix** (unit-level, no live system): duck 0.32→0.15 → `_say` sets 0.70 →
+  interleaved `restore` returns `user_override`, snapshot becomes `None` → `_say` writes **0.15** instead of
+  the 0.32 baseline.
+- **Fix — decision (b), implemented entirely resolver-side** (`interaction.py`): the reply turn is owned
+  end-to-end by `_say`. It publishes a per-zone reply marker and **resolves its restore baseline at its own
+  capture step** (so a mid-reply snapshot discard can't strip it), retires the duck snapshot + dead-man
+  after restoring, and always releases the marker (gen-guarded, so a barge-in keeps ownership). `_restore`
+  **defers** while a reply is in flight — keeping the baseline instead of claiming `user_override` — and
+  re-arms the dead-man since it declined to clear the snapshot. `_duck` also defers during a reply (plan
+  decision (a): the clip *replaced* the music, so there is nothing to duck under).
+- **⚠ Plan deviation — the S1a automation was NOT edited, and the grace-G change is no longer needed.**
+  Slice 4 was planned as an **HA-live** edit to `automation.s1a_satellite_ceiling_duck_restore`
+  (`id 1784146586`), repurposing `idle→restore` into a ~2–3 s grace-G backstop. Making the resolver the
+  single writer achieves decision (b) with **no HA-live gate at all**: with no reply in flight
+  `idle→restore` behaves exactly as before, so the "URI never arrives" case is covered **with no grace-G
+  delay**. The S1a automation and the reply automation `S1b-2 - Satellite Reply on Ceiling`
+  (`id 1784200731`) are both **untouched**. No firmware.
+- **Hardening from code review** (two further strands, both reproduced then fixed): `_say` retires **only**
+  the snapshot its baseline came from (ts-matched) — otherwise a wake landing between its restore write and
+  its pop had its fresh snapshot + dead-man torn down, stranding the zone at the floor with no backstop;
+  and a raise after the reply-volume write (e.g. MA `play_media` 500) now restores the baseline from a
+  `finally` and keeps `snap["target"]` in step with what was actually written, so a later `_restore` can't
+  claim `user_override` on the abandoned reply volume. The reply marker carries `ts`/`rid` and is treated as
+  orphaned past the whole say budget, so a crashed/hung `_say` can't deafen duck/restore for a zone forever.
+- **`say_owns_restore` remains a true rollback lever:** setting it `false` disables the whole ownership
+  model — duck/restore behave exactly as pre-Slice-4 — so reverting decision (b) needs no code revert.
+- **Tests:** 14 new (`DuckOwnershipSlice4Test`), suite **251 OK** (was 237). The three black-box ones were
+  confirmed to **fail against pre-fix code** for behavioural reasons: `user_override != reply_active`, the
+  next turn's snapshot destroyed, and a two-turn sequence ratcheting.
+- **Not fixed here (separate, unconfirmed):** the *long-reply cut* is **not** explained by this defect — a
+  re-duck lands before `_say` sets the reply volume, so it can't quiet the clip. Most likely a finish-poll
+  false-negative (state/`media_content_id` flicker → `_say` restores + replays mid-sentence). The occasional
+  `interaction … timed out` is the HA `rest_command` timeout on a blocking long `_say`, absorbed by
+  `continue_on_error: true`. Both belong to Slice 5 observation. The poll loops also bound themselves by
+  accumulated sleep rather than wall clock (pre-existing Slice-1 behaviour, not introduced here).
+- **Live gate:** resolver deploy only (`runbooks/resolver-deploy.md`), restart **user-run**. Rollback:
+  `cp ~/mass-resolver/.bak/<ts>/* ~/mass-resolver/ && sudo systemctl restart mass-resolver`.
+- **Note:** the running resolver still holds `reply_volume=0.70`; the repo's `0.60` takes effect on this
+  restart. That is a volume-level change only — it was never the ratchet.
+- **Next: Slice 5** — E2E sign-off (audible reply both sources, convergence to baseline, source replay,
+  never-started guard + chirp, latency, barge-in, no regressions).
+
 ## 2026-07-20 — S1b-2 Slice 3: satellite reply routed to the ceiling via HA automation (NO firmware); E2E works; volume-ratchet bug found → Slice 4
 
 - **Milestone: "Okay Nabu, &lt;question&gt;" → spoken answer on the ceiling works end-to-end** — satellite →
