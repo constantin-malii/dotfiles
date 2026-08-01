@@ -704,17 +704,165 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         self.assertEqual(len(FakeTimer.created), 2)             # dead-man re-armed, not dropped
         self.assertTrue(FakeTimer.created[1].started)
 
-    def test_duck_during_reply_inherits_baseline_not_reply_volume(self):
-        # Barge-in ratchet-up path: a fresh duck mid-reply must not snapshot _say's reply volume
-        # (0.70) as the "user baseline" -- that is what walked 0.3 -> 0.7 over conversations.
+    def test_duck_during_reply_defers_to_say(self):
+        # Decision (a): the reply clip REPLACED the music, so there is nothing to duck under.
+        # Ducking here would quiet the reply, and the snapshot it left would be torn down by
+        # _say's restore -- leaving the zone with neither baseline nor dead-man.
         cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
         ha = FakeHA(playing(0.70))                             # reply clip playing loud
         ctx = self._ctx(ha)
-        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32}
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
         r = run(cap, ctx, {"mode": "duck"})
         self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["ducked"])
+        self.assertEqual(r["metadata"]["reason"], "reply_active")
+        self.assertEqual(ha.calls, [])                          # never quiets the reply
+        self.assertNotIn(self.zone, cap._snaps)                 # no rival snapshot for _say to pop
+
+    def test_duck_reclaims_zone_from_a_stale_reply_marker(self):
+        # A crashed/hung _say must not deafen this zone forever; and once reclaimed, the baseline
+        # comes from the orphaned marker, not from the live (reply) volume.
+        clock = [1000.0]
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: clock[0])
+        ha = FakeHA(playing(0.70))
+        ctx = self._ctx(ha)
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
+        clock[0] = 1000.0 + 5.0 + 30.0 + 61.0                   # past start+reply budget + margin
+        r = run(cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["metadata"]["ducked"])
         self.assertAlmostEqual(cap._snaps[self.zone]["volume"], 0.32)   # inherited, not 0.70
         self.assertAlmostEqual(cap._snaps[self.zone]["target"], 0.15)
+
+    def test_restore_reclaims_zone_from_a_stale_reply_marker(self):
+        clock = [1000.0]
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: clock[0])
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                         # baseline 0.32, target 0.15
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
+        ha._state = playing(0.15)
+        ha.calls = []
+        clock[0] = 1000.0 + 96.0
+        r = run(cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["metadata"]["restored"])              # backstop is not deafened forever
+        self.assertAlmostEqual(ha.calls[0][2]["volume_level"], 0.32)
+
+    def test_say_does_not_retire_a_snapshot_from_the_next_turn(self):
+        # C1: the restore write and the snapshot pop are separate steps. If the next turn's duck
+        # lands between them, _say must not tear down THAT turn's baseline + dead-man -- doing so
+        # left the zone at the floor with nothing to restore it.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        zone = self.zone
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                          # turn 1: baseline 0.32, dead-man #1
+        ha.set_states([playing_with_id(0.15, "library://radio/2"),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        real_write = ha.call_service_rest
+
+        def write_then_next_turn_ducks(domain, service, data):
+            real_write(domain, service, data)
+            if service == "volume_set" and abs(data["volume_level"] - 0.32) < 0.001:
+                # turn 2's wake-word duck slips in right after our restore write
+                cap._replies.pop(zone, None)                     # its own _reply_active gate passes
+                cap._snaps[zone] = {"volume": 0.32, "target": 0.15, "ts": 2000.0, "timer": None}
+                cap._replies[zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
+        ha.call_service_rest = write_then_next_turn_ducks
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertIn(zone, cap._snaps)                          # turn 2's snapshot survives
+        self.assertAlmostEqual(cap._snaps[zone]["ts"], 2000.0)   # and it is turn 2's, not turn 1's
+
+    def test_say_crash_after_reply_volume_leaves_a_reconcilable_zone(self):
+        # C2: if the reply turn dies after raising the volume, the zone must not be left loud, and
+        # a later _restore must NOT read the reply volume as a human override and keep it.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        zone = self.zone
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                          # baseline 0.32, target 0.15
+        ha.set_states([playing_with_id(0.15, "library://radio/2")])
+        real_write = ha.call_service_rest
+
+        def boom_on_play_media(domain, service, data):
+            if service == "play_media":
+                raise IOError("MA play_media 500")
+            real_write(domain, service, data)
+        ha.call_service_rest = boom_on_play_media
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertFalse(r["ok"])
+        self.assertNotIn(zone, cap._replies)                     # ownership handed back
+        # the abort path put the zone back on the baseline itself...
+        self.assertAlmostEqual(ha.calls[-1][2]["volume_level"], 0.32)
+        # ...and the snapshot it left behind is reconcilable: target tracks what was really written,
+        # so the dead-man restores the baseline instead of claiming user_override.
+        ha._state = playing(0.32)
+        ha.call_service_rest = real_write
+        ha.calls = []
+        r2 = run(cap, ctx, {"mode": "restore"})
+        self.assertNotEqual(r2["metadata"].get("reason"), "user_override")
+
+    def test_dead_man_during_reply_defers_and_stays_armed(self):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
+        ha._state = playing(0.70)                                # sitting at _say's reply volume
+        ha.calls = []
+        FakeTimer.created[0].fire()                              # dead-man fires mid-reply
+        self.assertEqual(ha.calls, [])                           # does not fight _say
+        self.assertAlmostEqual(cap._snaps[self.zone]["volume"], 0.32)
+        self.assertEqual(len(FakeTimer.created), 2)              # re-armed, backstop not lost
+
+    def test_two_consecutive_turns_do_not_ratchet(self):
+        # The end-to-end property the operator hears: turn 2 must start and finish on the same
+        # baseline as turn 1, with S1a's idle->restore firing mid-reply on both turns.
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ctx = None
+
+        def one_turn(ha):
+            run(cap, ctx, {"mode": "duck"})                      # wake: 0.32 -> 0.15
+            ha.set_states([playing_with_id(0.15, "library://radio/2"),
+                           playing_with_id(0.70, self.reply_mid),
+                           playing_with_id(0.70, self.reply_mid),
+                           playing_with_id(0.70, self.reply_mid),   # the interleaved restore's read
+                           idle_state()])
+            cap._sleeper = FakeSleeper(lambda n: n == 1 and run(cap, ctx, {"mode": "restore"}))
+            return run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        one_turn(ha)
+        vols = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vols[-1], 0.32)
+        ha2 = FakeHA(playing(0.32))                              # turn 2 starts where turn 1 left off
+        ctx.ha = ha2
+        one_turn(ha2)
+        vols2 = [c[2]["volume_level"] for c in ha2.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vols2[0], 0.15)                   # ducked from the SAME baseline
+        self.assertAlmostEqual(vols2[-1], 0.32)                  # and returned to it: no ratchet
+        self.assertNotIn(self.zone, cap._replies)
+
+    def test_owns_restore_false_keeps_pre_slice4_behaviour(self):
+        # The rollback lever: with the flag off, duck/restore must not defer at all.
+        class NoOwnRestore(OwnershipSettings):
+            say_owns_restore = False
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha = FakeHA(playing(0.32))
+        ctx = self._ctx(ha)
+        ctx.settings = NoOwnRestore()
+        run(cap, ctx, {"mode": "duck"})
+        cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 1000.0, "rid": "r0"}
+        ha._state = playing(0.55)                                # a human bump
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "restore"})
+        self.assertEqual(r["metadata"]["reason"], "user_override")   # legacy heuristic, not deferral
+        r2 = run(cap, ctx, {"mode": "duck"})                      # and duck still ducks
+        self.assertTrue(r2["metadata"]["ducked"])
 
     def test_say_inherits_baseline_from_superseded_reply(self):
         # Barge-in: reply #2 captures prev_volume == reply #1's volume. It must inherit the

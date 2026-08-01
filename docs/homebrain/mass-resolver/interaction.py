@@ -51,6 +51,14 @@ class InteractionCapability(capability.Capability):
         with self._lock:                                               # read + write stay under _lock together
                                                                         # (intentional: serializes HTTP threads
                                                                         # against the timer thread)
+            if self._reply_active(ctx, zone) is not None:
+                # Decision (a)+(b): during a reply turn the clip has REPLACED the music, so there is
+                # nothing left to duck under, and _say owns this zone's volume. Ducking here would
+                # only quiet the reply itself, and the snapshot it left behind would be torn down by
+                # _say's restore -- stranding the zone with neither baseline nor dead-man.
+                LOG.info("DUCK req=%s zone=%s skipped: reply active (say owns volume)", rid, zone)
+                return cr.ok(self.name, rid, "Reply in progress.", spoken_text=None,
+                             metadata={"ducked": False, "reason": "reply_active", "zone": zone})
             state = ctx.ha.get_entity_state(zone) or {}
             player_state = state.get("state")
             vol = (state.get("attributes") or {}).get("volume_level")
@@ -62,9 +70,12 @@ class InteractionCapability(capability.Capability):
                              metadata={"ducked": False, "reason": "no_volume", "zone": zone})
             target = min(vol, floor)                                   # never raise volume
             if zone not in self._snaps:                                # first duck: capture baseline
-                baseline = self._reply_baseline(zone, vol)             # mid-reply, `vol` is _say's reply
-                self._snaps[zone] = {"volume": baseline, "target": target,   #   volume, NOT a user baseline --
-                                     "ts": self._clock(), "timer": None}     #   snapshotting it is the ratchet
+                # Reachable mid-reply only if a reply marker went stale above (crashed/hung _say).
+                # `vol` is then _say's reply volume, not a user level -- snapshotting it is the
+                # ratchet -- so prefer the orphaned marker's baseline.
+                baseline = self._reply_baseline(zone, vol)
+                self._snaps[zone] = {"volume": baseline, "target": target,
+                                     "ts": self._clock(), "timer": None}
             else:                                                      # coalesce: keep baseline, track last-written target
                 self._snaps[zone]["target"] = target
             self._arm_timer(ctx, zone)                                 # snapshot + timer BEFORE the write, so a
@@ -105,6 +116,28 @@ class InteractionCapability(capability.Capability):
             except Exception as e2:
                 LOG.error("auto-restore re-arm failed zone=%s: %r", zone, e2)
 
+    def _reply_active(self, ctx, zone):
+        # The reply marker that owns this zone's volume, or None. Caller holds _lock.
+        # Two deliberate escapes from ownership:
+        #  * say_owns_restore=False turns decision (b) off wholesale -- duck/restore then behave
+        #    exactly as they did before Slice 4, so the flag stays a real rollback lever.
+        #  * a marker older than the whole say budget is treated as orphaned (crashed/hung _say).
+        #    Without this, one stuck reply would deafen duck AND restore for this zone forever --
+        #    and since a deferred restore re-arms the dead-man, even the backstop could never fire.
+        if not bool(getattr(ctx.settings, "say_owns_restore", True)):
+            return None
+        reply = self._replies.get(zone)
+        if reply is None:
+            return None
+        budget = (int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) +
+                  int(getattr(ctx.settings, "say_reply_timeout_ms", 30000))) / 1000.0
+        ts = reply.get("ts")
+        if ts is not None and (self._clock() - ts) > (budget + 60.0):
+            LOG.warning("reply marker zone=%s from req=%s is stale (%ds); reclaiming the zone",
+                        zone, reply.get("rid"), int(self._clock() - ts))
+            return None
+        return reply
+
     def _reply_baseline(self, zone, fallback):
         # The pre-duck baseline to hand back at the end of a reply turn. Caller holds _lock.
         # Order matters: the duck snapshot is the truest pre-duck value; an in-flight reply's
@@ -120,7 +153,7 @@ class InteractionCapability(capability.Capability):
 
     def _restore(self, ctx, zone, rid):
         with self._lock:
-            if zone in self._replies:
+            if self._reply_active(ctx, zone) is not None:
                 # S1b-2 decision (b): a reply turn owns this zone's volume until its clip ends.
                 # Restoring here would read _say's reply volume, misread it as a human change
                 # (user_override below), and DISCARD the baseline _say still needs -- the reply-turn
@@ -194,10 +227,25 @@ class InteractionCapability(capability.Capability):
             my_gen = self._say_gen.get(zone, 0) + 1
             self._say_gen[zone] = my_gen
             baseline = self._reply_baseline(zone, prev_volume)
-            self._replies[zone] = {"gen": my_gen, "baseline": baseline}
+            my_snap = self._snaps.get(zone)
+            # Identity of the snapshot our baseline came from. We may only ever retire THAT one:
+            # a snapshot belonging to a later turn must not be torn down by us.
+            my_snap_ts = my_snap.get("ts") if my_snap is not None else None
+            self._replies[zone] = {"gen": my_gen, "baseline": baseline,
+                                   "ts": self._clock(), "rid": rid}
 
         def superseded():
             return self._say_gen.get(zone) != my_gen
+
+        def retire_snapshot(my_snap_ts):
+            # Retire the duck snapshot + its dead-man once we have put the zone back on the
+            # baseline. ONLY ours (ts match): a duck that landed during the reply owns the next
+            # turn's baseline and dead-man, and must survive us.
+            with self._lock:
+                snap = self._snaps.get(zone)
+                if snap is not None and snap.get("ts") == my_snap_ts:
+                    self._cancel_timer(snap)
+                    del self._snaps[zone]
 
         def release_reply():
             # Release reply ownership -- but only if it is still ours: a superseding say has
@@ -213,6 +261,9 @@ class InteractionCapability(capability.Capability):
                                     "replayed": False, "superseded": True, "zone": zone})
 
         # From here on the zone is reply-owned, so every exit path must hand it back.
+        owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
+        pending_restore = [False]               # True once the zone sits at reply_volume and we still
+                                               # owe it a restore (list: rebound in the finally block)
         try:
             # 3. normalise the reply URI to the MA-reachable internal base
             norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
@@ -225,6 +276,16 @@ class InteractionCapability(capability.Capability):
             # 4. set reply volume, then 5. play_media (reply)
             ctx.ha.call_service_rest("media_player", "volume_set",
                                      {"entity_id": zone, "volume_level": reply_volume})
+            pending_restore[0] = True
+            if owns_restore:
+                with self._lock:
+                    snap = self._snaps.get(zone)
+                    if snap is not None and snap.get("ts") == my_snap_ts:
+                        # Keep the duck's "last value we wrote" in step with reality. If this reply
+                        # turn dies before its restore, a later _restore/dead-man must find the
+                        # device in agreement and restore the baseline -- not read our reply volume
+                        # as a human override, keep it, and discard the baseline (the ratchet).
+                        snap["target"] = reply_volume
             ctx.ha.call_service_rest("music_assistant", "play_media",
                                      {"entity_id": zone, "media_id": norm_uri})
 
@@ -274,19 +335,16 @@ class InteractionCapability(capability.Capability):
             # 8. restore volume (best-effort; a restore failure must not swallow the reply result).
             #    `baseline` was resolved back at step 2, so a snapshot discarded mid-reply cannot
             #    strand us on the ducked prev_volume.
-            owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
             try:
                 restore_to = baseline if owns_restore else prev_volume
                 if restore_to is not None:
                     ctx.ha.call_service_rest("media_player", "volume_set",
                                              {"entity_id": zone, "volume_level": restore_to})
+                    pending_restore[0] = False
                     if owns_restore:
-                        # As the reply-turn restore owner, retire the duck snapshot and its dead-man
-                        # here: leaving them armed carries a now-stale baseline into the next turn.
-                        with self._lock:
-                            snap = self._snaps.pop(zone, None)
-                            if snap is not None:
-                                self._cancel_timer(snap)
+                        # As the reply-turn restore owner, retire the snapshot ourselves: leaving it
+                        # armed carries a now-stale baseline into the next turn.
+                        retire_snapshot(my_snap_ts)
                     LOG.info("SAY req=%s zone=%s restored -> %s (owns_restore=%s)",
                              rid, zone, restore_to, owns_restore)
             except Exception as e:
@@ -308,4 +366,17 @@ class InteractionCapability(capability.Capability):
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
                                     "replayed": replayed, "superseded": False, "zone": zone})
         finally:
+            # The zone must never be handed back sitting at reply_volume. If we raised after
+            # raising the volume (e.g. play_media 500s, or a read blip in the poll), restore the
+            # baseline on the way out -- a superseding say excepted, since it owns the zone now.
+            if pending_restore[0] and owns_restore and baseline is not None and not superseded():
+                try:
+                    ctx.ha.call_service_rest("media_player", "volume_set",
+                                             {"entity_id": zone, "volume_level": baseline})
+                    retire_snapshot(my_snap_ts)     # fulfilled: the zone is back on its baseline
+                    LOG.warning("SAY req=%s zone=%s aborted at reply volume; restored -> %s",
+                                rid, zone, baseline)
+                except Exception as e:
+                    LOG.error("SAY req=%s zone=%s abort-restore failed (%r); dead-man must reconcile",
+                              rid, zone, e)
             release_reply()
