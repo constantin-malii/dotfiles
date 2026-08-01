@@ -619,6 +619,108 @@ class SayDispatchTest(unittest.TestCase):
         self.assertFalse(r["metadata"]["replayed"])                 # not playing before -> no replay
 
 
+class ObservabilitySettings(FakeSettings):
+    reply_volume = 0.70
+    say_call_timeout_ms = 20000
+    say_double_speak_window_ms = 8000
+
+
+class AnnouncingSpeaker(object):
+    """Stands in for resolver.Speaker: records when it last put a voice on the zone."""
+    def __init__(self, last_announce_ts=None, text="I couldn't find a station for norok."):
+        self.last_announce_ts = last_announce_ts
+        self.last_announce_text = text
+
+
+class SayObservabilityTest(unittest.TestCase):
+    """The visibility gaps that made the live double-speak turn hard to read:
+    no SAY start line, no attribution for which service call timed out, and no signal that a
+    second voice had just spoken on the same zone."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self, clock=None):
+        return interaction.InteractionCapability(timer_factory=FakeTimer,
+                                                clock=clock or (lambda: 1000.0),
+                                                sleeper=FakeSleeper())
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = ObservabilitySettings()
+        return ctx
+
+    def _happy_states(self):
+        return [playing_with_id(0.32, "library://radio/18"),
+                playing_with_id(0.70, self.reply_mid),
+                idle_state()]
+
+    def test_say_logs_a_start_line_with_a_clip_fingerprint_not_the_uri(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        ha.set_states(self._happy_states())
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        starts = [m for m in cm.output if "SAY start" in m]
+        self.assertEqual(len(starts), 1)
+        self.assertIn("clip=" + cap._clip_id(self.norm_uri), starts[0])
+        # the reply URL itself must never reach the log
+        self.assertNotIn("tts_proxy", "\n".join(cm.output))
+
+    def test_double_speak_is_reported_when_resolver_just_announced(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        ctx.speaker = AnnouncingSpeaker(last_announce_ts=997.0)     # 3s before this reply
+        ha.set_states(self._happy_states())
+        with self.assertLogs("resolver", level="WARNING") as cm:
+            run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(any("DOUBLE-SPEAK" in m for m in cm.output), cm.output)
+
+    def test_no_double_speak_warning_for_an_old_or_absent_announce(self):
+        for speaker_obj in (AnnouncingSpeaker(last_announce_ts=980.0),   # 20s ago, outside window
+                            AnnouncingSpeaker(last_announce_ts=None),    # never announced
+                            None):                                       # no speaker wired
+            cap = self._cap()
+            ha = FakeHA(); ctx = self._ctx(ha)
+            if speaker_obj is not None:
+                ctx.speaker = speaker_obj
+            ha.set_states(self._happy_states())
+            with self.assertLogs("resolver", level="INFO") as cm:
+                run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+            self.assertFalse(any("DOUBLE-SPEAK" in m for m in cm.output), cm.output)
+
+    def test_play_media_gets_the_long_timeout_and_volume_set_does_not(self):
+        # MA play_media outran the 5s REST default live, aborting the turn while the clip played.
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        ha.set_states(self._happy_states())
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        by_service = {}
+        for service, timeout in ha.timeouts:
+            by_service.setdefault(service, []).append(timeout)
+        self.assertEqual(by_service["play_media"], [20.0, 20.0])    # reply + replay
+        self.assertEqual(by_service["volume_set"], [5, 5])          # unchanged default
+
+    def test_failed_call_is_attributed_with_service_and_elapsed(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.32)); ctx = self._ctx(ha)
+        real_write = ha.call_service_rest
+
+        def boom(domain, service, data, timeout=None):
+            if service == "play_media":
+                raise IOError("timed out")
+            real_write(domain, service, data)
+        ha.call_service_rest = boom
+        ha.set_states([playing_with_id(0.32, "library://radio/18")])
+        with self.assertLogs("resolver", level="ERROR") as cm:
+            r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("music_assistant.play_media failed after" in m for m in cm.output), cm.output)
+
+
 class OwnershipSettings(FakeSettings):
     """Production-shaped: reply_volume distinct from both the baseline and the duck floor,
     so a restore to the wrong value is unambiguous in assertions."""
@@ -762,7 +864,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
                        idle_state()])
         real_write = ha.call_service_rest
 
-        def write_then_next_turn_ducks(domain, service, data):
+        def write_then_next_turn_ducks(domain, service, data, timeout=None):
             real_write(domain, service, data)
             if service == "volume_set" and abs(data["volume_level"] - 0.32) < 0.001:
                 # turn 2's wake-word duck slips in right after our restore write
@@ -787,7 +889,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         ha.set_states([playing_with_id(0.15, "library://radio/2")])
         real_write = ha.call_service_rest
 
-        def boom_on_play_media(domain, service, data):
+        def boom_on_play_media(domain, service, data, timeout=None):
             if service == "play_media":
                 raise IOError("MA play_media 500")
             real_write(domain, service, data)

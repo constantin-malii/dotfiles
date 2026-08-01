@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # AU-02/AU-03: interaction duck/restore for a media zone. Silent. Python 3.5 safe.
-import logging, time, threading
+import hashlib, logging, time, threading
 from urllib.parse import urlparse, urlunparse
 import capability
 import command_result as cr
@@ -204,8 +204,47 @@ class InteractionCapability(capability.Capability):
         except Exception:
             return uri
 
+    def _clip_id(self, uri):
+        # Short fingerprint of the reply clip, for correlating log lines WITHOUT logging the URI
+        # (reply URLs are unauthenticated-but-obscure tts_proxy links -- never log them verbatim).
+        try:
+            return hashlib.sha1((uri or "").encode("utf-8")).hexdigest()[:8]
+        except Exception:
+            return "????????"
+
+    def _warn_if_double_speak(self, ctx, zone, rid, clip):
+        # Two voices on one turn: the resolver announces a capability's spoken_text via tts.speak
+        # (core.dispatch, the sole-TTS-owner rule) AND the satellite pipeline relays the same text
+        # through Piper, which lands here as a reply clip. The operator hears the answer twice.
+        # Diagnostic only -- this does not suppress either voice.
+        sp = getattr(ctx, "speaker", None)
+        last = getattr(sp, "last_announce_ts", None) if sp is not None else None
+        if last is None:
+            return
+        window = int(getattr(ctx.settings, "say_double_speak_window_ms", 8000)) / 1000.0
+        age = self._clock() - last
+        if 0 <= age <= window:
+            LOG.warning("SAY req=%s zone=%s clip=%s DOUBLE-SPEAK: resolver announced %.1fs ago "
+                        "(%r) and this reply is a second voice on the same zone",
+                        rid, zone, clip, age, (getattr(sp, "last_announce_text", "") or "")[:60])
+
+    def _say_call(self, ctx, rid, zone, domain, service, data, timeout=None):
+        # One place to time + attribute _say's service calls: a bare timeout used to surface only as
+        # "capability=interaction error: timeout" with no hint of WHICH call died.
+        t0 = self._clock()
+        try:
+            if timeout is None:
+                ctx.ha.call_service_rest(domain, service, data)
+            else:
+                ctx.ha.call_service_rest(domain, service, data, timeout=timeout)
+        except Exception as e:
+            LOG.error("SAY req=%s zone=%s %s.%s failed after %.1fs (%r)",
+                      rid, zone, domain, service, self._clock() - t0, e)
+            raise
+
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
+        clip = self._clip_id(uri)
 
         # 1. capture before-state (best-effort; a read blip must not swallow the reply)
         try:
@@ -272,10 +311,15 @@ class InteractionCapability(capability.Capability):
             start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
             reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
             reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
+            call_timeout = int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0
+
+            LOG.info("SAY start req=%s zone=%s clip=%s baseline=%s prev=%s reply_volume=%s",
+                     rid, zone, clip, baseline, prev_volume, reply_volume)
+            self._warn_if_double_speak(ctx, zone, rid, clip)
 
             # 4. set reply volume, then 5. play_media (reply)
-            ctx.ha.call_service_rest("media_player", "volume_set",
-                                     {"entity_id": zone, "volume_level": reply_volume})
+            self._say_call(ctx, rid, zone, "media_player", "volume_set",
+                           {"entity_id": zone, "volume_level": reply_volume})
             pending_restore[0] = True
             if owns_restore:
                 with self._lock:
@@ -286,8 +330,10 @@ class InteractionCapability(capability.Capability):
                         # device in agreement and restore the baseline -- not read our reply volume
                         # as a human override, keep it, and discard the baseline (the ratchet).
                         snap["target"] = reply_volume
-            ctx.ha.call_service_rest("music_assistant", "play_media",
-                                     {"entity_id": zone, "media_id": norm_uri})
+            # MA's play_media regularly outruns the 5s REST default; a client-side timeout here
+            # aborts the turn while the clip still starts server-side (audible, unsequenced).
+            self._say_call(ctx, rid, zone, "music_assistant", "play_media",
+                           {"entity_id": zone, "media_id": norm_uri}, timeout=call_timeout)
 
             # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
             reply_started = False
@@ -354,14 +400,14 @@ class InteractionCapability(capability.Capability):
             replayed = False
             if was_playing and source_id and not superseded():
                 try:
-                    ctx.ha.call_service_rest("music_assistant", "play_media",
-                                             {"entity_id": zone, "media_id": source_id})
+                    self._say_call(ctx, rid, zone, "music_assistant", "play_media",
+                                   {"entity_id": zone, "media_id": source_id}, timeout=call_timeout)
                     replayed = True
                 except Exception as e:
-                    LOG.warning("SAY req=%s zone=%s replay failed (%r)", rid, zone, e)
+                    LOG.warning("SAY req=%s zone=%s replay failed (%r); source NOT resumed", rid, zone, e)
 
-            LOG.info("SAY req=%s zone=%s reply_started=%s likely_silent=%s replayed=%s",
-                     rid, zone, reply_started, likely_silent, replayed)
+            LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s likely_silent=%s replayed=%s",
+                     rid, zone, clip, reply_started, likely_silent, replayed)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
                                     "replayed": replayed, "superseded": False, "zone": zone})

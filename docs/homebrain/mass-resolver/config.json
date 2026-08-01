@@ -14,6 +14,8 @@
   "say_poll_ms": 500,
   "say_internal_base": "192.168.122.10:8123",
   "say_owns_restore": true,
+  "say_call_timeout_ms": 20000,
+  "say_double_speak_window_ms": 8000,
   "ha_url": "http://192.168.122.10:8123",
   "event_type": "mass_play_request",
   "sync_event_type": "mass_sync_request",

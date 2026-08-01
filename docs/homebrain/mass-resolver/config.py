@@ -53,6 +53,10 @@ class Settings(object):
         self.say_poll_ms = int(cfg.get("say_poll_ms", 500))                      # poll interval
         self.say_internal_base = cfg.get("say_internal_base", "192.168.122.10:8123")  # MA-reachable base for reply URI
         self.say_owns_restore = bool(cfg.get("say_owns_restore", True))          # _say restores pre-duck baseline
+        # MA play_media can take well over the 5s default REST timeout; a client-side timeout there
+        # aborts the reply turn while the clip still plays server-side (heard, but unsequenced).
+        self.say_call_timeout_ms = int(cfg.get("say_call_timeout_ms", 20000))     # play_media REST timeout
+        self.say_double_speak_window_ms = int(cfg.get("say_double_speak_window_ms", 8000))  # warn window
 
 
 def load_settings(here):
