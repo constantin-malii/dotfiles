@@ -3,6 +3,45 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-01 — DOUBLE-SPEAK root-caused: a satellite turn had TWO speech owners; resolver announce now stands down during a turn (+ `_say` call attribution, `play_media` timeout 5s→20s)
+
+- **Symptom (operator, right after the Slice-4 deploy):** every reply heard **twice**, the two voices
+  overlapping and "ducking one another".
+- **Root cause — a Slice 2+3 collision, NOT a Slice-4 regression.** One utterance had two independent
+  speech owners on the *same* ceiling zone: (1) the satellite's LLM calls an exposed tool, the resolver
+  returns `spoken_text` **and** `chat_text`, and `core.dispatch` speaks `spoken_text` via `tts.speak` (the
+  F1-R sole-TTS-owner rule); (2) the LLM then relays `chat_text` verbatim, Piper renders it, and the Slice-3
+  automation routes that clip to the same ceiling through `_say`. Before Slice 3 the pipeline reply was
+  **inaudible**, so only voice (1) was heard — Slice 3 made the second one audible. Live evidence at 13:09:
+  `ANNOUNCE via tts.speak: I couldn't find a station for norok.` one second before the `DUCK` of the very
+  turn that also spoke it.
+- **Fix (operator-chosen, resolver-only, no HA edits):** `core.dispatch` **holds back its own announce while
+  a satellite turn is in flight** on the ceiling zone — the pipeline owns the voice for that turn. "In
+  flight" = a reply clip playing, **or** a duck snapshot held, **or** a duck *requested* within
+  `interaction_turn_window_ms` (30 s). The third condition is load-bearing: the live turn ducked **nothing**
+  (zone was idle), so a snapshot-only test would have missed it and announced anyway. Phone and
+  ChatGPT-text callers never duck → unaffected, they keep their announce. Reversible via
+  `suppress_announce_during_interaction=false` (config only, no code revert).
+- **Second, independent defect fixed in the same trace:** `_say` inherited `call_service_rest`'s **5 s**
+  default, and MA's `play_media` routinely outruns it → the turn **aborted** (`capability=interaction error:
+  timeout`) while the clip still started server-side, so the reply was audible but **unsequenced** and the
+  source was never replayed (also the 09:52 `replay failed (timeout)`). Reply + replay `play_media` now use
+  **`say_call_timeout_ms` (20 s)**; `volume_set` keeps the 5 s default.
+- **Visibility added** (the gaps that made this turn unreadable): a `SAY start` line with a **sha1[:8] clip
+  fingerprint** (never the `tts_proxy` URL); every `_say` service call timed and attributed on failure
+  (`music_assistant.play_media failed after 5.0s`) instead of a bare `error: timeout`; a **`DOUBLE-SPEAK`**
+  warning when a reply clip lands within `say_double_speak_window_ms` (8 s) of the resolver's own announce;
+  a **`TURN start`** line, and no-op ducks now log **why** (`no-op (not_playing)`) — previously a turn over
+  an idle zone logged nothing at all, which is why the operator's wake could not be located.
+- **New tunables:** `say_call_timeout_ms` (20000), `say_double_speak_window_ms` (8000),
+  `suppress_announce_during_interaction` (true), `interaction_turn_window_ms` (30000).
+- **Deploy (gated):** `interaction.py`, `core.py`, `speaker.py`, `config.py`, `config.json` (+ 4 test files)
+  to `~/mass-resolver/`; backup **`~/mass-resolver/.bak/20260801-151634/`**; host **Python 3.5.2**
+  `py_compile` OK, host suite **109 OK**; user-run `sudo systemctl restart mass-resolver`.
+  Note: multi-file `scp` hung — copy files **one at a time** with individual `timeout`s.
+- **Tests:** 17 new across `test_interaction.py` / `test_core.py` / `test_speaker.py` / `test_config.py`;
+  suite **267 OK** locally (was 251).
+
 ## 2026-08-01 — S1b-2 Slice 4: reply-turn duck ownership fixed in the resolver (`_say` is sole restore owner); NO HA automation edit needed
 
 - **Fixes the Slice-3 volume ratchet/crater** (the `RESTORE … user_override cur=0.7 (kept)` bug). Root
