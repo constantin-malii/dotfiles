@@ -57,6 +57,11 @@ class Settings(object):
         # aborts the reply turn while the clip still plays server-side (heard, but unsequenced).
         self.say_call_timeout_ms = int(cfg.get("say_call_timeout_ms", 20000))     # play_media REST timeout
         self.say_double_speak_window_ms = int(cfg.get("say_double_speak_window_ms", 8000))  # warn window
+        # During a satellite turn the assistant pipeline speaks the reply itself; the resolver's own
+        # tts.speak would be a SECOND voice on the same zone for one utterance.
+        self.suppress_announce_during_interaction = bool(
+            cfg.get("suppress_announce_during_interaction", True))
+        self.interaction_turn_window_ms = int(cfg.get("interaction_turn_window_ms", 30000))
 
 
 def load_settings(here):

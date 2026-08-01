@@ -19,6 +19,10 @@ class InteractionCapability(capability.Capability):
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
+        self._turns = {}                              # zone -> ts of the last duck REQUEST. A duck request is
+                                                      #   the satellite announcing a turn, whether or not there
+                                                      #   was anything to attenuate -- so this marks "a turn is
+                                                      #   live" even when the zone was idle. Guarded by _lock.
         self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
                                                       #   turn is in flight; _say owns the zone's volume for its
                                                       #   lifetime (S1b-2 decision (b)). Guarded by _lock.
@@ -51,6 +55,14 @@ class InteractionCapability(capability.Capability):
         with self._lock:                                               # read + write stay under _lock together
                                                                         # (intentional: serializes HTTP threads
                                                                         # against the timer thread)
+            # A turn is live from here (see _turns). Log the first duck of a turn: a no-op duck used
+            # to log nothing at all, so a turn over an idle zone was invisible and the operator's
+            # wake could not be located in the log.
+            window = int(getattr(ctx.settings, "interaction_turn_window_ms", 30000)) / 1000.0
+            prev_turn = self._turns.get(zone)
+            if prev_turn is None or (self._clock() - prev_turn) > window:
+                LOG.info("TURN start req=%s zone=%s (duck requested)", rid, zone)
+            self._turns[zone] = self._clock()
             if self._reply_active(ctx, zone) is not None:
                 # Decision (a)+(b): during a reply turn the clip has REPLACED the music, so there is
                 # nothing left to duck under, and _say owns this zone's volume. Ducking here would
@@ -63,9 +75,11 @@ class InteractionCapability(capability.Capability):
             player_state = state.get("state")
             vol = (state.get("attributes") or {}).get("volume_level")
             if player_state != "playing" and getattr(ctx.settings, "interaction_ignore_when_idle", True):
+                LOG.info("DUCK req=%s zone=%s no-op (not_playing)", rid, zone)
                 return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
                              metadata={"ducked": False, "reason": "not_playing", "zone": zone})
             if vol is None:
+                LOG.info("DUCK req=%s zone=%s no-op (no_volume)", rid, zone)
                 return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
                              metadata={"ducked": False, "reason": "no_volume", "zone": zone})
             target = min(vol, floor)                                   # never raise volume
@@ -138,6 +152,22 @@ class InteractionCapability(capability.Capability):
             return None
         return reply
 
+    def interaction_in_flight(self, ctx, zone):
+        """Is a satellite turn live on this zone? Read by core.dispatch to hold back the resolver's
+        own tts.speak: during a satellite turn the assistant pipeline speaks the reply itself, and
+        announcing here too puts TWO voices on the zone for one utterance (the operator hears the
+        answer twice, the clips overlap, and they fight over the player).
+
+        True while a reply clip is in flight, while a duck snapshot is held, or within
+        interaction_turn_window_ms of the last duck request (covers wake -> reply-URI, including the
+        case where the zone was idle so nothing was ducked)."""
+        window = int(getattr(ctx.settings, "interaction_turn_window_ms", 30000)) / 1000.0
+        with self._lock:
+            if zone in self._replies or zone in self._snaps:
+                return True
+            ts = self._turns.get(zone)
+            return ts is not None and (self._clock() - ts) <= window
+
     def _reply_baseline(self, zone, fallback):
         # The pre-duck baseline to hand back at the end of a reply turn. Caller holds _lock.
         # Order matters: the duck snapshot is the truest pre-duck value; an in-flight reply's
@@ -165,6 +195,7 @@ class InteractionCapability(capability.Capability):
                 LOG.info("RESTORE req=%s zone=%s deferred: reply active (say owns restore)", rid, zone)
                 return cr.ok(self.name, rid, "Reply in progress.", spoken_text=None,
                              metadata={"restored": False, "reason": "reply_active", "zone": zone})
+            self._turns.pop(zone, None)          # restore with no reply in flight == the turn is over
             snap = self._snaps.get(zone)                              # peek; discard only after write
             if snap is None:
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
@@ -293,6 +324,7 @@ class InteractionCapability(capability.Capability):
                 reply = self._replies.get(zone)
                 if reply is not None and reply.get("gen") == my_gen:
                     del self._replies[zone]
+                    self._turns.pop(zone, None)      # our reply was the turn; it ends here
 
         def superseded_result():
             return cr.ok(self.name, rid, "Said.", spoken_text=None,

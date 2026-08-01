@@ -16,6 +16,8 @@
   "say_owns_restore": true,
   "say_call_timeout_ms": 20000,
   "say_double_speak_window_ms": 8000,
+  "suppress_announce_during_interaction": true,
+  "interaction_turn_window_ms": 30000,
   "ha_url": "http://192.168.122.10:8123",
   "event_type": "mass_play_request",
   "sync_event_type": "mass_sync_request",

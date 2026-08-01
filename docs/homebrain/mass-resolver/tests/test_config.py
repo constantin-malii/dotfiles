@@ -77,6 +77,8 @@ class SayTunablesTest(unittest.TestCase):
         self.assertTrue(s.say_owns_restore)
         self.assertEqual(s.say_call_timeout_ms, 20000)      # MA play_media outruns the 5s REST default
         self.assertEqual(s.say_double_speak_window_ms, 8000)
+        self.assertTrue(s.suppress_announce_during_interaction)
+        self.assertEqual(s.interaction_turn_window_ms, 30000)
 
     def test_overrides(self):
         s = config.Settings({
@@ -88,6 +90,8 @@ class SayTunablesTest(unittest.TestCase):
             "say_owns_restore": False,
             "say_call_timeout_ms": 12000,
             "say_double_speak_window_ms": 3000,
+            "suppress_announce_during_interaction": False,
+            "interaction_turn_window_ms": 9000,
         })
         self.assertAlmostEqual(s.reply_volume, 0.55)
         self.assertEqual(s.say_start_timeout_ms, 7000)
@@ -97,6 +101,8 @@ class SayTunablesTest(unittest.TestCase):
         self.assertFalse(s.say_owns_restore)
         self.assertEqual(s.say_call_timeout_ms, 12000)
         self.assertEqual(s.say_double_speak_window_ms, 3000)
+        self.assertFalse(s.suppress_announce_during_interaction)
+        self.assertEqual(s.interaction_turn_window_ms, 9000)
 
     def test_say_announce_timeout_ms_retired(self):
         s = config.Settings({})

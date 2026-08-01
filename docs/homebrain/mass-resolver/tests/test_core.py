@@ -185,6 +185,79 @@ class CoreDispatchTest(unittest.TestCase):
         self.assertIsNone(ctx.speaker)
 
 
+class AnnounceSuppressionTest(unittest.TestCase):
+    """A satellite turn has its own voice (pipeline Piper -> reply clip). The resolver announcing
+    the same spoken_text puts a SECOND voice on the ceiling for one utterance -- the operator hears
+    the answer twice and the clips fight. Non-satellite callers never duck, so they keep announcing.
+    """
+
+    def setUp(self):
+        self.cap = core.CAPS["interaction"]
+        self.zone = "media_player.ceiling_speakers"
+        # leave no cross-test state in the shared capability singleton
+        for d in (self.cap._snaps, self.cap._replies, self.cap._turns):
+            d.clear()
+        self.addCleanup(self.cap._snaps.clear)
+        self.addCleanup(self.cap._replies.clear)
+        self.addCleanup(self.cap._turns.clear)
+
+    def _ctx(self, speaker):
+        return core.Ctx(ma_factory=lambda: None, ha=None, settings=FakeSettings(),
+                        radio_cfg={}, news_cfg={}, speaker=speaker)
+
+    def test_stub_result_announces_normally(self):
+        spk = FakeSpeaker()
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, ["Acquire isn't available yet."])
+
+    def test_stub_result_is_suppressed_during_a_reply(self):
+        spk = FakeSpeaker()
+        self.cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 0.0, "rid": "r0"}
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, [])
+
+    def test_suppressed_while_a_duck_snapshot_is_held(self):
+        spk = FakeSpeaker()
+        self.cap._snaps[self.zone] = {"volume": 0.32, "target": 0.15, "ts": 0.0, "timer": None}
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, [])
+
+    def test_suppressed_after_a_no_op_duck_over_an_idle_zone(self):
+        # The live 13:09 case: wake ducked nothing (zone idle) so no snapshot existed, yet the turn
+        # WAS live and the pipeline still spoke. The turn marker has to cover this.
+        spk = FakeSpeaker()
+        self.cap._turns[self.zone] = self.cap._clock()
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, [])
+
+    def test_announces_again_once_the_turn_marker_is_stale(self):
+        spk = FakeSpeaker()
+        self.cap._turns[self.zone] = self.cap._clock() - 31.0      # window is 30s
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, ["Acquire isn't available yet."])
+
+    def test_flag_off_restores_unconditional_announcing(self):
+        class NoSuppress(FakeSettings):
+            suppress_announce_during_interaction = False
+        spk = FakeSpeaker()
+        self.cap._replies[self.zone] = {"gen": 1, "baseline": 0.32, "ts": 0.0, "rid": "r0"}
+        ctx = self._ctx(spk)
+        ctx.settings = NoSuppress()
+        core.dispatch(ctx, "acquire", {})
+        self.assertEqual(spk.said, ["Acquire isn't available yet."])
+
+    def test_a_broken_in_flight_check_never_blocks_the_announce(self):
+        class Boom(object):
+            def interaction_in_flight(self, ctx, zone):
+                raise RuntimeError("kaboom")
+        spk = FakeSpeaker()
+        saved = core.CAPS["interaction"]
+        core.CAPS["interaction"] = Boom()
+        self.addCleanup(lambda: core.CAPS.__setitem__("interaction", saved))
+        core.dispatch(self._ctx(spk), "acquire", {})
+        self.assertEqual(spk.said, ["Acquire isn't available yet."])
+
+
 class NewsDispatchTest(unittest.TestCase):
     NEWS_CFG = {"defaults": {"headline_count": 3, "feed_timeout": 4.0, "max_items_per_feed": 10},
                 "feeds": {"world": [{"name": "BBC World", "url": "http://bbc/world"}]},
