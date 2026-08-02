@@ -8,14 +8,23 @@ def _st(fav):
     return {"name": fav.get("name"), "uri": fav.get("uri"), "source": "favorite"}
 
 
-def by_name(radio_cfg, query):
-    favs = config.favorites(radio_cfg)
+def resolve_alias(radio_cfg, query):
+    """Map a spoken/STT-mangled station name onto its canonical name via radio.json `aliases`
+    (returns the query unchanged when there is no alias). Exposed so the MA/RadioBrowser search
+    can use the SAME canonical name as the local favorites match -- otherwise an alias only ever
+    helps stations that happen to be listed in radio.json."""
     aliases = (radio_cfg or {}).get("aliases", {})
     q = (query or "").strip()
     aliases_lower = {}
     for k, v in aliases.items():
         aliases_lower[k.lower()] = v
-    target = aliases_lower.get(q.lower(), q)
+    return aliases_lower.get(q.lower(), q)
+
+
+def by_name(radio_cfg, query):
+    favs = config.favorites(radio_cfg)
+    q = (query or "").strip()
+    target = resolve_alias(radio_cfg, q)
     tl = target.strip().lower()
     out = []
     seen = set()

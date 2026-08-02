@@ -62,6 +62,9 @@ class Settings(object):
         self.suppress_announce_during_interaction = bool(
             cfg.get("suppress_announce_during_interaction", True))
         self.interaction_turn_window_ms = int(cfg.get("interaction_turn_window_ms", 30000))
+        # "MA accepted the play" != "audio is playing": read the zone back this long after a radio
+        # play and log what actually happened (0 disables the check).
+        self.radio_confirm_after_ms = int(cfg.get("radio_confirm_after_ms", 8000))
 
 
 def load_settings(here):

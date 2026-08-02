@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Radio capability: play/find by name/country/genre/language, favorites-first then
 # RadioBrowser, with dry-run and honest feedback. Python 3.5 safe.
-import logging
+import logging, threading
 import capability
 import command_result as cr
 import config
@@ -31,7 +31,13 @@ def _candidates(ma, radio_cfg, params, cap):
     """Return (ordered stations, target_label)."""
     if params.get("station"):
         q = params["station"]
-        return _dedupe(favorites.by_name(radio_cfg, q) + rb.search(ma, q, cap), cap), q
+        # Search MA with the alias-resolved name too: STT mangles station names ("norok" for
+        # "Radio Noroc Moldova"), and MA's search is exact enough to return 0 hits for the variant
+        # while returning the station for its real name.
+        sq = favorites.resolve_alias(radio_cfg, q)
+        if sq != q:
+            LOG.info("radio alias %r -> %r", q, sq)
+        return _dedupe(favorites.by_name(radio_cfg, q) + rb.search(ma, sq, cap), cap), q
     if params.get("country"):
         word = params["country"]; code = config.resolve_country(radio_cfg, word)
         favs = favorites.by_country(radio_cfg, code) if code else []
@@ -52,6 +58,45 @@ def _candidates(ma, radio_cfg, params, cap):
 
 class RadioCapability(capability.Capability):
     name = "radio"
+
+    def __init__(self, timer_factory=None):
+        self._timer_factory = timer_factory or threading.Timer
+
+    def _confirm_play_later(self, ctx, rid, station, uri):
+        """`RADIO PLAYING` only ever meant "MA accepted the request" -- it was logged straight off
+        the play call's return, so a station that resolved fine and produced NO AUDIO still logged
+        as a success. Read the player back a few seconds later and log what actually happened.
+
+        Runs on a timer thread so the synchronous tool call pays no extra latency; diagnostic only,
+        it never changes the result already returned to the caller."""
+        secs = int(getattr(ctx.settings, "radio_confirm_after_ms", 8000)) / 1000.0
+        if secs <= 0:
+            return
+        zone = getattr(ctx.settings, "ceiling_entity", "") or ""
+        if not zone:
+            return
+
+        def check():
+            try:
+                st = ctx.ha.get_entity_state(zone) or {}
+                cid = (st.get("attributes") or {}).get("media_content_id") or ""
+                state = st.get("state")
+                match = bool(cid) and (uri in cid or cid in uri)
+                if state == "playing" and match:
+                    LOG.info("RADIO CONFIRM req=%s %r is playing (cid=%s)", rid, station, cid)
+                else:
+                    LOG.warning("RADIO CONFIRM req=%s %r NOT confirmed after %.0fs: state=%s cid=%s "
+                                "requested=%s -- MA accepted the play but the zone is not playing it",
+                                rid, station, secs, state, cid, uri)
+            except Exception as e:
+                LOG.warning("RADIO CONFIRM req=%s read failed (%r)", rid, e)
+
+        try:
+            t = self._timer_factory(secs, check)
+            t.daemon = True                      # never hold up a resolver shutdown
+            t.start()
+        except Exception as e:
+            LOG.warning("RADIO CONFIRM req=%s could not arm check (%r)", rid, e)
 
     def resolve(self, ctx, params):
         radio_cfg = ctx.radio_cfg or {}
@@ -117,8 +162,10 @@ class RadioCapability(capability.Capability):
                               "I found " + chosen["name"] + ", but couldn't start it.",
                               spoken_text="I found " + chosen["name"] + ", but couldn't start it.",
                               metadata=md)
-            LOG.info("req=%s RADIO PLAYING %r uri=%s source=%s",
+            # "accepted", not "playing" -- MA returning without an error_code says nothing about audio.
+            LOG.info("req=%s RADIO PLAY ACCEPTED by MA %r uri=%s source=%s (confirming shortly)",
                      rid, chosen["name"], chosen["uri"], chosen["source"])
+            self._confirm_play_later(ctx, rid, chosen["name"], chosen["uri"])
             md["played"] = True
             return cr.ok(self.name, rid, "Playing " + chosen["name"] + ".",
                          spoken_text=None, metadata=md)

@@ -39,6 +39,8 @@ class FakeMA(object):
 
 class FakeSettings(object):
     queue_id = "q1"
+    ceiling_entity = "media_player.ceiling_speakers"
+    radio_confirm_after_ms = 0            # no real timers in tests; the confirm tests opt in
 
 
 class FakeCtx(object):
@@ -191,6 +193,130 @@ class RadioCapabilityTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "play_failed")
         self.assertIn("couldn't start", r["chat_text"].lower())
         self.assertFalse(r["metadata"]["played"])
+
+
+class RecordingMA(FakeMA):
+    """Records the query MA actually received, so alias resolution can be asserted."""
+    def __init__(self, **kw):
+        FakeMA.__init__(self, **kw)
+        self.search_queries = []
+    def cmd(self, command, **a):
+        if command == "music/search":
+            self.search_queries.append(a.get("search_query"))
+        return FakeMA.cmd(self, command, **a)
+
+
+class FakeTimer(object):
+    created = []
+    def __init__(self, interval, fn, args=None):
+        self.interval = interval; self.fn = fn; self.args = args or []
+        self.started = False; self.daemon = False
+        FakeTimer.created.append(self)
+    def start(self): self.started = True
+    def fire(self): self.fn(*self.args)
+
+
+class FakeHA(object):
+    def __init__(self, state=None): self._state = state
+    def get_entity_state(self, entity_id): return self._state
+
+
+class AliasSearchTest(unittest.TestCase):
+    """STT mangles station names ("norok" for "Radio Noroc Moldova"). MA's search returns 0 hits for
+    the variant and 2 for the real name, so the alias must reach the MA search -- not only the local
+    favorites list, which need not contain the station at all."""
+
+    def _cfg(self):
+        rc = dict(RC)
+        rc["aliases"] = {"norok": "Radio Noroc Moldova"}
+        return rc
+
+    def test_alias_is_used_for_the_ma_search_query(self):
+        ma = RecordingMA(search=[rb_item("u9", "Radio Noroc Moldova")])
+        ctx = FakeCtx(ma); ctx.radio_cfg = self._cfg()
+        r = radio.resolve_radio(ctx, {"mode": "play", "station": "norok"}, "rid")
+        self.assertEqual(ma.search_queries, ["Radio Noroc Moldova"])   # not "norok"
+        self.assertTrue(r["ok"] and r["played"])
+
+    def test_unaliased_query_is_passed_through_unchanged(self):
+        ma = RecordingMA(search=[rb_item("u1", "Some Station")])
+        ctx = FakeCtx(ma); ctx.radio_cfg = self._cfg()
+        radio.resolve_radio(ctx, {"mode": "play", "station": "some station"}, "rid")
+        self.assertEqual(ma.search_queries, ["some station"])
+
+    def test_station_absent_from_local_favorites_still_resolves_via_alias(self):
+        # Radio Noroc Moldova lives in MA's library, NOT in radio.json favorites.
+        self.assertFalse(any("noroc" in f["name"].lower() for f in RC["favorites"]))
+        ma = RecordingMA(search=[rb_item("u9", "Radio Noroc Moldova")])
+        ctx = FakeCtx(ma); ctx.radio_cfg = self._cfg()
+        r = radio.resolve_radio(ctx, {"mode": "play", "station": "norok"}, "rid")
+        self.assertEqual(r["uri"], "radiobrowser://radio/u9")
+
+
+class PlayConfirmationTest(unittest.TestCase):
+    """MA returning without an error_code says nothing about audio: the old RADIO PLAYING line
+    claimed success it never checked, so a station that resolved and played NOTHING logged clean."""
+
+    def setUp(self):
+        FakeTimer.created = []
+
+    class Settings(FakeSettings):
+        radio_confirm_after_ms = 8000
+
+    def _run(self, player_state):
+        cap = radio.RadioCapability(timer_factory=FakeTimer)
+        ma = FakeMA(search=[rb_item("u1", "Some Station")])
+        ctx = FakeCtx(ma)
+        ctx.settings = self.Settings()
+        ctx.ha = FakeHA(player_state)
+        import capability
+        res = capability.run(cap, ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertTrue(FakeTimer.created[0].started)
+        self.assertTrue(FakeTimer.created[0].daemon)
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 8.0)
+        return FakeTimer.created[0]
+
+    def test_confirmed_when_the_zone_really_plays_the_requested_uri(self):
+        t = self._run({"state": "playing",
+                       "attributes": {"media_content_id": "library://radio/2"}})
+        with self.assertLogs("resolver", level="INFO") as cm:
+            t.fire()
+        self.assertTrue(any("RADIO CONFIRM" in m and "is playing" in m for m in cm.output), cm.output)
+
+    def test_warns_when_ma_accepted_but_the_zone_is_not_playing(self):
+        t = self._run({"state": "idle", "attributes": {}})
+        with self.assertLogs("resolver", level="WARNING") as cm:
+            t.fire()
+        self.assertTrue(any("NOT confirmed" in m for m in cm.output), cm.output)
+
+    def test_warns_when_a_different_station_is_playing(self):
+        t = self._run({"state": "playing",
+                       "attributes": {"media_content_id": "library://radio/99"}})
+        with self.assertLogs("resolver", level="WARNING") as cm:
+            t.fire()
+        self.assertTrue(any("NOT confirmed" in m for m in cm.output), cm.output)
+
+    def test_confirm_read_failure_is_logged_not_raised(self):
+        class BoomHA(object):
+            def get_entity_state(self, e): raise IOError("ha down")
+        cap = radio.RadioCapability(timer_factory=FakeTimer)
+        ma = FakeMA(search=[rb_item("u1", "S")])
+        ctx = FakeCtx(ma); ctx.settings = self.Settings(); ctx.ha = BoomHA()
+        import capability
+        capability.run(cap, ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
+        with self.assertLogs("resolver", level="WARNING") as cm:
+            FakeTimer.created[0].fire()
+        self.assertTrue(any("RADIO CONFIRM" in m and "read failed" in m for m in cm.output))
+
+    def test_zero_disables_the_check(self):
+        cap = radio.RadioCapability(timer_factory=FakeTimer)
+        ma = FakeMA(search=[rb_item("u1", "S")])
+        ctx = FakeCtx(ma); ctx.ha = FakeHA(None)      # FakeSettings default: 0 -> disabled
+        import capability
+        capability.run(cap, ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
+        self.assertEqual(FakeTimer.created, [])
 
 
 if __name__ == "__main__":

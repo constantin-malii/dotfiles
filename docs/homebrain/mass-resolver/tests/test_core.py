@@ -21,6 +21,7 @@ class FakeSettings(object):
     dry_run = False
     announce_failures = True
     ceiling_entity = "media_player.ceiling_speakers"
+    radio_confirm_after_ms = 0            # no real confirm timers in tests
     tts_service = "tts.speak"
     tts_data = {}
 
