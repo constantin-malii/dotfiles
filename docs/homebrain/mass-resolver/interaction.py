@@ -6,7 +6,7 @@ import capability
 import command_result as cr
 
 LOG = logging.getLogger("resolver")
-_MODES = ("duck", "restore", "say", "resume")
+_MODES = ("duck", "restore", "say", "resume", "volume_up", "volume_down", "set_volume")
 
 
 class InteractionCapability(capability.Capability):
@@ -36,7 +36,8 @@ class InteractionCapability(capability.Capability):
         mode = (params.get("mode") or "").strip().lower()
         zone = params.get("zone") or getattr(ctx.settings, "ceiling_entity", "")
         uri = params.get("uri") or params.get("media_content_id") or ""
-        return {"mode": mode, "zone": zone, "uri": uri}
+        return {"mode": mode, "zone": zone, "uri": uri,
+                "step": params.get("step"), "volume": params.get("volume")}
 
     def validate(self, ctx, resolved):
         if resolved["mode"] not in _MODES:
@@ -55,6 +56,8 @@ class InteractionCapability(capability.Capability):
             return self._say(ctx, resolved, rid)
         if resolved["mode"] == "resume":
             return self._resume(ctx, resolved["zone"], rid)
+        if resolved["mode"] in ("volume_up", "volume_down", "set_volume"):
+            return self._volume(ctx, resolved, rid)
         return self._restore(ctx, resolved["zone"], rid)
 
     def _duck(self, ctx, zone, rid):
@@ -190,6 +193,62 @@ class InteractionCapability(capability.Capability):
         with self._lock:
             self._last_source[zone] = uri
 
+    def _num(self, value, default):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _volume(self, ctx, resolved, rid):
+        """Volume commands must move the BASELINE while a turn is ducked.
+
+        The ceiling volume scripts wrote the player directly, which during a turn meant a relative
+        step computed from the DUCK FLOOR (0.15 + 0.10 = 0.25 instead of 0.34 + 0.10) -- and the next
+        re-duck pulled it straight back down, so "volume up" ended up LOWER than where it started.
+        While ducked we therefore retarget the snapshot the turn will restore to and leave the floor
+        alone; the change lands audibly when the turn ends. Unducked, we write the player as before.
+        """
+        zone = resolved["zone"]
+        mode = resolved["mode"]
+        step = self._num(resolved.get("step"), 10.0) / 100.0
+        with self._lock:
+            snap = self._snaps.get(zone)
+            ducked = snap is not None and snap.get("volume") is not None
+            base = snap["volume"] if ducked else None
+        if not ducked:
+            try:
+                attrs = (ctx.ha.get_entity_state(zone) or {}).get("attributes") or {}
+                base = attrs.get("volume_level")
+            except Exception as e:
+                LOG.warning("VOLUME req=%s zone=%s read failed (%r)", rid, zone, e)
+                base = None
+        if mode == "set_volume":
+            pct = self._num(resolved.get("volume"), None)
+            if pct is None:
+                return cr.ok(self.name, rid, "No volume given.", spoken_text=None,
+                             metadata={"changed": False, "reason": "no_volume", "zone": zone})
+            new = pct / 100.0
+        else:
+            if base is None:
+                return cr.ok(self.name, rid, "I could not read the current volume.", spoken_text=None,
+                             metadata={"changed": False, "reason": "no_current", "zone": zone})
+            new = base + (step if mode == "volume_up" else -step)
+        new = max(0.0, min(1.0, new))
+        if ducked:
+            with self._lock:
+                snap = self._snaps.get(zone)
+                if snap is not None:
+                    snap["volume"] = new
+            LOG.info("VOLUME req=%s zone=%s %s: baseline %s -> %s (ducked; applies when the turn ends)",
+                     rid, zone, mode, base, new)
+            return cr.ok(self.name, rid, "Volume set.", spoken_text=None,
+                         metadata={"changed": True, "to": new, "applied": "baseline", "zone": zone})
+        ctx.ha.call_service_rest("media_player", "volume_set",
+                                 {"entity_id": zone, "volume_level": new})
+        LOG.info("VOLUME req=%s zone=%s %s: -> %s (live)", rid, zone, mode, new)
+        return cr.ok(self.name, rid, "Volume set.", spoken_text=None,
+                     metadata={"changed": True, "to": new, "applied": "live", "zone": zone})
+
     def _resume(self, ctx, zone, rid):
         with self._lock:
             uri = self._last_source.get(zone)
@@ -200,12 +259,31 @@ class InteractionCapability(capability.Capability):
             LOG.info("RESUME req=%s zone=%s replaying %s", rid, zone, uri)
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": uri, "how": "replay", "zone": zone})
-        # Nothing remembered (e.g. resolver restarted): fall back to an ordinary play/unpause, which
-        # is the right call for a PAUSED stream and harmless otherwise.
-        ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
-        LOG.info("RESUME req=%s zone=%s no remembered source; sent media_play", rid, zone)
-        return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
-                     metadata={"resumed": True, "uri": None, "how": "media_play", "zone": zone})
+        # Nothing remembered (e.g. the resolver restarted). Do NOT blind-call media_play: on an idle
+        # player HA answers HTTP 500 and the whole turn dies with a bare OSError. Inspect first.
+        try:
+            st = ctx.ha.get_entity_state(zone) or {}
+        except Exception as e:
+            LOG.warning("RESUME req=%s zone=%s read failed (%r)", rid, zone, e)
+            st = {}
+        state = st.get("state")
+        cid = ((st.get("attributes") or {}).get("media_content_id")) or ""
+        if state == "paused":
+            ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+            LOG.info("RESUME req=%s zone=%s un-paused", rid, zone)
+            return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                         metadata={"resumed": True, "uri": None, "how": "unpause", "zone": zone})
+        if cid and not self._is_reply_uri(cid):
+            ctx.ha.call_service_rest("music_assistant", "play_media",
+                                     {"entity_id": zone, "media_id": cid},
+                                     timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+            LOG.info("RESUME req=%s zone=%s replaying the loaded source %s", rid, zone, cid)
+            return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                         metadata={"resumed": True, "uri": cid, "how": "loaded", "zone": zone})
+        LOG.info("RESUME req=%s zone=%s nothing to resume (state=%s had_reply_clip=%s)",
+                 rid, zone, state, bool(cid))
+        return cr.ok(self.name, rid, "There is nothing to resume.", spoken_text=None,
+                     metadata={"resumed": False, "reason": "nothing_to_resume", "zone": zone})
 
     def note_playback(self, ctx, zone, uri):
         """Record that the resolver just started media on this zone as part of the current turn.
@@ -490,6 +568,12 @@ class InteractionCapability(capability.Capability):
                         state = {}
                     attrs = state.get("attributes") or {}
                     if state.get("state") != "playing" or norm_uri not in (attrs.get("media_content_id") or ""):
+                        # Log WHY we decided the clip ended: a premature exit here restores and
+                        # replays the source OVER a clip that is still playing, which the operator
+                        # hears as the reply being cut off.
+                        LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
+                                 rid, zone, clip, elapsed, state.get("state"),
+                                 (attrs.get("media_content_id") or "")[:60])
                         break
                     self._sleeper(poll_secs)
                     elapsed += poll_secs

@@ -1236,12 +1236,36 @@ class ResumeModeTest(unittest.TestCase):
             self.cap.remember_source(self.zone, clip)
         self.assertNotIn(self.zone, self.cap._last_source)
 
-    def test_resume_falls_back_to_media_play_when_nothing_remembered(self):
-        ha = FakeHA(); ctx = FakeCtx(ha)
+    def test_resume_on_an_idle_empty_zone_makes_NO_service_call(self):
+        # Live failure: a blind media_play on an idle player returned HTTP 500 and killed the turn
+        # with a bare OSError, which the assistant surfaced as "there is nothing playing".
+        ha = FakeHA(idle_state()); ctx = FakeCtx(ha)
         r = run(self.cap, ctx, {"mode": "resume"})
-        self.assertTrue(r["metadata"]["resumed"])
-        self.assertEqual(r["metadata"]["how"], "media_play")
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["resumed"])
+        self.assertEqual(r["metadata"]["reason"], "nothing_to_resume")
+        self.assertEqual(ha.calls, [])
+
+    def test_resume_unpauses_a_paused_zone(self):
+        ha = FakeHA({"state": "paused", "attributes": {"media_content_id": "library://radio/2"}})
+        ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "resume"})
+        self.assertEqual(r["metadata"]["how"], "unpause")
         self.assertEqual([c[1] for c in ha.calls], ["media_play"])
+
+    def test_resume_replays_a_loaded_real_source_when_nothing_remembered(self):
+        ha = FakeHA(playing_with_id(0.3, "library://radio/2")); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "resume"})
+        self.assertEqual(r["metadata"]["how"], "loaded")
+        self.assertEqual(r["metadata"]["uri"], "library://radio/2")
+
+    def test_resume_will_not_replay_a_spent_reply_clip(self):
+        clip = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/x.flac"
+        ha = FakeHA({"state": "idle", "attributes": {"media_content_id": clip}})
+        ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "resume"})
+        self.assertFalse(r["metadata"]["resumed"])
+        self.assertEqual(ha.calls, [])
 
     def test_a_played_station_is_remembered_via_note_playback(self):
         ctx = FakeCtx(FakeHA())
@@ -1259,6 +1283,100 @@ class ResumeModeTest(unittest.TestCase):
     def test_resume_is_a_valid_mode(self):
         r = self.cap.resolve(FakeCtx(FakeHA()), {"mode": "resume"})
         self.assertIsNone(self.cap.validate(FakeCtx(FakeHA()), r))
+
+
+class VolumeCommandTest(unittest.TestCase):
+    """LIVE FAILURE this guards: "volume up" from 0.34 ended at 0.25.
+
+        15:43:32  DUCK 0.34 -> 0.15          wake ducks to the floor
+        15:43:38  DUCK 0.25 -> 0.15          volume_up made 0.15+0.10, the re-duck undid it
+        15:43:39  SAY restored -> 0.25       so "up" finished LOWER than it started
+
+    A relative step must be computed from the BASELINE, not the duck floor, and must survive the
+    re-ducks that follow it."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                    sleeper=FakeSleeper())
+
+    def test_volume_up_while_ducked_moves_the_baseline_not_the_floor(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})                 # 0.34 -> 0.15
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "volume_up"})
+        self.assertTrue(r["metadata"]["changed"])
+        self.assertEqual(r["metadata"]["applied"], "baseline")
+        self.assertAlmostEqual(r["metadata"]["to"], 0.44)     # 0.34 + 0.10, NOT 0.15 + 0.10
+        self.assertEqual(ha.calls, [])                        # floor untouched, nothing to fight
+        self.assertAlmostEqual(self.cap._snaps[self.zone]["volume"], 0.44)
+
+    def test_the_ducked_change_survives_a_re_duck_and_lands_on_restore(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        run(self.cap, ctx, {"mode": "volume_up"})            # baseline -> 0.44
+        ha._state = playing(0.15)
+        run(self.cap, ctx, {"mode": "duck"})                 # re-duck must NOT undo it
+        self.assertAlmostEqual(self.cap._snaps[self.zone]["volume"], 0.44)
+        ha.calls = []
+        r = run(self.cap, ctx, {"mode": "restore"})
+        self.assertTrue(r["metadata"]["restored"])
+        self.assertAlmostEqual(ha.calls[-1][2]["volume_level"], 0.44)   # the user's "up" lands
+
+    def test_volume_down_while_ducked(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        r = run(self.cap, ctx, {"mode": "volume_down"})
+        self.assertAlmostEqual(r["metadata"]["to"], 0.24)
+
+    def test_custom_step_is_honoured(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        r = run(self.cap, ctx, {"mode": "volume_up", "step": 25})
+        self.assertAlmostEqual(r["metadata"]["to"], 0.59)
+
+    def test_unducked_volume_up_writes_the_player_directly(self):
+        ha = FakeHA(playing(0.40)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "volume_up"})
+        self.assertEqual(r["metadata"]["applied"], "live")
+        self.assertAlmostEqual(ha.calls[-1][2]["volume_level"], 0.50)
+
+    def test_set_volume_absolute_ducked_and_unducked(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        r = run(self.cap, ctx, {"mode": "set_volume", "volume": 55})
+        self.assertEqual(r["metadata"]["applied"], "baseline")
+        self.assertAlmostEqual(r["metadata"]["to"], 0.55)
+        cap2 = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha2 = FakeHA(playing(0.20)); ctx2 = FakeCtx(ha2)
+        r2 = run(cap2, ctx2, {"mode": "set_volume", "volume": 70})
+        self.assertEqual(r2["metadata"]["applied"], "live")
+        self.assertAlmostEqual(ha2.calls[-1][2]["volume_level"], 0.70)
+
+    def test_volume_is_clamped(self):
+        ha = FakeHA(playing(0.95)); ctx = FakeCtx(ha)
+        run(self.cap, ctx, {"mode": "duck"})
+        r = run(self.cap, ctx, {"mode": "volume_up", "step": 50})
+        self.assertAlmostEqual(r["metadata"]["to"], 1.0)
+        cap2 = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0)
+        ha2 = FakeHA(playing(0.05)); ctx2 = FakeCtx(ha2)
+        r2 = run(cap2, ctx2, {"mode": "volume_down", "step": 50})
+        self.assertAlmostEqual(r2["metadata"]["to"], 0.0)
+
+    def test_set_volume_without_a_value_is_an_honest_no_op(self):
+        ha = FakeHA(playing(0.34)); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "set_volume"})
+        self.assertFalse(r["metadata"]["changed"])
+        self.assertEqual(r["metadata"]["reason"], "no_volume")
+        self.assertEqual(ha.calls, [])
+
+    def test_relative_change_with_no_readable_volume_is_an_honest_no_op(self):
+        ha = FakeHA({"state": "playing", "attributes": {}}); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "volume_up"})
+        self.assertFalse(r["metadata"]["changed"])
+        self.assertEqual(r["metadata"]["reason"], "no_current")
+        self.assertEqual(ha.calls, [])
 
 
 if __name__ == "__main__":
