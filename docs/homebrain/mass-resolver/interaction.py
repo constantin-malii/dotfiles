@@ -233,7 +233,9 @@ class InteractionCapability(capability.Capability):
                 return cr.ok(self.name, rid, "I could not read the current volume.", spoken_text=None,
                              metadata={"changed": False, "reason": "no_current", "zone": zone})
             new = base + (step if mode == "volume_up" else -step)
-        new = max(0.0, min(1.0, new))
+        # Round: 0.44 - 0.10 lands on 0.33999999999999997, which is what then gets written to HA and
+        # printed in the log. Harmless arithmetically, but the value is user-visible.
+        new = round(max(0.0, min(1.0, new)), 3)
         if ducked:
             with self._lock:
                 snap = self._snaps.get(zone)

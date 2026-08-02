@@ -3,6 +3,67 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-02 — Reply CUT-OFFS root-caused (empty `media_content_id`) · stop/resume/volume rerouted off the wedging + ducked paths (5 HA scripts, HA-live) · all VERIFIED live
+
+> **First HA-live changes in this branch.** Five exposed scripts edited via the HA config API
+> (`ceiling_stop`, `ceiling_pause`, `ceiling_resume`, `ceiling_volume_up`, `ceiling_volume_down`,
+> `ceiling_set_volume`). **No new exposure** — same scripts, same names, so `assistant-capabilities.md`
+> stays in lockstep. Snapshots for rollback: `/tmp/snap_ceiling_*.json` on the host.
+
+- **Reply cut-offs / volume "bumps" on almost every command — ROOT CAUSE.** Found by the poll-exit
+  logging added the same day (it did not exist before, which is why this hid for so long):
+  `finish-poll exit after 0.5s: state=playing cid=` — **MA transiently reports an EMPTY
+  `media_content_id` while the clip is still playing.** The exit test was
+  `norm_uri not in (cid or "")`, always true against `""`, so `_say` decided the reply had ended after
+  0.5–1.0 s, **restored the volume and replayed the source OVER the still-playing reply**. One defect,
+  both symptoms: the cut-off (replay landing on the clip) and the mid-clip volume bump (the restore).
+  A genuine ending looks different: `state=idle`, or a cid naming something else. Fix: an empty cid is
+  **not** an ending while the player still says `playing`, and an ending needs **two consecutive**
+  observations so a single flicker cannot trigger it. **VERIFIED live:** every exit is now
+  `state=idle` after 2.0–3.0 s. The guarding test asserts the poll *kept waiting* through the blank
+  cids — **0 sleeps against pre-fix code**, i.e. the cut-off reproduced deterministically.
+- **`script.ceiling_stop` used `media_player.media_stop`** — the call `ONBOARDING.md` forbids on this
+  player (wedges the Squeezelite child, holds MA's playback lock). Now `media_pause` (recorded as
+  lock-free). Fits the transient `RADIO PLAY FAILED code=2` that stalled 11.3 s, though the wedge was
+  **never caught live** (every MA player read `idle` when probed) — so this is a documented-dangerous
+  call that matches the evidence, not a reproduced wedge.
+- **`resume` could never have worked**, regardless of the assistant understanding it: `media_play`
+  cannot resume a radio stream whose queue was cleared, and after a reply turn the zone holds a
+  **spent TTS clip**, so it would have replayed *that*. New resolver `resume` mode replays the last
+  **real** source (remembered from `note_playback` and `_say`'s capture; reply clips recognised by
+  `tts_proxy` / `builtin://radio/http` and never remembered). Also: the first cut blind-called
+  `media_play` on an idle player → **HTTP 500** → the turn died with a bare `OSError`, which the
+  assistant surfaced as *"there is nothing playing"*. It now inspects the zone: un-pause if paused,
+  replay a loaded real source, else an honest "nothing to resume" with **no service call**.
+  **VERIFIED:** `RESUME … replaying library://radio/2`.
+- **Volume commands computed their step from the DUCKED value.** The scripts read
+  `state_attr(…,'volume_level')` directly, so mid-turn "volume up" was `0.15 + 0.10 = 0.25` instead of
+  `0.34 + 0.10`, **and the next re-duck pulled it straight back down** — "up" ended up LOWER:
+  `DUCK 0.34 -> 0.15` → `DUCK 0.25 -> 0.15` → `SAY restored -> 0.25`. New `volume_up`/`volume_down`/
+  `set_volume` modes retarget the **baseline** the turn will restore to and leave the floor alone, so
+  the step comes off the listening level, survives re-ducks, and lands when the turn ends. Unducked
+  they write the player as before. Values rounded to 3dp (`0.44-0.10` was writing
+  `0.33999999999999997`). **VERIFIED live:** `VOLUME volume_down: baseline 0.44 -> 0.34 (ducked;
+  applies when the turn ends)` → `SAY restored -> 0.34` → the **next** turn ducked *from* 0.34.
+- **Agent-caused prompt regression, found and reverted.** While fixing `media_stop` the stop
+  description was broadened to add *"silence"* / *"turn the music off"* — phrasing that competes with
+  quieting requests. `last_triggered` then showed the assistant calling **`ceiling_stop`/`ceiling_pause`
+  during volume turns** (`ceiling_volume_down` had not fired in a day), which is why "volume up/down
+  paused playback". Reverted to the original wording plus an explicit *"NEVER use for volume
+  requests"* guard on both stop and pause. The volume path itself was proven sound by a direct call:
+  HTTP 200 → `VOLUME volume_up: -> 0.45 (live)`.
+- **Not diagnosable from here:** the resolver sees only the tool that was called, never the
+  transcription. If tool mis-selection recurs, Assist **pipeline traces** are the next instrument.
+- **Two Assist turns ~1 s apart** (different clip fingerprints, `e2192ea3` then `ceea0c3c`) explain
+  the "multiple voices, one understanding one not" — two genuine replies, not one event fired twice.
+  **Zero** resolver announces since the suppression landed, and no `_say` ever superseded. Satellite
+  ruled out: single assistant slot, single wake word, **no speaker attached**. Upstream (wake
+  retrigger / pipeline re-listen) — a separate item.
+- **Deploys (gated, user-run restarts):** resolver backups `.bak/20260802-152908`, `-155724`,
+  `-160934`. Host 3.5.2 compile OK; host suite **185 OK**. Tests **317 local**.
+- **Agent live side effects, disclosed:** a diagnostic probe started playback (Radio Noroc Moldova),
+  and a direct `volume_up` test left the ceiling at 0.45.
+
 ## 2026-08-02 — `volume down` REGRESSION found + fixed (mine) · aliases now match inside noisy STT strings · MA play failures log their reason. All VERIFIED live
 
 - **REGRESSION introduced by Slice 4 (mine), reported by the operator: "volume down" became a no-op**
