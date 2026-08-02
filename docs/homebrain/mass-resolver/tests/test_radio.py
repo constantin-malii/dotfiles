@@ -319,5 +319,30 @@ class PlayConfirmationTest(unittest.TestCase):
         self.assertEqual(FakeTimer.created, [])
 
 
+class PlayFailureDetailsTest(unittest.TestCase):
+    """A bare `RADIO PLAY FAILED code=2` identifies nothing. MA's own explanation is the only thing
+    that distinguishes a dead stream from playback-lock contention -- the live failure took 11.3s
+    before returning, which is the lock signature, and we had no detail to prove it."""
+
+    def test_failure_logs_ma_details_station_and_uri(self):
+        ma = FakeMA(search=[rb_item("u1", "Some Station")],
+                    play_reply={"error_code": 2, "details": "playback lock timeout"})
+        ctx = FakeCtx(ma)
+        with self.assertLogs("resolver", level="ERROR") as cm:
+            r = radio.resolve_radio(ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
+        self.assertFalse(r["ok"])
+        blob = " | ".join(cm.output)
+        self.assertIn("code=2", blob)
+        self.assertIn("playback lock timeout", blob)
+        self.assertIn("library://radio/2", blob)
+
+    def test_failure_without_details_still_logs_the_code(self):
+        ma = FakeMA(search=[rb_item("u1", "S")], play_reply={"error_code": 9})
+        ctx = FakeCtx(ma)
+        with self.assertLogs("resolver", level="ERROR") as cm:
+            radio.resolve_radio(ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
+        self.assertIn("code=9", " | ".join(cm.output))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

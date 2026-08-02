@@ -155,8 +155,13 @@ class RadioCapability(capability.Capability):
                              spoken_text=None, metadata=md)
             pr = ma.play(ctx.settings.queue_id, chosen["uri"])
             if (not pr) or ("error_code" in pr):
-                LOG.error("req=%s RADIO PLAY FAILED code=%s", rid,
-                          pr.get("error_code") if pr else None)
+                # Log MA's own explanation, not just the bare code: `code=2` alone identifies
+                # nothing, and this is the layer where the known playback-lock/stream failures land.
+                LOG.error("req=%s RADIO PLAY FAILED code=%s details=%r station=%r uri=%s (MA refused "
+                          "the play; resolution was fine)", rid,
+                          pr.get("error_code") if pr else None,
+                          (pr.get("details") or pr.get("error") or pr.get("message")) if pr else None,
+                          chosen["name"], chosen["uri"])
                 md["played"] = False
                 return cr.err(self.name, rid, "play_failed", "play failed",
                               "I found " + chosen["name"] + ", but couldn't start it.",
