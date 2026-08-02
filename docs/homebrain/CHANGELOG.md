@@ -3,6 +3,51 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-02 — `volume down` REGRESSION found + fixed (mine) · aliases now match inside noisy STT strings · MA play failures log their reason. All VERIFIED live
+
+- **REGRESSION introduced by Slice 4 (mine), reported by the operator: "volume down" became a no-op**
+  on the satellite while still working on the plain HA assistant. The old `user_override` check was doing
+  **two** jobs — the false positive that caused the ratchet **and** honouring a genuine human volume change
+  mid-turn. Making `_say` the single writer removed both, so the `script.ceiling_volume_*` scripts (which
+  write the player **directly**, never through the resolver) were silently undone:
+  `DUCK 0.47 -> 0.15` → `SAY start baseline=0.47 prev=0.15` → `SAY restored -> 0.47`. It still worked on the
+  HA assistant because there is no reply clip there, so the old check still saw the change and kept it.
+- **Fix — discriminate instead of discard.** The resolver knows the only two volumes **it** wrote (the duck
+  floor and `reply_volume`); anything else is a third party and is **kept**. Applied at both ends of a turn:
+  at capture (a volume moved during the duck **becomes** the baseline) and at restore (a volume moved during
+  the reply is left alone and the snapshot retired). Comparing against the duck floor **as well as**
+  `reply_volume` stops a stale HA read — which returns the pre-reply value — from being mistaken for a human
+  change. `duck_floor` is captured at step 2 because step 4 overwrites `snap["target"]` with `reply_volume`;
+  re-reading the snapshot there compared 0.15 against 0.70 and mis-fired (caught by the new tests).
+- **VERIFIED live (12:14–12:18):** `SAY … volume moved to 0.34 during the duck (not ours, last wrote 0.15);
+  adopting it as the baseline` → then `RESTORE -> 0.34`, `RESTORE -> 0.34`,
+  `SAY restored -> 0.34 (baseline=0.34 prev=0.15)`. **The operator's volume change sticks and the ratchet has
+  not returned.**
+- **Aliases only matched whole-string equality**, but the assistant relays the transcription verbatim, so the
+  station argument arrives noisy and over-long: `target='Radio Norok N O R O C'` → `candidates=0`, despite
+  containing both "Norok" **and** a spelled-out "N O R O C". `resolve_alias` now looks for an alias key
+  **inside** the query, **longest key first**, and also against a **compacted** form so "N O R O C" collapses
+  to "noroc". Keys under 4 chars are skipped (they would fire on ordinary words) and **`rock` is deliberately
+  never aliased**. Verified live: `radio alias 'norok' -> 'Radio Noroc Moldova'` → `candidates=1`.
+- **MA play failures now log MA's own reason.** A live failure read only `RADIO PLAY FAILED code=2`, which
+  cannot distinguish a dead stream from lock contention. The call had stalled **11.3 s** before failing (the
+  lock signature), and a direct probe afterwards played the same station successfully over **both** provider
+  mappings (`{"result": null}`, no error) — so it was **transient, not a broken station**. Radio/music
+  failures now log `error_code` + `details`/`error`/`message` (+ station and uri for radio).
+- **"Wrong station" is STT, definitively — not the resolver.** Two attempts, logged:
+  `target='rock' candidates=5 → 'Наше Радио'` (Whisper renders "noroc" as **"rock"**, a real **genre**
+  synonym, so that was the correct answer to the input) then `target='Radio Noro' candidates=2 → 'Radio Noroc
+  Moldova'`, **`RADIO CONFIRM … is playing`**. **Workaround: say "Radio Noro…" / the full station name.**
+  Adding more alias spellings cannot fix a word transcribed as a *different real word*; a real fix is STT
+  vocabulary or a sentence trigger.
+- **Deploys (gated, user-run restarts):** backups `~/mass-resolver/.bak/20260802-114746/` (interaction,
+  favorites, radio.json) and `.bak/20260802-120249/` (radio, music). Host 3.5.2 compile OK; host suite
+  **163 OK**. **Deploy note: multi-file `scp` hangs on this host — copy one file at a time.**
+- **Agent-caused live side effects, disclosed:** a diagnostic probe **started playback** (Radio Noroc Moldova)
+  and an earlier sub-second duck→restore probe left the zone at the floor once (restored by hand). Both were
+  the agent's doing, not defects.
+- **Tests:** 295 local / 163 host.
+
 ## 2026-08-02 — ROOT CAUSE of "media command reports success but is silent": the spoken confirmation REPLACED the media it confirmed. Fixed + verified live
 
 - **Symptom:** "play radio noroc" → the assistant says "playing Radio Noroc Moldova" → **no sound**.
