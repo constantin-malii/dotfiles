@@ -3,6 +3,45 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-02 — ROOT CAUSE of "media command reports success but is silent": the spoken confirmation REPLACED the media it confirmed. Fixed + verified live
+
+- **Symptom:** "play radio noroc" → the assistant says "playing Radio Noroc Moldova" → **no sound**.
+- **Root cause (caught by the new `RADIO CONFIRM` check, not by ear):** `_say` delivers the reply with
+  `play_media`, which **replaces** the stream — so the spoken confirmation overwrote the station it was
+  confirming. Compounding it, `_say` captured its before-state **1.2 s after** the play was accepted, while
+  the station was still starting, so `was_playing` was false, **no source was captured**, `replayed=False`,
+  and nothing brought the station back. The zone ended `idle` holding the TTS clip:
+  `RADIO CONFIRM … NOT confirmed after 8s: state=idle cid=builtin://radio/…/tts_proxy/EJRj….flac
+  requested=library://radio/18`. **Station-independent, and unrelated to stream health** (`available=True`
+  was truthful) — it would hit any media command whose reply was spoken.
+- **Fix — plan decision (e)** ("a pure media command is confirmed by the ACTION, not by speech"): `_say`
+  declines to play a reply clip when the **current turn** already started playback on that zone. Keyed to
+  **turn identity, not a timer** — a question asked seconds after a media command is a new turn and still
+  gets its answer. **Failed** commands still speak (nothing started → nothing to protect), so "I couldn't
+  find a station" stays audible. Reversible via `say_skip_on_fresh_playback=false`.
+- **`note_playback` deliberately never creates a turn.** A play from a **non-satellite** caller (phone,
+  ChatGPT text) must not open a *phantom* turn — that would suppress that caller's announce for the whole
+  turn window and skip a later satellite reply. The first implementation did create one and **the test suite
+  caught it** as four unrelated dispatch tests losing their announce.
+- **VERIFIED live (11:23):** `RADIO PLAY ACCEPTED 'Наше Радио' uri=library://radio/9` →
+  `SAY … SKIPPED: this turn started library://radio/9` → `RESTORE … -> 0.47` →
+  **`RADIO CONFIRM 'Наше Радио' is playing (cid=library://radio/9)`**. The station survived its own
+  confirmation and the volume returned to baseline (operator: *"volume is decent now"*).
+- **Separate, still open — STT, not the resolver.** A "wrong station" report (`Наше Радио` instead of Noroc)
+  traced to Whisper transcribing **"noroc" as "rock"**: `radio mode=play target='rock' candidates=5`, and
+  `rock` is a legitimate **genre synonym**, so the rock station returned was correct for the input received.
+  **`rock` is deliberately NOT aliased** — that would hijack every genuine rock request. Added only
+  non-colliding renderings (`narok`, `no rock`, `noroc moldova`, `norok moldova`, `radio noroc moldova`).
+  Reliable workaround: say the **full** name, "play Radio Noroc Moldova". A real fix belongs upstream (STT
+  vocabulary / a sentence trigger), not in alias whack-a-mole.
+- **Verified false alarm, recorded so it is not re-investigated:** an aliased query cannot mis-route through
+  the local fuzzy matcher — `favorites.by_name(rc, "noroc")` returns **0** local hits and
+  `match_rank("Radio Noroc Moldova", "Nashe Radio")` is **None**.
+- **Deploy (gated):** `interaction.py`, `core.py`, `config.py`, `config.json` (+2 tests); backup
+  **`~/mass-resolver/.bak/20260802-110938/`**; host 3.5.2 compile OK, host suite **140 OK**; user-run
+  restart. `radio.json` alias additions land on the **next** restart.
+- **Tests:** 281 local / 140 host.
+
 ## 2026-08-02 — Slice 4 VERIFIED live (7 turns, no ratchet) · radio `RADIO PLAYING` was an unverified success claim → now confirmed · station aliases now reach the MA search
 
 - **Slice 4 verified end-to-end, operator-eared + log-confirmed.** Seven consecutive real satellite turns
