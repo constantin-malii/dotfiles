@@ -258,6 +258,8 @@ class InteractionCapability(capability.Capability):
             ctx.ha.call_service_rest("music_assistant", "play_media",
                                      {"entity_id": zone, "media_id": uri},
                                      timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+            self.note_playback(ctx, zone, uri)     # this turn started media: do not let the reply
+                                                   #   clip replace what we just resumed
             LOG.info("RESUME req=%s zone=%s replaying %s", rid, zone, uri)
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": uri, "how": "replay", "zone": zone})
@@ -272,6 +274,7 @@ class InteractionCapability(capability.Capability):
         cid = ((st.get("attributes") or {}).get("media_content_id")) or ""
         if state == "paused":
             ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+            self.note_playback(ctx, zone, cid or "unpaused")
             LOG.info("RESUME req=%s zone=%s un-paused", rid, zone)
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": None, "how": "unpause", "zone": zone})
@@ -279,6 +282,7 @@ class InteractionCapability(capability.Capability):
             ctx.ha.call_service_rest("music_assistant", "play_media",
                                      {"entity_id": zone, "media_id": cid},
                                      timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+            self.note_playback(ctx, zone, cid)
             LOG.info("RESUME req=%s zone=%s replaying the loaded source %s", rid, zone, cid)
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": cid, "how": "loaded", "zone": zone})
@@ -561,6 +565,9 @@ class InteractionCapability(capability.Capability):
                 # 7. wait for finish: poll until the clip stops playing (or gets superseded)
                 elapsed = 0.0
                 ended_seen = 0
+                blank_for = 0.0
+                blank_grace = max(int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
+                                  poll_secs)
                 while elapsed < reply_timeout:
                     if superseded():
                         return superseded_result()
@@ -576,6 +583,18 @@ class InteractionCapability(capability.Capability):
                     # and replayed the source over it -- so an empty cid is NOT an ending while the
                     # player still says `playing`. Only a cid that names something ELSE counts.
                     ended = (state.get("state") != "playing") or (cid != "" and norm_uri not in cid)
+                    if not ended and cid == "":
+                        # Unknown, not "still playing": tolerate the flicker, but only for a bounded
+                        # grace. Beyond that we cannot tell, and holding the zone at reply volume for
+                        # the full reply timeout is worse than finishing.
+                        blank_for += poll_secs
+                        if blank_for >= blank_grace:
+                            LOG.info("SAY req=%s zone=%s clip=%s finish-poll: cid stayed empty for %.1fs "
+                                     "(state=playing); treating the clip as finished",
+                                     rid, zone, clip, blank_for)
+                            break
+                    elif cid != "":
+                        blank_for = 0.0
                     if ended:
                         # Require two consecutive observations: a single flicker of state or cid
                         # must not trigger the restore+replay that is heard as a cut-off.

@@ -344,5 +344,50 @@ class HARestReaderTest(unittest.TestCase):
         self.assertIsNone(r["spoken_text"])
 
 
+class ReplyClipStatusTest(unittest.TestCase):
+    """A reply REPLACES the stream, so a status read taken during one used to describe the assistant's
+    own voice as the user's music -- and report reply_volume as the listening level:
+
+        operator: "what is playing?" -> "Something is playing at 60% volume."
+
+    60% was reply_volume, not their music."""
+
+    WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/iSQITZ1.flac"
+    RAW = "http://192.168.122.10:8123/api/tts_proxy/iSQITZ1.flac"
+
+    def _playing(self, cid, vol=0.60, title="iSQITZ1-9WvcirtraCXPHA"):
+        return {"state": "playing",
+                "attributes": {"media_content_id": cid, "volume_level": vol, "media_title": title}}
+
+    def test_wrapped_reply_clip_is_classified_as_reply(self):
+        meta = status.normalize_status(self._playing(self.WRAPPED))
+        self.assertEqual(meta["content_kind"], "reply")
+
+    def test_raw_tts_proxy_url_is_classified_as_reply(self):
+        meta = status.normalize_status(self._playing(self.RAW))
+        self.assertEqual(meta["content_kind"], "reply")
+
+    def test_reply_volume_is_not_reported_as_the_listening_level(self):
+        meta = status.normalize_status(self._playing(self.WRAPPED))
+        self.assertIsNone(meta["volume_percent"])
+        self.assertIsNone(meta["volume_level"])
+        self.assertNotIn("60", status.build_chat_text(meta))
+
+    def test_reply_chat_text_does_not_claim_music_is_playing(self):
+        meta = status.normalize_status(self._playing(self.WRAPPED))
+        text = status.build_chat_text(meta)
+        self.assertIn("my own reply", text)
+        self.assertNotIn("Something is playing", text)
+
+    def test_real_radio_is_still_reported_with_its_volume(self):
+        meta = status.normalize_status({
+            "state": "playing",
+            "attributes": {"media_content_id": "library://radio/2", "volume_level": 0.34,
+                           "media_album_name": "101 SMOOTH JAZZ"}})
+        self.assertEqual(meta["content_kind"], "radio")
+        self.assertEqual(meta["volume_percent"], 34)
+        self.assertIn("101 SMOOTH JAZZ", status.build_chat_text(meta))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
