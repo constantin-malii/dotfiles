@@ -3,6 +3,47 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-02 — Slice 4 VERIFIED live (7 turns, no ratchet) · radio `RADIO PLAYING` was an unverified success claim → now confirmed · station aliases now reach the MA search
+
+- **Slice 4 verified end-to-end, operator-eared + log-confirmed.** Seven consecutive real satellite turns
+  (15:53–15:56) each ended `SAY … restored -> 0.47` with `replayed=True`, and the ceiling finished
+  `playing vol=0.47 src=library://radio/2` — **the volume it started at**. `baseline=0.47` was captured
+  correctly on every turn *even while `prev` was the ducked floor* (`prev=0.15`, `prev=0.04`) — substituting
+  `prev` for the baseline **was** the crater. **Zero `user_override` lines, zero `DOUBLE-SPEAK` warnings**,
+  `RESTORE … deferred: reply active` on every overlapping turn, and `ANNOUNCE suppressed` on a real news
+  turn. No ratchet across six turns.
+- **The mystery `0.04` is an EXTERNAL writer, not the resolver.** `DUCK … 0.04 -> 0.04` at 15:55:43 with no
+  resolver `volume_set` behind it: something outside the resolver drops the ceiling that low mid-turn.
+  Previously that value became the "baseline" and stuck; now the true baseline survives and the turn
+  self-heals. **Open item** — identify the writer (MA announce/overlay revert is the prime suspect).
+- **`RADIO PLAYING` was a success claim the resolver never checked** (operator: *"this did not work"* about a
+  turn the log called success). It was logged the instant MA's `play` returned without an `error_code` — i.e.
+  **"MA accepted the request"**, never "audio is playing". Renamed to **`RADIO PLAY ACCEPTED`**, and a
+  timer reads the zone back **`radio_confirm_after_ms` (8000)** later and logs the truth: `RADIO CONFIRM …
+  is playing`, or a **WARNING** naming `state`, the requested `uri` and the `cid` actually loaded. Runs off
+  the caller's thread (no added latency on the synchronous tool call), never alters the returned result,
+  `0` disables.
+- **Station aliases never reached the MA/RadioBrowser search** — they only gated the local `radio.json`
+  favorites match, so an alias could not help any station that lives in **MA's library** rather than in
+  `radio.json`. Live evidence: MA returns **2 available hits for `noroc`** (`library://radio/18` +
+  a `radiobrowser://` mapping, both `available=True`) and **0 for `norok`**, which is what Whisper actually
+  transcribes — so the turn honestly reported "couldn't find a station". `favorites.resolve_alias()` is now
+  shared and the **canonical** name is what gets searched; aliases added for `norok` / `radio norok` /
+  `noroc` / `radio noroc` → `Radio Noroc Moldova`. **Note:** that station is deliberately *not* added to
+  `radio.json` favorites (it is an MA library favorite — duplicating the id here would rot).
+- **Still open (playback, not resolution):** `noroc` resolves and is `available=True`, MA accepts the play,
+  and **no audio** — that is the known degraded-stream/stop-wedge family, unchanged by this work. The new
+  `RADIO CONFIRM` warning is what will now catch it in the log instead of a false success.
+- **Deploy (gated):** `radio.py`, `favorites.py`, `config.py`, `config.json`, `radio.json` (+2 test files);
+  backup **`~/mass-resolver/.bak/20260802-105506/`**; host **3.5.2** `py_compile` OK, host suite **134 OK**;
+  user-run restart. **Deploy note:** multi-file `scp` hangs on this host — copy **one file at a time**.
+- **Known latent (NOT fixed, deliberately):** `_restore` compares the live volume against the value it last
+  wrote; on a **stale HA read** it instead sees the baseline, calls it `user_override`, and pops the snapshot
+  → zone left at the floor **with no dead-man**. Only reproducible sub-second (an agent probe did it, and
+  cleaned up after itself); real turns are seconds apart. Fix would be to treat "already at baseline" as
+  *already restored* rather than as a human override.
+- **Tests:** 275 local / 134 host.
+
 ## 2026-08-01 — DOUBLE-SPEAK root-caused: a satellite turn had TWO speech owners; resolver announce now stands down during a turn (+ `_say` call attribution, `play_media` timeout 5s→20s)
 
 - **Symptom (operator, right after the Slice-4 deploy):** every reply heard **twice**, the two voices
