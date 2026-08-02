@@ -558,6 +558,7 @@ class InteractionCapability(capability.Capability):
             else:
                 # 7. wait for finish: poll until the clip stops playing (or gets superseded)
                 elapsed = 0.0
+                ended_seen = 0
                 while elapsed < reply_timeout:
                     if superseded():
                         return superseded_result()
@@ -567,14 +568,22 @@ class InteractionCapability(capability.Capability):
                         LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
                         state = {}
                     attrs = state.get("attributes") or {}
-                    if state.get("state") != "playing" or norm_uri not in (attrs.get("media_content_id") or ""):
-                        # Log WHY we decided the clip ended: a premature exit here restores and
-                        # replays the source OVER a clip that is still playing, which the operator
-                        # hears as the reply being cut off.
-                        LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
-                                 rid, zone, clip, elapsed, state.get("state"),
-                                 (attrs.get("media_content_id") or "")[:60])
-                        break
+                    cid = attrs.get("media_content_id") or ""
+                    # MA transiently reports an EMPTY media_content_id while the clip is still
+                    # playing. Treating that as "the clip ended" cut the reply off after 0.5-1.0s
+                    # and replayed the source over it -- so an empty cid is NOT an ending while the
+                    # player still says `playing`. Only a cid that names something ELSE counts.
+                    ended = (state.get("state") != "playing") or (cid != "" and norm_uri not in cid)
+                    if ended:
+                        # Require two consecutive observations: a single flicker of state or cid
+                        # must not trigger the restore+replay that is heard as a cut-off.
+                        ended_seen += 1
+                        if ended_seen >= 2:
+                            LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
+                                     rid, zone, clip, elapsed, state.get("state"), cid[:60])
+                            break
+                    else:
+                        ended_seen = 0
                     self._sleeper(poll_secs)
                     elapsed += poll_secs
 

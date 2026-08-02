@@ -770,6 +770,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
             playing_with_id(0.70, self.reply_mid),             # finish-poll #1: still playing -> sleep -> S1a fires
             playing_with_id(0.70, self.reply_mid),             # the interleaved _restore's own read
             idle_state(),                                      # finish-poll #2: clip ended
+            idle_state(),                                      # ... confirmed (2-sample debounce)
             playing(0.70),                                     # _say's restore-step read: still ours
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -862,7 +863,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         run(cap, ctx, {"mode": "duck"})                          # turn 1: baseline 0.32, dead-man #1
         ha.set_states([playing_with_id(0.15, "library://radio/2"),
                        playing_with_id(0.70, self.reply_mid),
-                       idle_state(),
+                       idle_state(), idle_state(),              # end, confirmed (debounce)
                        playing(0.70)])                          # restore-step read: still ours
         real_write = ha.call_service_rest
 
@@ -934,7 +935,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
                            playing_with_id(0.70, self.reply_mid),
                            playing_with_id(0.70, self.reply_mid),
                            playing_with_id(0.70, self.reply_mid),   # the interleaved restore's read
-                           idle_state(),
+                           idle_state(), idle_state(),              # end, confirmed (debounce)
                            playing(0.70)])                          # restore-step read: still ours
             cap._sleeper = FakeSleeper(lambda n: n == 1 and run(cap, ctx, {"mode": "restore"}))
             return run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -1152,7 +1153,7 @@ class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
         ha.set_states([
             playing_with_id(0.05, "library://radio/2"),        # capture: user pressed volume down
             playing_with_id(0.70, self.reply_mid),              # start-poll: reply playing
-            idle_state(),                                       # finish-poll: ended
+            idle_state(), idle_state(),                         # ended, confirmed (debounce)
             playing(0.70),                                      # restore-step read: still ours
         ])
         run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -1167,7 +1168,7 @@ class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
         ha.set_states([
             playing_with_id(0.15, "library://radio/2"),        # capture: still at our floor
             playing_with_id(0.70, self.reply_mid),
-            idle_state(),
+            idle_state(), idle_state(),                        # ended, confirmed (debounce)
             playing(0.30),                                     # restore-step read: user moved it
         ])
         run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -1184,7 +1185,7 @@ class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
         ha.set_states([
             playing_with_id(0.15, "library://radio/2"),
             playing_with_id(0.70, self.reply_mid),
-            idle_state(),
+            idle_state(), idle_state(),                        # ended, confirmed (debounce)
             playing(0.70),                                     # restore-step read: OUR reply volume
         ])
         run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -1201,7 +1202,7 @@ class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
         ha.set_states([
             playing_with_id(0.15, "library://radio/2"),
             playing_with_id(0.70, self.reply_mid),
-            idle_state(),
+            idle_state(), idle_state(),                        # ended, confirmed (debounce)
             playing(0.15),                                     # stale: still reads the floor
         ])
         run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
@@ -1377,6 +1378,99 @@ class VolumeCommandTest(unittest.TestCase):
         self.assertFalse(r["metadata"]["changed"])
         self.assertEqual(r["metadata"]["reason"], "no_current")
         self.assertEqual(ha.calls, [])
+
+
+class FinishPollCutOffTest(unittest.TestCase):
+    """LIVE ROOT CAUSE of "almost all commands had bumps/cutoffs".
+
+        16:01:12  finish-poll exit after 0.5s: state=playing cid=
+        16:01:29  finish-poll exit after 0.5s: state=playing cid=
+        16:02:21  finish-poll exit after 1.0s: state=playing cid=
+
+    MA transiently reports an EMPTY media_content_id while the clip is still playing. The old
+    condition (`norm_uri not in (cid or "")`) is always true against "", so the poll concluded the
+    clip had ended after 0.5-1.0s, restored the volume and replayed the source OVER the still-playing
+    reply -- heard as the reply being cut off, with the restore as the volume "bump".
+
+    A genuine ending looks different: state=idle, or a cid naming something else."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+
+    def _blank(self):
+        return {"state": "playing", "attributes": {"media_content_id": ""}}
+
+    def test_empty_cid_while_playing_does_not_end_the_clip(self):
+        sleeper = FakeSleeper()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=sleeper)
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([
+            playing_with_id(0.32, "library://radio/2"),   # capture
+            playing_with_id(0.40, self.reply_mid),        # start-poll: clip playing
+            self._blank(),                                 # <- the live flicker; must NOT end it
+            self._blank(),
+            playing_with_id(0.40, self.reply_mid),        # still our clip
+            idle_state(),                                  # genuine end #1
+            idle_state(),                                  # genuine end #2 (debounce)
+            playing(0.40),                                 # restore-step read
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["reply_started"])
+        # The discriminating assertion: the poll must have kept WAITING through the blank cids.
+        # Against the old condition it broke on the first blank and never slept again, so this
+        # count was 0 -- the clip was cut off exactly here.
+        self.assertGreaterEqual(sleeper.calls, 3)
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm), 2)                       # reply, then source replay
+        self.assertEqual(pm[1][2]["media_id"], "library://radio/2")
+
+    def test_a_single_flicker_to_idle_does_not_end_the_clip(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([
+            playing_with_id(0.32, "library://radio/2"),
+            playing_with_id(0.40, self.reply_mid),
+            idle_state(),                                  # one flicker only
+            playing_with_id(0.40, self.reply_mid),         # back to playing -> counter resets
+            idle_state(), idle_state(),                    # genuine end
+            playing(0.40),
+        ])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm), 2)
+
+    def test_two_consecutive_idles_do_end_the_clip(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([
+            playing_with_id(0.32, "library://radio/2"),
+            playing_with_id(0.40, self.reply_mid),
+            idle_state(), idle_state(),
+            playing(0.40),
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["replayed"])
+
+    def test_a_cid_naming_something_else_ends_the_clip(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([
+            playing_with_id(0.32, "library://radio/2"),
+            playing_with_id(0.40, self.reply_mid),
+            playing_with_id(0.40, "library://radio/9"),    # something else took over
+            playing_with_id(0.40, "library://radio/9"),
+            playing(0.40),
+        ])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["reply_started"])
 
 
 if __name__ == "__main__":
