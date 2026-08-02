@@ -334,9 +334,22 @@ class InteractionCapability(capability.Capability):
             self._say_gen[zone] = my_gen
             baseline = self._reply_baseline(zone, prev_volume)
             my_snap = self._snaps.get(zone)
+            # If the zone is already sitting somewhere WE did not put it, a third party moved it
+            # during the duck (the ceiling volume_up/volume_down scripts write the player directly).
+            # Their level is the baseline now -- restoring our pre-duck capture would silently undo
+            # the user's volume change, which is what made "volume down" look like a no-op.
+            if my_snap is not None and prev_volume is not None:
+                applied = my_snap.get("target")
+                if applied is not None and abs(prev_volume - applied) > 0.01:
+                    LOG.info("SAY req=%s zone=%s volume moved to %s during the duck (not ours, "
+                             "last wrote %s); adopting it as the baseline", rid, zone, prev_volume, applied)
+                    baseline = prev_volume
             # Identity of the snapshot our baseline came from. We may only ever retire THAT one:
             # a snapshot belonging to a later turn must not be torn down by us.
             my_snap_ts = my_snap.get("ts") if my_snap is not None else None
+            # The duck floor as it stands NOW: step 4 overwrites snap["target"] with reply_volume,
+            # so the restore check below must use this captured copy, not re-read the snapshot.
+            duck_floor = my_snap.get("target") if my_snap is not None else None
             self._replies[zone] = {"gen": my_gen, "baseline": baseline,
                                    "ts": self._clock(), "rid": rid}
 
@@ -451,6 +464,23 @@ class InteractionCapability(capability.Capability):
             #    strand us on the ducked prev_volume.
             try:
                 restore_to = baseline if owns_restore else prev_volume
+                if owns_restore and restore_to is not None:
+                    # Same rule at the far end of the turn: if the zone is no longer at the volume
+                    # WE last wrote, someone moved it during the reply -- keep their level.
+                    # Comparing against the duck floor as well keeps a stale HA read (which returns
+                    # the pre-reply value) from being mistaken for a human change.
+                    live = None
+                    try:
+                        live = ((ctx.ha.get_entity_state(zone) or {}).get("attributes") or {}).get("volume_level")
+                    except Exception as e:
+                        LOG.warning("SAY req=%s zone=%s restore read failed (%r); restoring baseline", rid, zone, e)
+                    if (live is not None and abs(live - reply_volume) > 0.01
+                            and (duck_floor is None or abs(live - duck_floor) > 0.01)):
+                        LOG.info("SAY req=%s zone=%s volume moved to %s during the reply (we wrote %s); "
+                                 "keeping it instead of restoring %s", rid, zone, live, reply_volume, restore_to)
+                        restore_to = None
+                        pending_restore[0] = False
+                        retire_snapshot(my_snap_ts)
                 if restore_to is not None:
                     ctx.ha.call_service_rest("media_player", "volume_set",
                                              {"entity_id": zone, "volume_level": restore_to})

@@ -770,6 +770,7 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
             playing_with_id(0.70, self.reply_mid),             # finish-poll #1: still playing -> sleep -> S1a fires
             playing_with_id(0.70, self.reply_mid),             # the interleaved _restore's own read
             idle_state(),                                      # finish-poll #2: clip ended
+            playing(0.70),                                     # _say's restore-step read: still ours
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertTrue(r["ok"])
@@ -861,7 +862,8 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         run(cap, ctx, {"mode": "duck"})                          # turn 1: baseline 0.32, dead-man #1
         ha.set_states([playing_with_id(0.15, "library://radio/2"),
                        playing_with_id(0.70, self.reply_mid),
-                       idle_state()])
+                       idle_state(),
+                       playing(0.70)])                          # restore-step read: still ours
         real_write = ha.call_service_rest
 
         def write_then_next_turn_ducks(domain, service, data, timeout=None):
@@ -932,7 +934,8 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
                            playing_with_id(0.70, self.reply_mid),
                            playing_with_id(0.70, self.reply_mid),
                            playing_with_id(0.70, self.reply_mid),   # the interleaved restore's read
-                           idle_state()])
+                           idle_state(),
+                           playing(0.70)])                          # restore-step read: still ours
             cap._sleeper = FakeSleeper(lambda n: n == 1 and run(cap, ctx, {"mode": "restore"}))
             return run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
 
@@ -1118,6 +1121,92 @@ class FreshPlaybackSkipTest(unittest.TestCase):
         run(cap, ctx, {"mode": "duck"})                      # a satellite turn is open
         cap.note_playback(ctx, self.zone, "library://radio/2")
         self.assertEqual(cap._turns[self.zone]["playback"], "library://radio/2")
+
+
+class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
+    """REGRESSION GUARD. The old user_override check did two jobs: the false positive that caused the
+    ratchet, AND honouring a genuine human volume change mid-turn. Making _say the single writer
+    removed both, so "Okay Nabu, volume down" became a no-op -- the ceiling scripts write the player
+    directly, then _say's baseline restore undid it. The resolver knows the only two values IT wrote
+    (the duck floor and reply_volume); anything else is a third party and must be kept."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha); ctx.settings = OwnershipSettings()   # reply_volume 0.70
+        return ctx
+
+    def test_volume_lowered_during_the_duck_becomes_the_baseline(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.47)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                       # 0.47 -> floor 0.15
+        ha.calls = []
+        ha.set_states([
+            playing_with_id(0.05, "library://radio/2"),        # capture: user pressed volume down
+            playing_with_id(0.70, self.reply_mid),              # start-poll: reply playing
+            idle_state(),                                       # finish-poll: ended
+            playing(0.70),                                      # restore-step read: still ours
+        ])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        vol_calls = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1], 0.05)            # their level, NOT the 0.47 baseline
+
+    def test_volume_changed_during_the_reply_is_kept(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.47)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        ha.calls = []
+        ha.set_states([
+            playing_with_id(0.15, "library://radio/2"),        # capture: still at our floor
+            playing_with_id(0.70, self.reply_mid),
+            idle_state(),
+            playing(0.30),                                     # restore-step read: user moved it
+        ])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        vol_calls = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(len(vol_calls), 1)                    # only the reply volume; no restore
+        self.assertNotIn(self.zone, cap._snaps)                # snapshot retired, no dead-man left
+
+    def test_our_own_reply_volume_is_not_mistaken_for_a_human(self):
+        # This is the ratchet: reply_volume must never be read as a user override.
+        cap = self._cap()
+        ha = FakeHA(playing(0.47)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        ha.calls = []
+        ha.set_states([
+            playing_with_id(0.15, "library://radio/2"),
+            playing_with_id(0.70, self.reply_mid),
+            idle_state(),
+            playing(0.70),                                     # restore-step read: OUR reply volume
+        ])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        vol_calls = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1], 0.47)            # baseline restored
+
+    def test_a_stale_read_of_the_duck_floor_is_not_a_human_change(self):
+        # HA state lags; a stale read returns the pre-reply (ducked) value. That must NOT be taken
+        # for a user override -- doing so would strand the zone at the floor.
+        cap = self._cap()
+        ha = FakeHA(playing(0.47)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        ha.calls = []
+        ha.set_states([
+            playing_with_id(0.15, "library://radio/2"),
+            playing_with_id(0.70, self.reply_mid),
+            idle_state(),
+            playing(0.15),                                     # stale: still reads the floor
+        ])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        vol_calls = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1], 0.47)            # baseline restored, not stranded
 
 
 if __name__ == "__main__":
