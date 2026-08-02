@@ -65,6 +65,9 @@ class Settings(object):
         # "MA accepted the play" != "audio is playing": read the zone back this long after a radio
         # play and log what actually happened (0 disables the check).
         self.radio_confirm_after_ms = int(cfg.get("radio_confirm_after_ms", 8000))
+        # A media command is confirmed by the action (decision (e)): skip the spoken reply clip when
+        # this turn just started playback, since the clip would replace it and leave silence.
+        self.say_skip_on_fresh_playback = bool(cfg.get("say_skip_on_fresh_playback", True))
 
 
 def load_settings(here):

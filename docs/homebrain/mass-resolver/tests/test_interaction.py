@@ -1027,5 +1027,98 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         self.assertEqual(cap._replies[zone]["gen"], cap._say_gen[zone])
 
 
+class FreshPlaybackSkipTest(unittest.TestCase):
+    """The live "play radio noroc reports success but is silent" bug: _say delivers the reply with
+    play_media, which REPLACES the stream -- so the spoken confirmation of a media command overwrote
+    the station it was confirming, and because the station was still starting when _say captured, no
+    source was captured to replay. Zone ended idle holding the TTS clip. Decision (e): a media
+    command is confirmed by the action."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha); ctx.settings = OwnershipSettings()
+        return ctx
+
+    def test_reply_is_skipped_when_this_turn_started_playback(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.15)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                     # turn opens
+        cap.note_playback(ctx, self.zone, "library://radio/18")
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["said"])
+        self.assertEqual(r["metadata"]["reason"], "fresh_playback")
+        self.assertEqual(ha.calls, [])                      # never touches volume or the stream
+        self.assertNotIn(self.zone, cap._replies)           # no reply ownership taken
+
+    def test_a_later_turn_still_gets_its_reply(self):
+        # A question asked after a media command is a NEW turn -- it must not lose its answer.
+        cap = self._cap()
+        ha = FakeHA(playing(0.15)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        cap.note_playback(ctx, self.zone, "library://radio/18")
+        run(cap, ctx, {"mode": "restore"})                  # turn ends
+        cap._turns.clear()                                  # ... and a fresh turn begins
+        run(cap, ctx, {"mode": "duck"})
+        ha.calls = []
+        ha.set_states([playing_with_id(0.15, "library://radio/18"),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["said"])
+        self.assertTrue(r["metadata"]["reply_started"])
+
+    def test_open_qa_with_no_playback_this_turn_replies_normally(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                     # idle zone -> no-op duck, turn still open
+        ha.set_states([playing_with_id(0.32, "library://radio/18"),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["said"])
+
+    def test_flag_off_restores_the_clobbering_behaviour(self):
+        class NoSkip(OwnershipSettings):
+            say_skip_on_fresh_playback = False
+        cap = self._cap()
+        ha = FakeHA(playing(0.15)); ctx = self._ctx(ha)
+        ctx.settings = NoSkip()
+        run(cap, ctx, {"mode": "duck"})
+        cap.note_playback(ctx, self.zone, "library://radio/18")
+        ha.set_states([playing_with_id(0.15, "library://radio/18"),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["said"])
+
+    def test_note_playback_does_not_invent_a_turn(self):
+        # A play from a non-satellite caller (phone / ChatGPT text) must NOT open a phantom turn:
+        # that would suppress that caller's announce for the turn window and would skip a genuine
+        # satellite reply later.
+        cap = self._cap()
+        ctx = self._ctx(FakeHA())
+        cap.note_playback(ctx, self.zone, "library://radio/2")
+        self.assertNotIn(self.zone, cap._turns)
+        self.assertFalse(cap.interaction_in_flight(ctx, self.zone))
+
+    def test_note_playback_annotates_an_open_turn(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.32)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                      # a satellite turn is open
+        cap.note_playback(ctx, self.zone, "library://radio/2")
+        self.assertEqual(cap._turns[self.zone]["playback"], "library://radio/2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

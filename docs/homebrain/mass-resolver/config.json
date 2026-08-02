@@ -19,6 +19,7 @@
   "suppress_announce_during_interaction": true,
   "interaction_turn_window_ms": 30000,
   "radio_confirm_after_ms": 8000,
+  "say_skip_on_fresh_playback": true,
   "ha_url": "http://192.168.122.10:8123",
   "event_type": "mass_play_request",
   "sync_event_type": "mass_sync_request",

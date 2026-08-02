@@ -22,6 +22,7 @@ class FakeSettings(object):
     announce_failures = True
     ceiling_entity = "media_player.ceiling_speakers"
     radio_confirm_after_ms = 0            # no real confirm timers in tests
+    say_skip_on_fresh_playback = True
     tts_service = "tts.speak"
     tts_data = {}
 
@@ -227,13 +228,13 @@ class AnnounceSuppressionTest(unittest.TestCase):
         # The live 13:09 case: wake ducked nothing (zone idle) so no snapshot existed, yet the turn
         # WAS live and the pipeline still spoke. The turn marker has to cover this.
         spk = FakeSpeaker()
-        self.cap._turns[self.zone] = self.cap._clock()
+        self.cap._turns[self.zone] = {"ts": self.cap._clock(), "playback": None}
         core.dispatch(self._ctx(spk), "acquire", {})
         self.assertEqual(spk.said, [])
 
     def test_announces_again_once_the_turn_marker_is_stale(self):
         spk = FakeSpeaker()
-        self.cap._turns[self.zone] = self.cap._clock() - 31.0      # window is 30s
+        self.cap._turns[self.zone] = {"ts": self.cap._clock() - 31.0, "playback": None}   # window 30s
         core.dispatch(self._ctx(spk), "acquire", {})
         self.assertEqual(spk.said, ["Acquire isn't available yet."])
 

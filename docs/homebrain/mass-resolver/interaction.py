@@ -19,7 +19,8 @@ class InteractionCapability(capability.Capability):
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
-        self._turns = {}                              # zone -> ts of the last duck REQUEST. A duck request is
+        self._turns = {}                              # zone -> {"ts": float, "playback": uri|None}
+                                                      #   ts of the last duck REQUEST. A duck request is
                                                       #   the satellite announcing a turn, whether or not there
                                                       #   was anything to attenuate -- so this marks "a turn is
                                                       #   live" even when the zone was idle. Guarded by _lock.
@@ -60,9 +61,11 @@ class InteractionCapability(capability.Capability):
             # wake could not be located in the log.
             window = int(getattr(ctx.settings, "interaction_turn_window_ms", 30000)) / 1000.0
             prev_turn = self._turns.get(zone)
-            if prev_turn is None or (self._clock() - prev_turn) > window:
+            if prev_turn is None or (self._clock() - prev_turn.get("ts", 0)) > window:
                 LOG.info("TURN start req=%s zone=%s (duck requested)", rid, zone)
-            self._turns[zone] = self._clock()
+                self._turns[zone] = {"ts": self._clock(), "playback": None}   # fresh turn
+            else:
+                prev_turn["ts"] = self._clock()                               # same turn, keep playback
             if self._reply_active(ctx, zone) is not None:
                 # Decision (a)+(b): during a reply turn the clip has REPLACED the music, so there is
                 # nothing left to duck under, and _say owns this zone's volume. Ducking here would
@@ -165,8 +168,25 @@ class InteractionCapability(capability.Capability):
         with self._lock:
             if zone in self._replies or zone in self._snaps:
                 return True
-            ts = self._turns.get(zone)
-            return ts is not None and (self._clock() - ts) <= window
+            turn = self._turns.get(zone)
+            return turn is not None and (self._clock() - turn.get("ts", 0)) <= window
+
+    def note_playback(self, ctx, zone, uri):
+        """Record that the resolver just started media on this zone as part of the current turn.
+
+        `_say` delivers a reply with play_media, which REPLACES the stream -- so the spoken
+        confirmation of a media command ("Playing Radio Noroc Moldova") overwrites the very station
+        it is confirming, and _say's capture runs while that station is still starting, so it
+        captures no source to replay and the zone ends up idle holding the TTS clip. Keyed to the
+        TURN, not a timer: a question asked seconds later is a new turn and still gets its reply."""
+        with self._lock:
+            turn = self._turns.get(zone)
+            if turn is None:
+                # No turn open: this play came from a non-satellite caller (phone, ChatGPT text).
+                # Creating a turn here would invent a phantom one -- suppressing that caller's
+                # announce for the whole turn window and skipping a later satellite reply.
+                return
+            turn["playback"] = uri
 
     def _reply_baseline(self, zone, fallback):
         # The pre-duck baseline to hand back at the end of a reply turn. Caller holds _lock.
@@ -276,6 +296,22 @@ class InteractionCapability(capability.Capability):
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
         clip = self._clip_id(uri)
+
+        # Plan decision (e): a pure media command is confirmed by the ACTION, not by speech. Playing
+        # the confirmation clip here would replace the stream the same turn just started (and the
+        # capture below would find it still starting, so nothing would replay it) -- the command
+        # would report success and leave silence.
+        if bool(getattr(ctx.settings, "say_skip_on_fresh_playback", True)):
+            with self._lock:
+                turn = self._turns.get(zone) or {}
+                started = turn.get("playback")
+            if started:
+                LOG.info("SAY req=%s zone=%s clip=%s SKIPPED: this turn started %s -- the reply would "
+                         "replace it (media command is confirmed by the action)", rid, zone, clip, started)
+                return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                             metadata={"said": False, "reply_started": False, "likely_silent": False,
+                                        "replayed": False, "superseded": False,
+                                        "reason": "fresh_playback", "zone": zone})
 
         # 1. capture before-state (best-effort; a read blip must not swallow the reply)
         try:

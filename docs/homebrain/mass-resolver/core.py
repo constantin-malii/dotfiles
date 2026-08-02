@@ -82,6 +82,19 @@ def dispatch(ctx, intent, params, rid=None):
         result = cr.err(intent, rid, "invalid_input", "unknown intent",
                         "Sorry, I can't do that.", spoken_text=None)
 
+    # Tell the interaction capability that this turn started media, so its reply clip does not
+    # replace the stream it is confirming (see InteractionCapability.note_playback).
+    if intent in ("radio", "music") and result.get("ok"):
+        md = result.get("metadata") or {}
+        if md.get("played") and md.get("uri"):
+            cap = CAPS.get("interaction")
+            zone = getattr(ctx.settings, "ceiling_entity", "") or ""
+            if cap is not None and zone and hasattr(cap, "note_playback"):
+                try:
+                    cap.note_playback(ctx, zone, md["uri"])
+                except Exception as e:
+                    LOG.warning("note_playback failed (%r)", e)
+
     # Single TTS owner: speak via Speaker when spoken_text is present and conditions met.
     # Exception: during a satellite turn the pipeline speaks the reply, so stand down (no double-speak).
     spk = result.get("spoken_text")
