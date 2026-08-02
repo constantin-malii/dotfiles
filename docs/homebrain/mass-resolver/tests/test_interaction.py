@@ -1209,5 +1209,57 @@ class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
         self.assertAlmostEqual(vol_calls[-1], 0.47)            # baseline restored, not stranded
 
 
+class ResumeModeTest(unittest.TestCase):
+    """`script.ceiling_resume` used media_player.media_play, which cannot resume a radio stream whose
+    queue was cleared -- and after a reply turn the zone is holding a spent TTS clip, so media_play
+    would replay THAT. `resume` replays the last real source instead."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                    sleeper=FakeSleeper())
+
+    def test_resume_replays_the_last_real_source(self):
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        self.cap.remember_source(self.zone, "library://radio/18")
+        r = run(self.cap, ctx, {"mode": "resume"})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["resumed"])
+        self.assertEqual(r["metadata"]["how"], "replay")
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(pm[0][2]["media_id"], "library://radio/18")
+
+    def test_reply_clips_are_never_remembered_as_a_source(self):
+        for clip in ("http://192.168.122.10:8123/api/tts_proxy/abc.flac",
+                     "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.flac"):
+            self.cap.remember_source(self.zone, clip)
+        self.assertNotIn(self.zone, self.cap._last_source)
+
+    def test_resume_falls_back_to_media_play_when_nothing_remembered(self):
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        r = run(self.cap, ctx, {"mode": "resume"})
+        self.assertTrue(r["metadata"]["resumed"])
+        self.assertEqual(r["metadata"]["how"], "media_play")
+        self.assertEqual([c[1] for c in ha.calls], ["media_play"])
+
+    def test_a_played_station_is_remembered_via_note_playback(self):
+        ctx = FakeCtx(FakeHA())
+        self.cap.note_playback(ctx, self.zone, "library://radio/2")
+        self.assertEqual(self.cap._last_source[self.zone], "library://radio/2")
+
+    def test_say_remembers_the_source_it_captured(self):
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([playing_with_id(0.32, "library://track/9"),
+                       playing_with_id(0.40, "builtin://radio/" + "http://192.168.122.10:8123/api/tts_proxy/x.mp3"),
+                       idle_state(), playing(0.40)])
+        run(self.cap, ctx, {"mode": "say", "uri": "http://192.168.122.10:8123/api/tts_proxy/x.mp3"})
+        self.assertEqual(self.cap._last_source[self.zone], "library://track/9")
+
+    def test_resume_is_a_valid_mode(self):
+        r = self.cap.resolve(FakeCtx(FakeHA()), {"mode": "resume"})
+        self.assertIsNone(self.cap.validate(FakeCtx(FakeHA()), r))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

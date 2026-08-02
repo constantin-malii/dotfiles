@@ -6,7 +6,7 @@ import capability
 import command_result as cr
 
 LOG = logging.getLogger("resolver")
-_MODES = ("duck", "restore", "say")
+_MODES = ("duck", "restore", "say", "resume")
 
 
 class InteractionCapability(capability.Capability):
@@ -24,6 +24,10 @@ class InteractionCapability(capability.Capability):
                                                       #   the satellite announcing a turn, whether or not there
                                                       #   was anything to attenuate -- so this marks "a turn is
                                                       #   live" even when the zone was idle. Guarded by _lock.
+        self._last_source = {}                        # zone -> last REAL (non-reply) media uri played there,
+                                                      #   so "resume" can restart it: media_play cannot resume
+                                                      #   a radio stream whose queue was cleared, and would
+                                                      #   otherwise replay a spent reply clip.
         self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
                                                       #   turn is in flight; _say owns the zone's volume for its
                                                       #   lifetime (S1b-2 decision (b)). Guarded by _lock.
@@ -49,6 +53,8 @@ class InteractionCapability(capability.Capability):
             return self._duck(ctx, resolved["zone"], rid)
         if resolved["mode"] == "say":
             return self._say(ctx, resolved, rid)
+        if resolved["mode"] == "resume":
+            return self._resume(ctx, resolved["zone"], rid)
         return self._restore(ctx, resolved["zone"], rid)
 
     def _duck(self, ctx, zone, rid):
@@ -171,6 +177,36 @@ class InteractionCapability(capability.Capability):
             turn = self._turns.get(zone)
             return turn is not None and (self._clock() - turn.get("ts", 0)) <= window
 
+    def _is_reply_uri(self, uri):
+        # Reply clips are Piper renders served from HA's tts_proxy, which MA wraps as
+        # "builtin://radio/<url>". They must never be treated as a resumable source.
+        u = (uri or "").lower()
+        return ("tts_proxy" in u) or u.startswith("builtin://radio/http")
+
+    def remember_source(self, zone, uri):
+        """Record the last REAL media played on this zone, for `resume`. Ignores reply clips."""
+        if not uri or self._is_reply_uri(uri):
+            return
+        with self._lock:
+            self._last_source[zone] = uri
+
+    def _resume(self, ctx, zone, rid):
+        with self._lock:
+            uri = self._last_source.get(zone)
+        if uri:
+            ctx.ha.call_service_rest("music_assistant", "play_media",
+                                     {"entity_id": zone, "media_id": uri},
+                                     timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+            LOG.info("RESUME req=%s zone=%s replaying %s", rid, zone, uri)
+            return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                         metadata={"resumed": True, "uri": uri, "how": "replay", "zone": zone})
+        # Nothing remembered (e.g. resolver restarted): fall back to an ordinary play/unpause, which
+        # is the right call for a PAUSED stream and harmless otherwise.
+        ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+        LOG.info("RESUME req=%s zone=%s no remembered source; sent media_play", rid, zone)
+        return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                     metadata={"resumed": True, "uri": None, "how": "media_play", "zone": zone})
+
     def note_playback(self, ctx, zone, uri):
         """Record that the resolver just started media on this zone as part of the current turn.
 
@@ -179,6 +215,7 @@ class InteractionCapability(capability.Capability):
         it is confirming, and _say's capture runs while that station is still starting, so it
         captures no source to replay and the zone ends up idle holding the TTS clip. Keyed to the
         TURN, not a timer: a question asked seconds later is a new turn and still gets its reply."""
+        self.remember_source(zone, uri)          # resumable regardless of who started it
         with self._lock:
             turn = self._turns.get(zone)
             if turn is None:
@@ -323,6 +360,7 @@ class InteractionCapability(capability.Capability):
         battrs = before.get("attributes") or {}
         source_id = battrs.get("media_content_id")
         prev_volume = battrs.get("volume_level")
+        self.remember_source(zone, source_id)       # music started outside a turn is resumable too
 
         # 2. barge-in gen-id: bump this zone's generation; a later say() will bump it again and
         #    supersede us -- we then abort remaining steps rather than fight over the finish.
