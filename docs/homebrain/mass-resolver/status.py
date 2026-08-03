@@ -25,6 +25,16 @@ LOG = logging.getLogger("resolver")
 
 _RADIO_PREFIX = "library://radio/"
 _TRACK_PREFIX = "library://track/"
+# The assistant's OWN reply audio: HA renders it under /api/tts_proxy/ and MA wraps that URL as
+# "builtin://radio/<url>". Because a reply REPLACES the stream, a status read taken during one used to
+# describe the reply as if it were the user's music -- and report reply_volume (60%) as the listening
+# level, which is what the operator heard as "something is playing at 60% volume".
+_REPLY_WRAP = "builtin://radio/http"
+
+
+def _is_reply_clip(cid):
+    c = (cid or "").lower()
+    return ("tts_proxy" in c) or c.startswith(_REPLY_WRAP)
 
 
 def _clean(x):
@@ -74,7 +84,13 @@ def normalize_status(ha_state):
 
     if state == "playing":
         cid = attrs.get("media_content_id") or ""
-        if cid.startswith(_RADIO_PREFIX):
+        if _is_reply_clip(cid):
+            # Our own voice, not content. Report it as such and do NOT pass off the reply volume as
+            # the user's level.
+            meta["content_kind"] = "reply"
+            meta["volume_level"] = None
+            meta["volume_percent"] = None
+        elif cid.startswith(_RADIO_PREFIX):
             meta["content_kind"] = "radio"
             meta["station"] = _clean(attrs.get("media_album_name"))    # station name (radio)
             meta["title"] = _clean(attrs.get("media_title"))           # optional current-stream track
@@ -121,6 +137,8 @@ def build_chat_text(meta):
     ps = meta.get("player_state")
     if ps == "playing":
         vol = _vol_suffix(meta)
+        if meta.get("content_kind") == "reply":
+            return "That is my own reply playing. Nothing else is on right now."
         if meta.get("content_kind") == "radio":
             station = meta.get("station")
             if station:

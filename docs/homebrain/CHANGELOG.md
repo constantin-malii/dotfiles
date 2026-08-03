@@ -3,6 +3,386 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-03 — Assist SPLIT into control + knowledge agents (2nd wake word, web search, tool-isolated) · long replies allowed · pre-announcement bump fixed
+
+> **ADR:** [`2026-08-03-agent-split-routing-adr.md`](./2026-08-03-agent-split-routing-adr.md). Config only —
+> **no firmware**, no resolver code for the split itself. Slot 2 was already wired in the running firmware
+> (`wake_word_2` / `assistant_2` existed), so the OTA gate stayed closed.
+
+- **Why:** the single agent could not answer live-data questions (*"I can't check the weather for Calgary right
+  now"*) while happily answering *"100 EUR in CAD"* from training knowledge — static knowledge vs live data,
+  not a defect. Enabling web search on **that** agent would have put untrusted web text in the same agent that
+  **controls the house**, which is the combination that makes prompt injection actually dangerous.
+- **Shipped:**
+
+  | | Control | Knowledge |
+  |---|---|---|
+  | Wake word | **Okay Nabu** | **Hey Jarvis** (slot 2) |
+  | Pipeline | `Living Room ChatGPT` `01kxygpr39jas5hgsf28cph108` | `Living Room Knowledge` `01kz45tkgbnsn57gpyj25vyfd0` |
+  | Agent | `conversation.openai_conversation` (gpt-4o-mini) | `conversation.openai_conversation_2` (gpt-4o) |
+  | prefer-local | true | **false** (wake word alone picks the layer) |
+  | House tools | **yes** (Assist) | **none** |
+  | Web search | off | **on** · Medium · links **off** · home location **off** |
+
+- **VERIFIED live — tool isolation is the load-bearing check.** Same question to both:
+  `KNOWLEDGE → "I can't check what's playing on the ceiling speakers… ask the main assistant"` ·
+  `CONTROL → "Nothing is playing right now."` And the knowledge agent returned **today's** Calgary forecast,
+  so web search genuinely works. **No new exposure**; `expose_new_entities` still off; the knowledge agent has
+  no LLM API at all, so `assistant-capabilities.md` needs no change.
+- **`gpt-4o-mini` cannot do web search** — HA hides the option for it. The knowledge agent runs **gpt-4o**;
+  the control agent stays on mini, so the expensive model only serves the rare question.
+- **Spoken-output caveat (prompt, not code):** the first live web answer came back as markdown headings + an
+  hourly bullet list in Fahrenheit — unusable through a speaker. The knowledge agent's instructions must forbid
+  markdown/lists/URLs and prefer metric.
+- **Long replies now allowed (resolver):** `say_reply_timeout_ms` 30000 → **180000** (~400 spoken words) and
+  `say_blank_cid_grace_ms` 4000 → **8000**. At 30 s the poll truncated a long answer and replayed the music
+  over its tail. The reply-marker staleness budget and the deferred restore derive from this value, so they
+  widened automatically.
+- **Pre-announcement volume "bump" fixed (resolver):** `_say` raised the volume to `reply_volume` **before**
+  the clip replaced the stream, so the ~1 s of still-playing *ducked music* was played at 0.60 — the jump the
+  operator heard. `_say` now pauses the zone first (when something was playing), so the raise is inaudible; if
+  the clip then never goes out, the `finally` un-pauses. Reversible via `say_pause_before_reply=false`.
+  **Not fixed (inherent):** the short gap before music returns is the source **replay** — a radio stream must
+  reconnect. Removing it needs an *overlay* reply, and the overlay path is deterministically silent on this
+  player (CHANGELOG 2026-07-17).
+- **The 0.04 crater — PARTIALLY explained, NOT closed** (correction: an earlier draft of this entry claimed it
+  was closed). Repeated 10 % volume-down steps from ~0.44 land exactly on 0.04, then 0.0 — reproduced by an
+  agent probe that fired five "down" phrasings in a row at a live speaker. **But that cannot be the whole
+  story:** the 2026-08-01 troubleshooting notes below record craters to **0.04 / 0.15** long before any such
+  probe, and a `DUCK 0.04 -> 0.04` line appears on 2026-08-02 at 15:55 with no volume command near it. So
+  repeated stepping is *one* route to 0.04, not the only one. The duck-ownership fix means the zone now
+  self-heals from it either way, but the second source is still unidentified — **keep this open.**
+- **`weather.forecast_home` is Calgary.** Home is lat 50.8898 / lon −114.0179; the entity is merely *named*
+  "Forecast Home", which is why "weather in Calgary" found no device. An **alias** "Calgary" on that entity
+  would answer it locally, deterministically, with no egress — **proposed, not applied** (exposure-adjacent).
+- **Still pending (not applied):** the extra volume phrasings (`lower the volume`, `turn down the volume`,
+  `decrease the volume`) — generated and validated at `/tmp/new_vcs2.json` on the host, blocked on HA's
+  automation-config endpoint timing out repeatedly. Until applied, use **"volume down" / "turn it down" /
+  "quieter" / "turn the volume down"**, which all work.
+- **Restart pending:** the bump fix and the long-reply timeout are deployed to the host but inactive until
+  `sudo systemctl restart mass-resolver`.
+- **Tests:** 326 local / 229 host.
+
+## 2026-08-02 — THE reason voice `volume up` / `stop` kept failing: `automation.voice_ceiling_speakers` (prefer-local sentence layer) bypassed every script fix. Rerouted through the resolver (HA-live)
+
+> **Read this before touching ceiling volume/stop/resume again.** Under **`prefer_local`**, the Phase-2
+> sentence-trigger automation gets **first refusal** on these phrasings — so it, **not** the exposed
+> `script.ceiling_*`, is what actually handled them by voice. Fixing the scripts (earlier today) had
+> **no effect on the operator's actual commands**. Snapshot: `/tmp/vcs_SNAPSHOT.json` on the host.
+
+- **Decisive evidence** (local agent, via `/api/conversation/process`):
+  `'volume up'` → `action_done "Turning it up."` · `'turn it up'` → handled · `'louder'` → handled ·
+  `'volume down'` → handled · **`'increase the volume'` → `error "couldn't understand"`**. So the
+  sentence layer swallowed the phrasings that failed, while the one that *worked* was the one it did
+  **not** match (it fell through to the LLM → `script.ceiling_volume_up` → resolver). Exactly the
+  operator's report: *"volume up did not work, increase volume seems to have worked."*
+- **What its branches did** — the same defects already fixed in the scripts, one layer up:
+  `stop` → **`media_player.media_stop`** (the call `ONBOARDING.md` forbids: wedges the Squeezelite
+  child, holds MA's lock) · `volume up/down/set` → `volume_set` computed from
+  `state_attr(…,'volume_level')`, i.e. **the duck floor mid-turn**, so the step came off 0.15 and the
+  restore then wiped it (`DUCK 0.25 -> 0.15` → *"up"* ending LOWER) · `resume` →
+  `media_player.media_play`, which cannot restart a cleared radio queue.
+- **Rerouted (5 branches):** `stop` → **`media_pause`** (equivalent, no wedge; a resolver `pause` mode
+  would have been pure indirection) · `resume` → resolver `resume` · `volume_up`/`volume_down` →
+  resolver modes with the existing `step` · `vol_set` → resolver with the mode chosen from the
+  branch's own `dir` variable, preserving up/down/absolute. **Untouched:** all 7 triggers, every
+  `set_conversation_response`, and the `variables` blocks doing HA's spoken-number parsing — the
+  transform asserts these are intact, plus "no `media_stop`" and "no direct `volume_set`" remain.
+- **VERIFIED live** through the real prefer-local path: `'volume up'` → `VOLUME volume_up: -> 0.64`,
+  `'volume down'` → `-> 0.54`, `'set the volume to 40 percent'` → `set_volume: -> 0.4`, ceiling
+  `playing 0.4`. Previously these produced **no resolver line at all**.
+- **Lesson for the record:** the exposed `script.*` surface is **not** the only path to the ceiling.
+  `prefer_local` means the sentence automation wins for any phrasing it matches, so a fix applied only
+  to the scripts is invisible to voice. Any future ceiling-control change must cover **both**.
+- **Same round, resolver-side** (deployed, restart 17:57:50, host suite 225 OK): `_resume` now marks
+  the turn via `note_playback` — it started playback but did not, so the reply clip **replaced the
+  station resume had just started** (`RESUME replaying library://radio/2` → `SAY start` 1 s later →
+  zone left idle on a TTS clip: the operator's *"blipped but hearing nothing"*). The blank-`cid`
+  tolerance is now bounded by **`say_blank_cid_grace_ms` (4000)** — unbounded, it held the zone at
+  reply volume for the whole 30 s `say_reply_timeout_ms`, with wake words bouncing off
+  `DUCK skipped: reply active`. And `status` no longer reports the assistant's own clip as the user's
+  music at `reply_volume` (*"Something is playing at 60% volume"* → *"that is my own reply playing"*,
+  volume suppressed).
+- **Agent live side effects, disclosed:** the branch verification set the ceiling to **0.40**; an
+  earlier direct script test left it at 0.45.
+- **Tests:** 322 local / 225 host.
+
+## 2026-08-02 — Reply CUT-OFFS root-caused (empty `media_content_id`) · stop/resume/volume rerouted off the wedging + ducked paths (5 HA scripts, HA-live) · all VERIFIED live
+
+> **First HA-live changes in this branch.** Five exposed scripts edited via the HA config API
+> (`ceiling_stop`, `ceiling_pause`, `ceiling_resume`, `ceiling_volume_up`, `ceiling_volume_down`,
+> `ceiling_set_volume`). **No new exposure** — same scripts, same names, so `assistant-capabilities.md`
+> stays in lockstep. Snapshots for rollback: `/tmp/snap_ceiling_*.json` on the host.
+
+- **Reply cut-offs / volume "bumps" on almost every command — ROOT CAUSE.** Found by the poll-exit
+  logging added the same day (it did not exist before, which is why this hid for so long):
+  `finish-poll exit after 0.5s: state=playing cid=` — **MA transiently reports an EMPTY
+  `media_content_id` while the clip is still playing.** The exit test was
+  `norm_uri not in (cid or "")`, always true against `""`, so `_say` decided the reply had ended after
+  0.5–1.0 s, **restored the volume and replayed the source OVER the still-playing reply**. One defect,
+  both symptoms: the cut-off (replay landing on the clip) and the mid-clip volume bump (the restore).
+  A genuine ending looks different: `state=idle`, or a cid naming something else. Fix: an empty cid is
+  **not** an ending while the player still says `playing`, and an ending needs **two consecutive**
+  observations so a single flicker cannot trigger it. **VERIFIED live:** every exit is now
+  `state=idle` after 2.0–3.0 s. The guarding test asserts the poll *kept waiting* through the blank
+  cids — **0 sleeps against pre-fix code**, i.e. the cut-off reproduced deterministically.
+- **`script.ceiling_stop` used `media_player.media_stop`** — the call `ONBOARDING.md` forbids on this
+  player (wedges the Squeezelite child, holds MA's playback lock). Now `media_pause` (recorded as
+  lock-free). Fits the transient `RADIO PLAY FAILED code=2` that stalled 11.3 s, though the wedge was
+  **never caught live** (every MA player read `idle` when probed) — so this is a documented-dangerous
+  call that matches the evidence, not a reproduced wedge.
+- **`resume` could never have worked**, regardless of the assistant understanding it: `media_play`
+  cannot resume a radio stream whose queue was cleared, and after a reply turn the zone holds a
+  **spent TTS clip**, so it would have replayed *that*. New resolver `resume` mode replays the last
+  **real** source (remembered from `note_playback` and `_say`'s capture; reply clips recognised by
+  `tts_proxy` / `builtin://radio/http` and never remembered). Also: the first cut blind-called
+  `media_play` on an idle player → **HTTP 500** → the turn died with a bare `OSError`, which the
+  assistant surfaced as *"there is nothing playing"*. It now inspects the zone: un-pause if paused,
+  replay a loaded real source, else an honest "nothing to resume" with **no service call**.
+  **VERIFIED:** `RESUME … replaying library://radio/2`.
+- **Volume commands computed their step from the DUCKED value.** The scripts read
+  `state_attr(…,'volume_level')` directly, so mid-turn "volume up" was `0.15 + 0.10 = 0.25` instead of
+  `0.34 + 0.10`, **and the next re-duck pulled it straight back down** — "up" ended up LOWER:
+  `DUCK 0.34 -> 0.15` → `DUCK 0.25 -> 0.15` → `SAY restored -> 0.25`. New `volume_up`/`volume_down`/
+  `set_volume` modes retarget the **baseline** the turn will restore to and leave the floor alone, so
+  the step comes off the listening level, survives re-ducks, and lands when the turn ends. Unducked
+  they write the player as before. Values rounded to 3dp (`0.44-0.10` was writing
+  `0.33999999999999997`). **VERIFIED live:** `VOLUME volume_down: baseline 0.44 -> 0.34 (ducked;
+  applies when the turn ends)` → `SAY restored -> 0.34` → the **next** turn ducked *from* 0.34.
+- **Agent-caused prompt regression, found and reverted.** While fixing `media_stop` the stop
+  description was broadened to add *"silence"* / *"turn the music off"* — phrasing that competes with
+  quieting requests. `last_triggered` then showed the assistant calling **`ceiling_stop`/`ceiling_pause`
+  during volume turns** (`ceiling_volume_down` had not fired in a day), which is why "volume up/down
+  paused playback". Reverted to the original wording plus an explicit *"NEVER use for volume
+  requests"* guard on both stop and pause. The volume path itself was proven sound by a direct call:
+  HTTP 200 → `VOLUME volume_up: -> 0.45 (live)`.
+- **Not diagnosable from here:** the resolver sees only the tool that was called, never the
+  transcription. If tool mis-selection recurs, Assist **pipeline traces** are the next instrument.
+- **Two Assist turns ~1 s apart** (different clip fingerprints, `e2192ea3` then `ceea0c3c`) explain
+  the "multiple voices, one understanding one not" — two genuine replies, not one event fired twice.
+  **Zero** resolver announces since the suppression landed, and no `_say` ever superseded. Satellite
+  ruled out: single assistant slot, single wake word, **no speaker attached**. Upstream (wake
+  retrigger / pipeline re-listen) — a separate item.
+- **Deploys (gated, user-run restarts):** resolver backups `.bak/20260802-152908`, `-155724`,
+  `-160934`. Host 3.5.2 compile OK; host suite **185 OK**. Tests **317 local**.
+- **Agent live side effects, disclosed:** a diagnostic probe started playback (Radio Noroc Moldova),
+  and a direct `volume_up` test left the ceiling at 0.45.
+
+## 2026-08-02 — `volume down` REGRESSION found + fixed (mine) · aliases now match inside noisy STT strings · MA play failures log their reason. All VERIFIED live
+
+- **REGRESSION introduced by Slice 4 (mine), reported by the operator: "volume down" became a no-op**
+  on the satellite while still working on the plain HA assistant. The old `user_override` check was doing
+  **two** jobs — the false positive that caused the ratchet **and** honouring a genuine human volume change
+  mid-turn. Making `_say` the single writer removed both, so the `script.ceiling_volume_*` scripts (which
+  write the player **directly**, never through the resolver) were silently undone:
+  `DUCK 0.47 -> 0.15` → `SAY start baseline=0.47 prev=0.15` → `SAY restored -> 0.47`. It still worked on the
+  HA assistant because there is no reply clip there, so the old check still saw the change and kept it.
+- **Fix — discriminate instead of discard.** The resolver knows the only two volumes **it** wrote (the duck
+  floor and `reply_volume`); anything else is a third party and is **kept**. Applied at both ends of a turn:
+  at capture (a volume moved during the duck **becomes** the baseline) and at restore (a volume moved during
+  the reply is left alone and the snapshot retired). Comparing against the duck floor **as well as**
+  `reply_volume` stops a stale HA read — which returns the pre-reply value — from being mistaken for a human
+  change. `duck_floor` is captured at step 2 because step 4 overwrites `snap["target"]` with `reply_volume`;
+  re-reading the snapshot there compared 0.15 against 0.70 and mis-fired (caught by the new tests).
+- **VERIFIED live (12:14–12:18):** `SAY … volume moved to 0.34 during the duck (not ours, last wrote 0.15);
+  adopting it as the baseline` → then `RESTORE -> 0.34`, `RESTORE -> 0.34`,
+  `SAY restored -> 0.34 (baseline=0.34 prev=0.15)`. **The operator's volume change sticks and the ratchet has
+  not returned.**
+- **Aliases only matched whole-string equality**, but the assistant relays the transcription verbatim, so the
+  station argument arrives noisy and over-long: `target='Radio Norok N O R O C'` → `candidates=0`, despite
+  containing both "Norok" **and** a spelled-out "N O R O C". `resolve_alias` now looks for an alias key
+  **inside** the query, **longest key first**, and also against a **compacted** form so "N O R O C" collapses
+  to "noroc". Keys under 4 chars are skipped (they would fire on ordinary words) and **`rock` is deliberately
+  never aliased**. Verified live: `radio alias 'norok' -> 'Radio Noroc Moldova'` → `candidates=1`.
+- **MA play failures now log MA's own reason.** A live failure read only `RADIO PLAY FAILED code=2`, which
+  cannot distinguish a dead stream from lock contention. The call had stalled **11.3 s** before failing (the
+  lock signature), and a direct probe afterwards played the same station successfully over **both** provider
+  mappings (`{"result": null}`, no error) — so it was **transient, not a broken station**. Radio/music
+  failures now log `error_code` + `details`/`error`/`message` (+ station and uri for radio).
+- **"Wrong station" is STT, definitively — not the resolver.** Two attempts, logged:
+  `target='rock' candidates=5 → 'Наше Радио'` (Whisper renders "noroc" as **"rock"**, a real **genre**
+  synonym, so that was the correct answer to the input) then `target='Radio Noro' candidates=2 → 'Radio Noroc
+  Moldova'`, **`RADIO CONFIRM … is playing`**. **Workaround: say "Radio Noro…" / the full station name.**
+  Adding more alias spellings cannot fix a word transcribed as a *different real word*; a real fix is STT
+  vocabulary or a sentence trigger.
+- **Deploys (gated, user-run restarts):** backups `~/mass-resolver/.bak/20260802-114746/` (interaction,
+  favorites, radio.json) and `.bak/20260802-120249/` (radio, music). Host 3.5.2 compile OK; host suite
+  **163 OK**. **Deploy note: multi-file `scp` hangs on this host — copy one file at a time.**
+- **Agent-caused live side effects, disclosed:** a diagnostic probe **started playback** (Radio Noroc Moldova)
+  and an earlier sub-second duck→restore probe left the zone at the floor once (restored by hand). Both were
+  the agent's doing, not defects.
+- **Tests:** 295 local / 163 host.
+
+## 2026-08-02 — ROOT CAUSE of "media command reports success but is silent": the spoken confirmation REPLACED the media it confirmed. Fixed + verified live
+
+- **Symptom:** "play radio noroc" → the assistant says "playing Radio Noroc Moldova" → **no sound**.
+- **Root cause (caught by the new `RADIO CONFIRM` check, not by ear):** `_say` delivers the reply with
+  `play_media`, which **replaces** the stream — so the spoken confirmation overwrote the station it was
+  confirming. Compounding it, `_say` captured its before-state **1.2 s after** the play was accepted, while
+  the station was still starting, so `was_playing` was false, **no source was captured**, `replayed=False`,
+  and nothing brought the station back. The zone ended `idle` holding the TTS clip:
+  `RADIO CONFIRM … NOT confirmed after 8s: state=idle cid=builtin://radio/…/tts_proxy/EJRj….flac
+  requested=library://radio/18`. **Station-independent, and unrelated to stream health** (`available=True`
+  was truthful) — it would hit any media command whose reply was spoken.
+- **Fix — plan decision (e)** ("a pure media command is confirmed by the ACTION, not by speech"): `_say`
+  declines to play a reply clip when the **current turn** already started playback on that zone. Keyed to
+  **turn identity, not a timer** — a question asked seconds after a media command is a new turn and still
+  gets its answer. **Failed** commands still speak (nothing started → nothing to protect), so "I couldn't
+  find a station" stays audible. Reversible via `say_skip_on_fresh_playback=false`.
+- **`note_playback` deliberately never creates a turn.** A play from a **non-satellite** caller (phone,
+  ChatGPT text) must not open a *phantom* turn — that would suppress that caller's announce for the whole
+  turn window and skip a later satellite reply. The first implementation did create one and **the test suite
+  caught it** as four unrelated dispatch tests losing their announce.
+- **VERIFIED live (11:23):** `RADIO PLAY ACCEPTED 'Наше Радио' uri=library://radio/9` →
+  `SAY … SKIPPED: this turn started library://radio/9` → `RESTORE … -> 0.47` →
+  **`RADIO CONFIRM 'Наше Радио' is playing (cid=library://radio/9)`**. The station survived its own
+  confirmation and the volume returned to baseline (operator: *"volume is decent now"*).
+- **Separate, still open — STT, not the resolver.** A "wrong station" report (`Наше Радио` instead of Noroc)
+  traced to Whisper transcribing **"noroc" as "rock"**: `radio mode=play target='rock' candidates=5`, and
+  `rock` is a legitimate **genre synonym**, so the rock station returned was correct for the input received.
+  **`rock` is deliberately NOT aliased** — that would hijack every genuine rock request. Added only
+  non-colliding renderings (`narok`, `no rock`, `noroc moldova`, `norok moldova`, `radio noroc moldova`).
+  Reliable workaround: say the **full** name, "play Radio Noroc Moldova". A real fix belongs upstream (STT
+  vocabulary / a sentence trigger), not in alias whack-a-mole.
+- **Verified false alarm, recorded so it is not re-investigated:** an aliased query cannot mis-route through
+  the local fuzzy matcher — `favorites.by_name(rc, "noroc")` returns **0** local hits and
+  `match_rank("Radio Noroc Moldova", "Nashe Radio")` is **None**.
+- **Deploy (gated):** `interaction.py`, `core.py`, `config.py`, `config.json` (+2 tests); backup
+  **`~/mass-resolver/.bak/20260802-110938/`**; host 3.5.2 compile OK, host suite **140 OK**; user-run
+  restart. `radio.json` alias additions land on the **next** restart.
+- **Tests:** 281 local / 140 host.
+
+## 2026-08-02 — Slice 4 VERIFIED live (7 turns, no ratchet) · radio `RADIO PLAYING` was an unverified success claim → now confirmed · station aliases now reach the MA search
+
+- **Slice 4 verified end-to-end, operator-eared + log-confirmed.** Seven consecutive real satellite turns
+  (15:53–15:56) each ended `SAY … restored -> 0.47` with `replayed=True`, and the ceiling finished
+  `playing vol=0.47 src=library://radio/2` — **the volume it started at**. `baseline=0.47` was captured
+  correctly on every turn *even while `prev` was the ducked floor* (`prev=0.15`, `prev=0.04`) — substituting
+  `prev` for the baseline **was** the crater. **Zero `user_override` lines, zero `DOUBLE-SPEAK` warnings**,
+  `RESTORE … deferred: reply active` on every overlapping turn, and `ANNOUNCE suppressed` on a real news
+  turn. No ratchet across six turns.
+- **The mystery `0.04` is an EXTERNAL writer, not the resolver.** `DUCK … 0.04 -> 0.04` at 15:55:43 with no
+  resolver `volume_set` behind it: something outside the resolver drops the ceiling that low mid-turn.
+  Previously that value became the "baseline" and stuck; now the true baseline survives and the turn
+  self-heals. **Open item** — identify the writer (MA announce/overlay revert is the prime suspect).
+- **`RADIO PLAYING` was a success claim the resolver never checked** (operator: *"this did not work"* about a
+  turn the log called success). It was logged the instant MA's `play` returned without an `error_code` — i.e.
+  **"MA accepted the request"**, never "audio is playing". Renamed to **`RADIO PLAY ACCEPTED`**, and a
+  timer reads the zone back **`radio_confirm_after_ms` (8000)** later and logs the truth: `RADIO CONFIRM …
+  is playing`, or a **WARNING** naming `state`, the requested `uri` and the `cid` actually loaded. Runs off
+  the caller's thread (no added latency on the synchronous tool call), never alters the returned result,
+  `0` disables.
+- **Station aliases never reached the MA/RadioBrowser search** — they only gated the local `radio.json`
+  favorites match, so an alias could not help any station that lives in **MA's library** rather than in
+  `radio.json`. Live evidence: MA returns **2 available hits for `noroc`** (`library://radio/18` +
+  a `radiobrowser://` mapping, both `available=True`) and **0 for `norok`**, which is what Whisper actually
+  transcribes — so the turn honestly reported "couldn't find a station". `favorites.resolve_alias()` is now
+  shared and the **canonical** name is what gets searched; aliases added for `norok` / `radio norok` /
+  `noroc` / `radio noroc` → `Radio Noroc Moldova`. **Note:** that station is deliberately *not* added to
+  `radio.json` favorites (it is an MA library favorite — duplicating the id here would rot).
+- **Still open (playback, not resolution):** `noroc` resolves and is `available=True`, MA accepts the play,
+  and **no audio** — that is the known degraded-stream/stop-wedge family, unchanged by this work. The new
+  `RADIO CONFIRM` warning is what will now catch it in the log instead of a false success.
+- **Deploy (gated):** `radio.py`, `favorites.py`, `config.py`, `config.json`, `radio.json` (+2 test files);
+  backup **`~/mass-resolver/.bak/20260802-105506/`**; host **3.5.2** `py_compile` OK, host suite **134 OK**;
+  user-run restart. **Deploy note:** multi-file `scp` hangs on this host — copy **one file at a time**.
+- **Known latent (NOT fixed, deliberately):** `_restore` compares the live volume against the value it last
+  wrote; on a **stale HA read** it instead sees the baseline, calls it `user_override`, and pops the snapshot
+  → zone left at the floor **with no dead-man**. Only reproducible sub-second (an agent probe did it, and
+  cleaned up after itself); real turns are seconds apart. Fix would be to treat "already at baseline" as
+  *already restored* rather than as a human override.
+- **Tests:** 275 local / 134 host.
+
+## 2026-08-01 — DOUBLE-SPEAK root-caused: a satellite turn had TWO speech owners; resolver announce now stands down during a turn (+ `_say` call attribution, `play_media` timeout 5s→20s)
+
+- **Symptom (operator, right after the Slice-4 deploy):** every reply heard **twice**, the two voices
+  overlapping and "ducking one another".
+- **Root cause — a Slice 2+3 collision, NOT a Slice-4 regression.** One utterance had two independent
+  speech owners on the *same* ceiling zone: (1) the satellite's LLM calls an exposed tool, the resolver
+  returns `spoken_text` **and** `chat_text`, and `core.dispatch` speaks `spoken_text` via `tts.speak` (the
+  F1-R sole-TTS-owner rule); (2) the LLM then relays `chat_text` verbatim, Piper renders it, and the Slice-3
+  automation routes that clip to the same ceiling through `_say`. Before Slice 3 the pipeline reply was
+  **inaudible**, so only voice (1) was heard — Slice 3 made the second one audible. Live evidence at 13:09:
+  `ANNOUNCE via tts.speak: I couldn't find a station for norok.` one second before the `DUCK` of the very
+  turn that also spoke it.
+- **Fix (operator-chosen, resolver-only, no HA edits):** `core.dispatch` **holds back its own announce while
+  a satellite turn is in flight** on the ceiling zone — the pipeline owns the voice for that turn. "In
+  flight" = a reply clip playing, **or** a duck snapshot held, **or** a duck *requested* within
+  `interaction_turn_window_ms` (30 s). The third condition is load-bearing: the live turn ducked **nothing**
+  (zone was idle), so a snapshot-only test would have missed it and announced anyway. Phone and
+  ChatGPT-text callers never duck → unaffected, they keep their announce. Reversible via
+  `suppress_announce_during_interaction=false` (config only, no code revert).
+- **Second, independent defect fixed in the same trace:** `_say` inherited `call_service_rest`'s **5 s**
+  default, and MA's `play_media` routinely outruns it → the turn **aborted** (`capability=interaction error:
+  timeout`) while the clip still started server-side, so the reply was audible but **unsequenced** and the
+  source was never replayed (also the 09:52 `replay failed (timeout)`). Reply + replay `play_media` now use
+  **`say_call_timeout_ms` (20 s)**; `volume_set` keeps the 5 s default.
+- **Visibility added** (the gaps that made this turn unreadable): a `SAY start` line with a **sha1[:8] clip
+  fingerprint** (never the `tts_proxy` URL); every `_say` service call timed and attributed on failure
+  (`music_assistant.play_media failed after 5.0s`) instead of a bare `error: timeout`; a **`DOUBLE-SPEAK`**
+  warning when a reply clip lands within `say_double_speak_window_ms` (8 s) of the resolver's own announce;
+  a **`TURN start`** line, and no-op ducks now log **why** (`no-op (not_playing)`) — previously a turn over
+  an idle zone logged nothing at all, which is why the operator's wake could not be located.
+- **New tunables:** `say_call_timeout_ms` (20000), `say_double_speak_window_ms` (8000),
+  `suppress_announce_during_interaction` (true), `interaction_turn_window_ms` (30000).
+- **Deploy (gated):** `interaction.py`, `core.py`, `speaker.py`, `config.py`, `config.json` (+ 4 test files)
+  to `~/mass-resolver/`; backup **`~/mass-resolver/.bak/20260801-151634/`**; host **Python 3.5.2**
+  `py_compile` OK, host suite **109 OK**; user-run `sudo systemctl restart mass-resolver`.
+  Note: multi-file `scp` hung — copy files **one at a time** with individual `timeout`s.
+- **Tests:** 17 new across `test_interaction.py` / `test_core.py` / `test_speaker.py` / `test_config.py`;
+  suite **267 OK** locally (was 251).
+
+## 2026-08-01 — S1b-2 Slice 4: reply-turn duck ownership fixed in the resolver (`_say` is sole restore owner); NO HA automation edit needed
+
+- **Fixes the Slice-3 volume ratchet/crater** (the `RESTORE … user_override cur=0.7 (kept)` bug). Root
+  cause, traced in code and reproduced offline: S1a's `idle→restore` fires **while `_say` is still polling
+  the reply clip**, reads `_say`'s elevated reply volume, misreads it as a human change (`user_override`)
+  and **discards the duck snapshot**; `_say`'s restore step then finds no snapshot and falls back to
+  `prev_volume` — which is the **already-ducked floor** — so the ceiling **craters** (0.15/0.04). With no
+  surviving baseline the next turn captures the inflated reply volume instead, so it also **ratchets**
+  (0.3 → 0.7 → …). One defect, both symptoms.
+- **Deterministic repro before any fix** (unit-level, no live system): duck 0.32→0.15 → `_say` sets 0.70 →
+  interleaved `restore` returns `user_override`, snapshot becomes `None` → `_say` writes **0.15** instead of
+  the 0.32 baseline.
+- **Fix — decision (b), implemented entirely resolver-side** (`interaction.py`): the reply turn is owned
+  end-to-end by `_say`. It publishes a per-zone reply marker and **resolves its restore baseline at its own
+  capture step** (so a mid-reply snapshot discard can't strip it), retires the duck snapshot + dead-man
+  after restoring, and always releases the marker (gen-guarded, so a barge-in keeps ownership). `_restore`
+  **defers** while a reply is in flight — keeping the baseline instead of claiming `user_override` — and
+  re-arms the dead-man since it declined to clear the snapshot. `_duck` also defers during a reply (plan
+  decision (a): the clip *replaced* the music, so there is nothing to duck under).
+- **⚠ Plan deviation — the S1a automation was NOT edited, and the grace-G change is no longer needed.**
+  Slice 4 was planned as an **HA-live** edit to `automation.s1a_satellite_ceiling_duck_restore`
+  (`id 1784146586`), repurposing `idle→restore` into a ~2–3 s grace-G backstop. Making the resolver the
+  single writer achieves decision (b) with **no HA-live gate at all**: with no reply in flight
+  `idle→restore` behaves exactly as before, so the "URI never arrives" case is covered **with no grace-G
+  delay**. The S1a automation and the reply automation `S1b-2 - Satellite Reply on Ceiling`
+  (`id 1784200731`) are both **untouched**. No firmware.
+- **Hardening from code review** (two further strands, both reproduced then fixed): `_say` retires **only**
+  the snapshot its baseline came from (ts-matched) — otherwise a wake landing between its restore write and
+  its pop had its fresh snapshot + dead-man torn down, stranding the zone at the floor with no backstop;
+  and a raise after the reply-volume write (e.g. MA `play_media` 500) now restores the baseline from a
+  `finally` and keeps `snap["target"]` in step with what was actually written, so a later `_restore` can't
+  claim `user_override` on the abandoned reply volume. The reply marker carries `ts`/`rid` and is treated as
+  orphaned past the whole say budget, so a crashed/hung `_say` can't deafen duck/restore for a zone forever.
+- **`say_owns_restore` remains a true rollback lever:** setting it `false` disables the whole ownership
+  model — duck/restore behave exactly as pre-Slice-4 — so reverting decision (b) needs no code revert.
+- **Tests:** 14 new (`DuckOwnershipSlice4Test`), suite **251 OK** (was 237). The three black-box ones were
+  confirmed to **fail against pre-fix code** for behavioural reasons: `user_override != reply_active`, the
+  next turn's snapshot destroyed, and a two-turn sequence ratcheting.
+- **Not fixed here (separate, unconfirmed):** the *long-reply cut* is **not** explained by this defect — a
+  re-duck lands before `_say` sets the reply volume, so it can't quiet the clip. Most likely a finish-poll
+  false-negative (state/`media_content_id` flicker → `_say` restores + replays mid-sentence). The occasional
+  `interaction … timed out` is the HA `rest_command` timeout on a blocking long `_say`, absorbed by
+  `continue_on_error: true`. Both belong to Slice 5 observation. The poll loops also bound themselves by
+  accumulated sleep rather than wall clock (pre-existing Slice-1 behaviour, not introduced here).
+- **Live gate:** resolver deploy only (`runbooks/resolver-deploy.md`), restart **user-run**. Rollback:
+  `cp ~/mass-resolver/.bak/<ts>/* ~/mass-resolver/ && sudo systemctl restart mass-resolver`.
+- **Note:** the running resolver still holds `reply_volume=0.70`; the repo's `0.60` takes effect on this
+  restart. That is a volume-level change only — it was never the ratchet.
+- **Next: Slice 5** — E2E sign-off (audible reply both sources, convergence to baseline, source replay,
+  never-started guard + chirp, latency, barge-in, no regressions).
+
 ## 2026-08-01 — S1b-2 early-use troubleshooting notes (satellite live on ChatGPT + ceiling replies)
 
 Live-use troubleshooting of the S1b-2 satellite→ceiling assistant (Slices 1-3 shipped 2026-07-19/20).

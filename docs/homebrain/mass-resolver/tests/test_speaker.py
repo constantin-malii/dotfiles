@@ -18,6 +18,43 @@ class FakeSettings(object):
     announce_failures = True
 
 
+class AnnounceStampTest(unittest.TestCase):
+    """interaction._say reads these to detect a second voice on the same turn."""
+
+    def test_successful_announce_stamps_ts_and_text(self):
+        ha = FakeHA(); sp = speaker.Speaker(FakeSettings(), lambda: ha, clock=lambda: 4242.0)
+        self.assertIsNone(sp.last_announce_ts)
+        sp.speak("hello")
+        self.assertAlmostEqual(sp.last_announce_ts, 4242.0)
+        self.assertEqual(sp.last_announce_text, "hello")
+
+    def test_empty_text_does_not_stamp(self):
+        ha = FakeHA(); sp = speaker.Speaker(FakeSettings(), lambda: ha, clock=lambda: 4242.0)
+        sp.speak("")
+        self.assertIsNone(sp.last_announce_ts)
+
+    def test_stamp_survives_the_retry_path(self):
+        bad = FakeHA(); bad.fail_connect = True
+        good = FakeHA(); box = {"first": True}
+
+        def factory():
+            if box["first"]:
+                box["first"] = False
+                return bad
+            return good
+        sp = speaker.Speaker(FakeSettings(), factory, clock=lambda: 7.0)
+        sp.speak("retried")
+        self.assertEqual(good.said, ["retried"])
+        self.assertAlmostEqual(sp.last_announce_ts, 7.0)
+
+    def test_failed_announce_does_not_stamp(self):
+        class DeadHA(FakeHA):
+            def announce(self, text, settings): raise IOError("nope")
+        sp = speaker.Speaker(FakeSettings(), lambda: DeadHA(), clock=lambda: 9.0)
+        sp.speak("never heard")
+        self.assertIsNone(sp.last_announce_ts)
+
+
 class SpeakerTest(unittest.TestCase):
     def test_speak_connects_and_announces(self):
         ha = FakeHA(); sp = speaker.Speaker(FakeSettings(), lambda: ha)

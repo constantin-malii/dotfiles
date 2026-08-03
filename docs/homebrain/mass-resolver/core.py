@@ -41,6 +41,24 @@ def sync_library(ctx, rid):
         ma.close()
 
 
+def _satellite_turn_in_flight(ctx):
+    """True when a satellite turn is live on the ceiling zone, i.e. the assistant pipeline is going
+    to speak this result itself (Piper -> reply URI -> interaction say). Announcing here as well
+    puts two voices on the zone for one utterance. Non-satellite callers (phone, ChatGPT text path)
+    never duck, so they are unaffected and keep their announce."""
+    if not bool(getattr(ctx.settings, "suppress_announce_during_interaction", True)):
+        return False
+    cap = CAPS.get("interaction")
+    zone = getattr(ctx.settings, "ceiling_entity", "") or ""
+    if cap is None or not zone or not hasattr(cap, "interaction_in_flight"):
+        return False
+    try:
+        return bool(cap.interaction_in_flight(ctx, zone))
+    except Exception as e:                     # never let a diagnostic check break a capability result
+        LOG.warning("interaction_in_flight check failed (%r); announcing normally", e)
+        return False
+
+
 def dispatch(ctx, intent, params, rid=None):
     """Route an intent to the appropriate capability and return a CommandResult.
     Speaks spoken_text via ctx.speaker when:
@@ -64,10 +82,26 @@ def dispatch(ctx, intent, params, rid=None):
         result = cr.err(intent, rid, "invalid_input", "unknown intent",
                         "Sorry, I can't do that.", spoken_text=None)
 
-    # Single TTS owner: speak via Speaker when spoken_text is present and conditions met
+    # Tell the interaction capability that this turn started media, so its reply clip does not
+    # replace the stream it is confirming (see InteractionCapability.note_playback).
+    if intent in ("radio", "music") and result.get("ok"):
+        md = result.get("metadata") or {}
+        if md.get("played") and md.get("uri"):
+            cap = CAPS.get("interaction")
+            zone = getattr(ctx.settings, "ceiling_entity", "") or ""
+            if cap is not None and zone and hasattr(cap, "note_playback"):
+                try:
+                    cap.note_playback(ctx, zone, md["uri"])
+                except Exception as e:
+                    LOG.warning("note_playback failed (%r)", e)
+
+    # Single TTS owner: speak via Speaker when spoken_text is present and conditions met.
+    # Exception: during a satellite turn the pipeline speaks the reply, so stand down (no double-speak).
     spk = result.get("spoken_text")
     if spk and ctx.speaker is not None:
-        if result.get("ok") or ctx.settings.announce_failures:
+        if _satellite_turn_in_flight(ctx):
+            LOG.info("req=%s ANNOUNCE suppressed: satellite turn in flight; the pipeline speaks the reply", rid)
+        elif result.get("ok") or ctx.settings.announce_failures:
             ctx.speaker.speak(spk)
 
     return result

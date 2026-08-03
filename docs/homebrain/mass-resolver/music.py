@@ -81,7 +81,9 @@ class MusicCapability(capability.Capability):
             pr = ma.play(ctx.settings.queue_id, hit["uri"])
             if pr and "error_code" in pr:
                 md["played"] = False
-                LOG.error("req=%s PLAY FAILED for %s", rid, hit["uri"])
+                LOG.error("req=%s PLAY FAILED for %s code=%s details=%r (MA refused the play; "
+                          "resolution was fine)", rid, hit["uri"], pr.get("error_code"),
+                          pr.get("details") or pr.get("error") or pr.get("message"))
                 return cr.err(self.name, rid, "play_failed", "play failed",
                               "I found " + hit["candidate"] + ", but couldn't start it.",
                               spoken_text="I found " + hit["candidate"] + ", but couldn't start playback.",

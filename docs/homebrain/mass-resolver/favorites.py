@@ -1,21 +1,56 @@
 #!/usr/bin/env python3
 # Match radio.json favorites by name/country/genre/language. Pure. Python 3.5 safe.
+import logging
 import config
-from match import match_rank
+from match import match_rank, compact
+
+LOG = logging.getLogger("resolver")
 
 
 def _st(fav):
     return {"name": fav.get("name"), "uri": fav.get("uri"), "source": "favorite"}
 
 
-def by_name(radio_cfg, query):
-    favs = config.favorites(radio_cfg)
+_MIN_ALIAS_KEY = 4          # shorter keys would collide with ordinary words inside a long query
+
+
+def resolve_alias(radio_cfg, query):
+    """Map a spoken/STT-mangled station name onto its canonical name via radio.json `aliases`
+    (returns the query unchanged when there is no alias). Exposed so the MA/RadioBrowser search
+    can use the SAME canonical name as the local favorites match -- otherwise an alias only ever
+    helps stations that happen to be listed in radio.json.
+
+    Matching is deliberately NOT whole-string equality. The assistant relays the transcription
+    verbatim, so the station argument arrives noisy and over-long -- spelled-out letters and all,
+    e.g. "Radio Norok N O R O C". An alias key is therefore looked for INSIDE the query, longest
+    key first so the most specific alias wins, and also against a compacted form so a spelled-out
+    "N O R O C" collapses to "noroc". Keys shorter than 4 chars are skipped: they would fire on
+    ordinary words."""
     aliases = (radio_cfg or {}).get("aliases", {})
     q = (query or "").strip()
-    aliases_lower = {}
+    if not q or not aliases:
+        return q
+    ql = q.lower()
+    lowered = {}
     for k, v in aliases.items():
-        aliases_lower[k.lower()] = v
-    target = aliases_lower.get(q.lower(), q)
+        lowered[k.lower()] = v
+    if ql in lowered:                       # exact alias, the cheap and unambiguous case
+        return lowered[ql]
+    qc = compact(ql)
+    for k in sorted(lowered.keys(), key=len, reverse=True):
+        kc = compact(k)
+        if len(kc) < _MIN_ALIAS_KEY:
+            continue
+        if k in ql or (kc and kc in qc):
+            LOG.info("radio alias matched %r inside %r -> %r", k, q, lowered[k])
+            return lowered[k]
+    return q
+
+
+def by_name(radio_cfg, query):
+    favs = config.favorites(radio_cfg)
+    q = (query or "").strip()
+    target = resolve_alias(radio_cfg, q)
     tl = target.strip().lower()
     out = []
     seen = set()

@@ -59,5 +59,53 @@ class FavoritesTest(unittest.TestCase):
         self.assertEqual(out[0]["uri"], "library://radio/8")
 
 
+class AliasResolutionTest(unittest.TestCase):
+    """The assistant relays the raw transcription as the station argument, so it arrives noisy and
+    over-long -- whole-string equality can never keep up. Live failures this covers:
+      target='Radio Norok N O R O C'  -> candidates=0
+      target='norok'                  -> candidates=0 (before aliases reached the MA search)"""
+
+    CFG = {"aliases": {"norok": "Radio Noroc Moldova",
+                       "noroc": "Radio Noroc Moldova",
+                       "radio noroc moldova": "Radio Noroc Moldova",
+                       "nashe": "Nashe Radio"},
+           "favorites": []}
+
+    def test_exact_alias(self):
+        self.assertEqual(favorites.resolve_alias(self.CFG, "norok"), "Radio Noroc Moldova")
+
+    def test_alias_found_inside_a_noisy_transcription(self):
+        self.assertEqual(favorites.resolve_alias(self.CFG, "Radio Norok N O R O C"),
+                         "Radio Noroc Moldova")
+
+    def test_spelled_out_letters_collapse(self):
+        # "N O R O C" compacts to "noroc"
+        self.assertEqual(favorites.resolve_alias(self.CFG, "play N O R O C please"),
+                         "Radio Noroc Moldova")
+
+    def test_longest_alias_key_wins(self):
+        self.assertEqual(favorites.resolve_alias(self.CFG, "radio noroc moldova"),
+                         "Radio Noroc Moldova")
+
+    def test_unrelated_query_is_untouched(self):
+        for q in ("smooth jazz", "rock", "play some rock music", "europa plus"):
+            self.assertEqual(favorites.resolve_alias(self.CFG, q), q)
+
+    def test_rock_is_never_hijacked_by_a_noroc_alias(self):
+        # "rock" is a real genre synonym; aliasing it would break every genuine rock request.
+        cfg = dict(self.CFG)
+        cfg["aliases"] = dict(self.CFG["aliases"]); cfg["aliases"]["no rock"] = "Radio Noroc Moldova"
+        self.assertEqual(favorites.resolve_alias(cfg, "rock"), "rock")
+        self.assertEqual(favorites.resolve_alias(cfg, "play rock"), "play rock")
+
+    def test_short_keys_do_not_fire_inside_words(self):
+        cfg = {"aliases": {"fm": "Some FM"}, "favorites": []}
+        self.assertEqual(favorites.resolve_alias(cfg, "confirmation station"), "confirmation station")
+
+    def test_no_aliases_or_empty_query(self):
+        self.assertEqual(favorites.resolve_alias({"favorites": []}, "anything"), "anything")
+        self.assertEqual(favorites.resolve_alias(self.CFG, ""), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
