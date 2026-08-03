@@ -900,8 +900,10 @@ class DuckOwnershipSlice4Test(unittest.TestCase):
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertFalse(r["ok"])
         self.assertNotIn(zone, cap._replies)                     # ownership handed back
-        # the abort path put the zone back on the baseline itself...
-        self.assertAlmostEqual(ha.calls[-1][2]["volume_level"], 0.32)
+        # the abort path put the zone back on the baseline itself (a trailing un-pause may follow,
+        # so look for the restore rather than assuming it is the last call)...
+        vol_calls = [c for c in ha.calls if c[1] == "volume_set"]
+        self.assertAlmostEqual(vol_calls[-1][2]["volume_level"], 0.32)
         # ...and the snapshot it left behind is reconcilable: target tracks what was really written,
         # so the dead-man restores the baseline instead of claiming user_override.
         ha._state = playing(0.32)
@@ -1471,6 +1473,74 @@ class FinishPollCutOffTest(unittest.TestCase):
         ])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertTrue(r["metadata"]["reply_started"])
+
+
+class ReplyBumpTest(unittest.TestCase):
+    """OPERATOR REPORT: "a slight bump before the announcement -- the volume jumps up for a sec".
+
+    _say raised the volume to reply_volume BEFORE the clip replaced the stream, so the ~1s of
+    still-playing (ducked) music was played at 0.60. Silence the outgoing music first and the raise
+    cannot be heard."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+
+    def _states(self):
+        return [playing_with_id(0.15, "library://radio/2"),      # capture: music playing
+                playing_with_id(0.60, self.reply_mid),           # start-poll
+                idle_state(), idle_state(),                      # end (debounce)
+                playing(0.60)]                                   # restore-step read
+
+    def test_music_is_silenced_before_the_volume_is_raised(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states(self._states())
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        order = [c[1] for c in ha.calls]
+        self.assertIn("media_pause", order)
+        self.assertLess(order.index("media_pause"), order.index("volume_set"))   # pause BEFORE raise
+        self.assertLess(order.index("volume_set"), order.index("play_media"))    # raise before clip
+
+    def test_no_pause_when_nothing_was_playing(self):
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ha.set_states([idle_state(), playing_with_id(0.60, self.reply_mid),
+                       idle_state(), idle_state(), playing(0.60)])
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertNotIn("media_pause", [c[1] for c in ha.calls])
+
+    def test_flag_off_keeps_the_old_order(self):
+        class NoPause(FakeSettings):
+            say_pause_before_reply = False
+        cap = self._cap()
+        ha = FakeHA(); ctx = FakeCtx(ha)
+        ctx.settings = NoPause()
+        ha.set_states(self._states())
+        run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertNotIn("media_pause", [c[1] for c in ha.calls])
+
+    def test_if_the_clip_never_goes_out_the_music_is_un_paused(self):
+        # Otherwise silencing the music would leave the zone silent with nothing replayed.
+        cap = self._cap()
+        ha = FakeHA(playing(0.15)); ctx = FakeCtx(ha)
+        real = ha.call_service_rest
+
+        def boom(domain, service, data, timeout=None):
+            if service == "play_media":
+                raise IOError("MA refused")
+            real(domain, service, data)
+        ha.call_service_rest = boom
+        ha.set_states([playing_with_id(0.15, "library://radio/2")])
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertFalse(r["ok"])
+        self.assertIn("media_play", [c[1] for c in ha.calls])       # un-paused on the way out
 
 
 if __name__ == "__main__":

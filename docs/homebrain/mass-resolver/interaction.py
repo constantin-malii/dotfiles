@@ -506,6 +506,8 @@ class InteractionCapability(capability.Capability):
         owns_restore = bool(getattr(ctx.settings, "say_owns_restore", True))
         pending_restore = [False]               # True once the zone sits at reply_volume and we still
                                                # owe it a restore (list: rebound in the finally block)
+        paused_by_us = [False]                  # we silenced the outgoing music before raising volume
+        play_issued = [False]                   # the reply play_media actually went out
         try:
             # 3. normalise the reply URI to the MA-reachable internal base
             norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
@@ -520,7 +522,18 @@ class InteractionCapability(capability.Capability):
                      rid, zone, clip, baseline, prev_volume, reply_volume)
             self._warn_if_double_speak(ctx, zone, rid, clip)
 
-            # 4. set reply volume, then 5. play_media (reply)
+            # 4. set reply volume, then 5. play_media (reply).
+            #    Raising the volume BEFORE the clip replaces the stream means the ~1s of still-playing
+            #    (ducked) music gets played at reply_volume -- the audible "bump" the operator hears
+            #    just before every announcement. Silence the outgoing music first so the raise cannot
+            #    be heard. The queue is replaced by the clip anyway, and the source is replayed at the
+            #    end either way, so this costs nothing extra.
+            if was_playing and bool(getattr(ctx.settings, "say_pause_before_reply", True)):
+                try:
+                    self._say_call(ctx, rid, zone, "media_player", "media_pause", {"entity_id": zone})
+                    paused_by_us[0] = True
+                except Exception:
+                    pass                        # best-effort: a failed pause only costs us the bump
             self._say_call(ctx, rid, zone, "media_player", "volume_set",
                            {"entity_id": zone, "volume_level": reply_volume})
             pending_restore[0] = True
@@ -537,6 +550,7 @@ class InteractionCapability(capability.Capability):
             # aborts the turn while the clip still starts server-side (audible, unsequenced).
             self._say_call(ctx, rid, zone, "music_assistant", "play_media",
                            {"entity_id": zone, "media_id": norm_uri}, timeout=call_timeout)
+            play_issued[0] = True
 
             # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
             reply_started = False
@@ -675,4 +689,12 @@ class InteractionCapability(capability.Capability):
                 except Exception as e:
                     LOG.error("SAY req=%s zone=%s abort-restore failed (%r); dead-man must reconcile",
                               rid, zone, e)
+            # If we silenced the music and the clip never went out, un-pause it: the queue still holds
+            # the music, so this restores the zone rather than leaving it silent.
+            if paused_by_us[0] and not play_issued[0] and not superseded():
+                try:
+                    ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+                    LOG.warning("SAY req=%s zone=%s reply never issued; un-paused the source", rid, zone)
+                except Exception as e:
+                    LOG.error("SAY req=%s zone=%s un-pause failed (%r)", rid, zone, e)
             release_reply()

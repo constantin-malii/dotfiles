@@ -72,6 +72,9 @@ class Settings(object):
         # reply finished. Too short cuts replies off; unbounded holds the zone at reply volume for the
         # whole say_reply_timeout_ms.
         self.say_blank_cid_grace_ms = int(cfg.get("say_blank_cid_grace_ms", 4000))
+        # Silence the outgoing music before raising to reply_volume, so the raise is not heard as a
+        # "bump" on the ~1s of music still playing before the clip replaces the stream.
+        self.say_pause_before_reply = bool(cfg.get("say_pause_before_reply", True))
 
 
 def load_settings(here):
