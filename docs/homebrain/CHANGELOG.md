@@ -3,6 +3,62 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-03 — Assist SPLIT into control + knowledge agents (2nd wake word, web search, tool-isolated) · long replies allowed · pre-announcement bump fixed
+
+> **ADR:** [`2026-08-03-agent-split-routing-adr.md`](./2026-08-03-agent-split-routing-adr.md). Config only —
+> **no firmware**, no resolver code for the split itself. Slot 2 was already wired in the running firmware
+> (`wake_word_2` / `assistant_2` existed), so the OTA gate stayed closed.
+
+- **Why:** the single agent could not answer live-data questions (*"I can't check the weather for Calgary right
+  now"*) while happily answering *"100 EUR in CAD"* from training knowledge — static knowledge vs live data,
+  not a defect. Enabling web search on **that** agent would have put untrusted web text in the same agent that
+  **controls the house**, which is the combination that makes prompt injection actually dangerous.
+- **Shipped:**
+
+  | | Control | Knowledge |
+  |---|---|---|
+  | Wake word | **Okay Nabu** | **Hey Jarvis** (slot 2) |
+  | Pipeline | `Living Room ChatGPT` `01kxygpr39jas5hgsf28cph108` | `Living Room Knowledge` `01kz45tkgbnsn57gpyj25vyfd0` |
+  | Agent | `conversation.openai_conversation` (gpt-4o-mini) | `conversation.openai_conversation_2` (gpt-4o) |
+  | prefer-local | true | **false** (wake word alone picks the layer) |
+  | House tools | **yes** (Assist) | **none** |
+  | Web search | off | **on** · Medium · links **off** · home location **off** |
+
+- **VERIFIED live — tool isolation is the load-bearing check.** Same question to both:
+  `KNOWLEDGE → "I can't check what's playing on the ceiling speakers… ask the main assistant"` ·
+  `CONTROL → "Nothing is playing right now."` And the knowledge agent returned **today's** Calgary forecast,
+  so web search genuinely works. **No new exposure**; `expose_new_entities` still off; the knowledge agent has
+  no LLM API at all, so `assistant-capabilities.md` needs no change.
+- **`gpt-4o-mini` cannot do web search** — HA hides the option for it. The knowledge agent runs **gpt-4o**;
+  the control agent stays on mini, so the expensive model only serves the rare question.
+- **Spoken-output caveat (prompt, not code):** the first live web answer came back as markdown headings + an
+  hourly bullet list in Fahrenheit — unusable through a speaker. The knowledge agent's instructions must forbid
+  markdown/lists/URLs and prefer metric.
+- **Long replies now allowed (resolver):** `say_reply_timeout_ms` 30000 → **180000** (~400 spoken words) and
+  `say_blank_cid_grace_ms` 4000 → **8000**. At 30 s the poll truncated a long answer and replayed the music
+  over its tail. The reply-marker staleness budget and the deferred restore derive from this value, so they
+  widened automatically.
+- **Pre-announcement volume "bump" fixed (resolver):** `_say` raised the volume to `reply_volume` **before**
+  the clip replaced the stream, so the ~1 s of still-playing *ducked music* was played at 0.60 — the jump the
+  operator heard. `_say` now pauses the zone first (when something was playing), so the raise is inaudible; if
+  the clip then never goes out, the `finally` un-pauses. Reversible via `say_pause_before_reply=false`.
+  **Not fixed (inherent):** the short gap before music returns is the source **replay** — a radio stream must
+  reconnect. Removing it needs an *overlay* reply, and the overlay path is deterministically silent on this
+  player (CHANGELOG 2026-07-17).
+- **Old open item CLOSED — the "mysterious external writer" dropping the ceiling to 0.04 was not mysterious.**
+  Repeated 10 % volume-down steps from ~0.44 land exactly on 0.04, then 0.0. It was accumulated volume
+  commands (including an agent probe that fired five in a row on a live speaker).
+- **`weather.forecast_home` is Calgary.** Home is lat 50.8898 / lon −114.0179; the entity is merely *named*
+  "Forecast Home", which is why "weather in Calgary" found no device. An **alias** "Calgary" on that entity
+  would answer it locally, deterministically, with no egress — **proposed, not applied** (exposure-adjacent).
+- **Still pending (not applied):** the extra volume phrasings (`lower the volume`, `turn down the volume`,
+  `decrease the volume`) — generated and validated at `/tmp/new_vcs2.json` on the host, blocked on HA's
+  automation-config endpoint timing out repeatedly. Until applied, use **"volume down" / "turn it down" /
+  "quieter" / "turn the volume down"**, which all work.
+- **Restart pending:** the bump fix and the long-reply timeout are deployed to the host but inactive until
+  `sudo systemctl restart mass-resolver`.
+- **Tests:** 326 local / 229 host.
+
 ## 2026-08-02 — THE reason voice `volume up` / `stop` kept failing: `automation.voice_ceiling_speakers` (prefer-local sentence layer) bypassed every script fix. Rerouted through the resolver (HA-live)
 
 > **Read this before touching ceiling volume/stop/resume again.** Under **`prefer_local`**, the Phase-2

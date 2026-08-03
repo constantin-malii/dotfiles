@@ -34,10 +34,17 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - **Music Assistant:** add-on `d5369777_music_assistant` **v2.9.3**, UI/API at `http://192.168.1.104:8095`. Plays to **ceiling speakers** via a **Squeezelite** systemd service on the host (`squeezelite-ceiling.service`, ALSA `hw:1,0`).
 - **Audio path:** MA (VM) → SlimProto/HTTP stream over NAT `192.168.122.10` → Squeezelite (host) → ceiling speakers.
 - **Voice satellite (2026-07-14):** `reSpeaker Living Room` — Seeed **reSpeaker XVF3800 + XIAO ESP32-S3**,
-  ESPHome (formatBCE firmware), on-device wake word **"Okay Nabu"**, LAN Wi-Fi. Entities
+  ESPHome (formatBCE firmware), LAN Wi-Fi. Entities
   `assist_satellite.respeaker_living_room_assist_satellite` + `media_player.respeaker_living_room_media_player`.
-  Uses a dedicated **"Living Room Voice"** pipeline (Whisper STT + Piper TTS). **No built-in speaker** (3.5mm /
-  JST). See `CHANGELOG.md` 2026-07-14. (Not yet assigned to an HA area.)
+  **No built-in speaker** (3.5mm / JST) — **all** replies play on the **ceiling** via the resolver. See
+  `CHANGELOG.md` 2026-07-14. (Not yet assigned to an HA area.)
+- **Two wake words, two agents (2026-08-03 — see the agent-split ADR):**
+  - **"Okay Nabu"** → pipeline **Living Room ChatGPT** → prefer-local intents first, then
+    `conversation.openai_conversation` (gpt-4o-mini) **with** house tools, **no** web. ← house control
+  - **"Hey Jarvis"** → pipeline **Living Room Knowledge** → `conversation.openai_conversation_2` (gpt-4o)
+    **with web search**, **no tools/entities**, prefer-local **off**. ← questions / live data
+  Never give the control agent web access, and never give the knowledge agent tools — that separation is the
+  whole security argument (`2026-08-03-agent-split-routing-adr.md`).
 - **HA Internal URL:** `http://192.168.1.104:8123` (LAN) — set 2026-07-14. Previously auto-detected to the NAT
   IP `192.168.122.10:8123`, which LAN devices (phone/satellite) can't reach.
 
@@ -81,10 +88,21 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
 - **Player:** `media_player.ceiling_speakers` = MA **Universal player** `upf8b156c25101`. Child **Squeezelite protocol player** `f8:b1:56:c2:51:01` (type=protocol, provider=squeezelite) — **no queue, not an HA entity**; you cannot play to it directly / bypass the Universal player.
 - **Config entries:** Music Assistant `01KVPNW1JFHJG30NANAPVARHY8`; OpenAI Conversation `01KVRQW1ERJGJDRPC4MEF7206A`.
-- **Assist pipelines:** default/preferred **"Home Assistant"** `01kvpdchwfeh0wa8p7d4bcywj4` (deterministic, STT=faster-whisper, TTS off); **"ChatGPT"** `01kvs55xvmsz0yy27hj7bkaygg` (OpenAI, opt-in).
-- **Conversation agents:** `conversation.home_assistant`, `conversation.openai_conversation` (gpt-4o-mini).
+- **Assist pipelines:** default/preferred **"Home Assistant"** `01kvpdchwfeh0wa8p7d4bcywj4` (deterministic, STT=faster-whisper, TTS off); **"ChatGPT"** `01kvs55xvmsz0yy27hj7bkaygg` (OpenAI, opt-in); **"Living Room ChatGPT"** `01kxygpr39jas5hgsf28cph108` (satellite slot 1, prefer-local ON); **"Living Room Knowledge"** `01kz45tkgbnsn57gpyj25vyfd0` (satellite slot 2, prefer-local OFF).
+- **Conversation agents:** `conversation.home_assistant`; `conversation.openai_conversation` (gpt-4o-mini, **tools**, no web); `conversation.openai_conversation_2` (gpt-4o, **web search**, **no tools**).
+- **⚠ The exposed `script.*` surface is NOT the only path to the ceiling.** With `prefer_local_intents` on,
+  **`automation.voice_ceiling_speakers`** (Phase-2 sentence triggers) gets **first refusal** on "stop",
+  "resume", "volume up/down", "set volume" — so a fix applied only to the scripts is **invisible to voice**.
+  This cost several rounds of debugging on 2026-08-02. Both paths now route through the resolver
+  (`interaction` modes `resume` / `volume_up` / `volume_down` / `set_volume`); keep them in step.
+  Phrasing is exact-match: "turn **the volume** down" works, "turn **down the volume**" does not.
 - **ChatGPT-exposed media tools (resolver-backed — F1-R hard tool return):** `script.play_music` (local library), `script.play_radio` (radio), `script.find_stations` (station list). See the **Resolver / Inc 0–1 / F1-R current state** section.
 - **Local ceiling control / fast-phrase layer (`script.ceiling_*`):** `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS primitive, **not** LLM-exposed), plus the legacy `ceiling_play_radio` (kept for the deterministic sentence-trigger layer; **un-exposed** to ChatGPT).
+  **Rewired 2026-08-02:** `stop` → `media_pause` (**never** `media_stop` — it wedges the Squeezelite child and
+  holds MA's playback lock); `resume` → resolver `interaction:resume` (replays the last **real** source, since
+  `media_play` cannot restart a cleared radio queue and would otherwise replay a spent TTS clip);
+  `volume_up`/`volume_down`/`set_volume` → resolver volume modes, which move the **duck baseline** while a turn
+  is ducked (writing the player directly computed the step from the 0.15 floor, and the restore then wiped it).
 - **Automations:** `automation.voice_ceiling_speakers` (phone voice handler — don't modify casually); `automation.ma_auto_reload_integration_after_restart` (A1); `automation.ma_health_probe_auto_reload` (A2a).
 
 ---
@@ -227,6 +245,8 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 | **Ceiling TTS via explicit `tts.speak`, not the pipeline** | The pipeline TTS is off (Piper); explicit `tts.speak` to `media_player.ceiling_speakers` works because the **host** can fetch the NAT-IP TTS URL. `script.ceiling_announce` is the reusable primitive (kept un-exposed to the LLM). |
 | **Auto-reload automations (A1 + A2a) exist** | The HA↔MA integration drops its connection (internal DNS) and doesn't auto-reconnect — it sits silently dead until a config-entry reload. A1 covers restart drops; A2a's active probe covers silent drops. Both reload the entry to self-heal, with debounce/cooldown to avoid loops. |
 | **`http_profile` left at `no_content_length`** | No value fixes both play and stop: `chunked` breaks streaming on HTTP/1.0; `forced_content_length` still wedges. `no_content_length` is the baseline that at least plays. |
+| **Control and knowledge agents are SPLIT (2026-08-03)** | Web search belongs on an agent with **no** house tools: untrusted web text + ability to act is what makes prompt injection consequential. "Okay Nabu" = tools, no web (prefer-local first). "Hey Jarvis" = web, no tools. Inverting to LLM-first was rejected — it trades a safe failure ("didn't understand") for an unsafe one (wrong action), adds LLM latency to every command, and breaks house control when the internet does. ADR: `2026-08-03-agent-split-routing-adr.md`. |
+| **The resolver owns ceiling volume, not the player** | While a turn is ducked the live volume IS the 0.15 floor, so any relative step computed from it lands wrong and the restore then wipes it. Volume commands therefore move the **duck baseline** and take effect when the turn ends. Both the LLM script path and the prefer-local sentence automation route through the resolver — fixing only one is invisible to the other. |
 | **NAT NIC + host Squeezelite for the ceiling zone** | macvtap isolates host↔VM; a reversible second NAT NIC (`192.168.122.10`) lets the host reach MA's stream server. Host Squeezelite drives the analog `hw:1,0` ceiling speakers (no desktop/PulseAudio, exclusive ALSA). |
 
 ---
