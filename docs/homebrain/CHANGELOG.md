@@ -3,6 +3,50 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-08-02 — THE reason voice `volume up` / `stop` kept failing: `automation.voice_ceiling_speakers` (prefer-local sentence layer) bypassed every script fix. Rerouted through the resolver (HA-live)
+
+> **Read this before touching ceiling volume/stop/resume again.** Under **`prefer_local`**, the Phase-2
+> sentence-trigger automation gets **first refusal** on these phrasings — so it, **not** the exposed
+> `script.ceiling_*`, is what actually handled them by voice. Fixing the scripts (earlier today) had
+> **no effect on the operator's actual commands**. Snapshot: `/tmp/vcs_SNAPSHOT.json` on the host.
+
+- **Decisive evidence** (local agent, via `/api/conversation/process`):
+  `'volume up'` → `action_done "Turning it up."` · `'turn it up'` → handled · `'louder'` → handled ·
+  `'volume down'` → handled · **`'increase the volume'` → `error "couldn't understand"`**. So the
+  sentence layer swallowed the phrasings that failed, while the one that *worked* was the one it did
+  **not** match (it fell through to the LLM → `script.ceiling_volume_up` → resolver). Exactly the
+  operator's report: *"volume up did not work, increase volume seems to have worked."*
+- **What its branches did** — the same defects already fixed in the scripts, one layer up:
+  `stop` → **`media_player.media_stop`** (the call `ONBOARDING.md` forbids: wedges the Squeezelite
+  child, holds MA's lock) · `volume up/down/set` → `volume_set` computed from
+  `state_attr(…,'volume_level')`, i.e. **the duck floor mid-turn**, so the step came off 0.15 and the
+  restore then wiped it (`DUCK 0.25 -> 0.15` → *"up"* ending LOWER) · `resume` →
+  `media_player.media_play`, which cannot restart a cleared radio queue.
+- **Rerouted (5 branches):** `stop` → **`media_pause`** (equivalent, no wedge; a resolver `pause` mode
+  would have been pure indirection) · `resume` → resolver `resume` · `volume_up`/`volume_down` →
+  resolver modes with the existing `step` · `vol_set` → resolver with the mode chosen from the
+  branch's own `dir` variable, preserving up/down/absolute. **Untouched:** all 7 triggers, every
+  `set_conversation_response`, and the `variables` blocks doing HA's spoken-number parsing — the
+  transform asserts these are intact, plus "no `media_stop`" and "no direct `volume_set`" remain.
+- **VERIFIED live** through the real prefer-local path: `'volume up'` → `VOLUME volume_up: -> 0.64`,
+  `'volume down'` → `-> 0.54`, `'set the volume to 40 percent'` → `set_volume: -> 0.4`, ceiling
+  `playing 0.4`. Previously these produced **no resolver line at all**.
+- **Lesson for the record:** the exposed `script.*` surface is **not** the only path to the ceiling.
+  `prefer_local` means the sentence automation wins for any phrasing it matches, so a fix applied only
+  to the scripts is invisible to voice. Any future ceiling-control change must cover **both**.
+- **Same round, resolver-side** (deployed, restart 17:57:50, host suite 225 OK): `_resume` now marks
+  the turn via `note_playback` — it started playback but did not, so the reply clip **replaced the
+  station resume had just started** (`RESUME replaying library://radio/2` → `SAY start` 1 s later →
+  zone left idle on a TTS clip: the operator's *"blipped but hearing nothing"*). The blank-`cid`
+  tolerance is now bounded by **`say_blank_cid_grace_ms` (4000)** — unbounded, it held the zone at
+  reply volume for the whole 30 s `say_reply_timeout_ms`, with wake words bouncing off
+  `DUCK skipped: reply active`. And `status` no longer reports the assistant's own clip as the user's
+  music at `reply_volume` (*"Something is playing at 60% volume"* → *"that is my own reply playing"*,
+  volume suppressed).
+- **Agent live side effects, disclosed:** the branch verification set the ceiling to **0.40**; an
+  earlier direct script test left it at 0.45.
+- **Tests:** 322 local / 225 host.
+
 ## 2026-08-02 — Reply CUT-OFFS root-caused (empty `media_content_id`) · stop/resume/volume rerouted off the wedging + ducked paths (5 HA scripts, HA-live) · all VERIFIED live
 
 > **First HA-live changes in this branch.** Five exposed scripts edited via the HA config API
