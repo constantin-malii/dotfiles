@@ -96,6 +96,12 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   This cost several rounds of debugging on 2026-08-02. Both paths now route through the resolver
   (`interaction` modes `resume` / `volume_up` / `volume_down` / `set_volume`); keep them in step.
   Phrasing is exact-match: "turn **the volume** down" works, "turn **down the volume**" does not.
+- **To see what the assistant actually heard and chose**, use the **HA assist-pipeline debug traces** (WS
+  `assist_pipeline/pipeline_debug/list` + `…/get`, pipeline `01kxygpr39jas5hgsf28cph108`): per-turn STT text →
+  agent/tool → TTS. `resolver.log` only shows turns that **reached** the resolver, so a mis-selected tool or a
+  garbled transcription is invisible there — several 2026-08-02 puzzles ("volume up" doing nothing, the wrong
+  station) had to be inferred from `last_triggered` instead. Use the traces first. (Per the 2026-08-01 notes;
+  `openai_conversation` debug logging is also on.)
 - **ChatGPT-exposed media tools (resolver-backed — F1-R hard tool return):** `script.play_music` (local library), `script.play_radio` (radio), `script.find_stations` (station list). See the **Resolver / Inc 0–1 / F1-R current state** section.
 - **Local ceiling control / fast-phrase layer (`script.ceiling_*`):** `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS primitive, **not** LLM-exposed), plus the legacy `ceiling_play_radio` (kept for the deterministic sentence-trigger layer; **un-exposed** to ChatGPT).
   **Rewired 2026-08-02:** `stop` → `media_pause` (**never** `media_stop` — it wedges the Squeezelite child and
