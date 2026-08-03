@@ -49,7 +49,11 @@ class Settings(object):
         # S1b-2 say: play_media reply route (play_announcement retired — silent on this player)
         self.reply_volume = float(cfg.get("reply_volume", 0.40))                 # ceiling volume for the reply clip
         self.say_start_timeout_ms = int(cfg.get("say_start_timeout_ms", 5000))   # max wait for the clip to START playing
-        self.say_reply_timeout_ms = int(cfg.get("say_reply_timeout_ms", 30000))  # max wait for the clip to FINISH
+        # Max wait for the clip to FINISH. Sized for the knowledge agent, which is allowed to give
+        # longer answers: at 30s a long reply was truncated mid-sentence by the restore+replay.
+        # ~180s covers roughly 400 spoken words. The reply-marker staleness budget and the deferred
+        # restore both derive from this value, so they widen with it automatically.
+        self.say_reply_timeout_ms = int(cfg.get("say_reply_timeout_ms", 180000))
         self.say_poll_ms = int(cfg.get("say_poll_ms", 500))                      # poll interval
         self.say_internal_base = cfg.get("say_internal_base", "192.168.122.10:8123")  # MA-reachable base for reply URI
         self.say_owns_restore = bool(cfg.get("say_owns_restore", True))          # _say restores pre-duck baseline
@@ -71,7 +75,10 @@ class Settings(object):
         # How long to tolerate MA reporting an EMPTY media_content_id mid-clip before concluding the
         # reply finished. Too short cuts replies off; unbounded holds the zone at reply volume for the
         # whole say_reply_timeout_ms.
-        self.say_blank_cid_grace_ms = int(cfg.get("say_blank_cid_grace_ms", 4000))
+        # A longer reply gives MA more opportunity to report an empty media_content_id mid-clip, so
+        # the tolerance is wider than the 4s that sufficed for short replies -- too short and a long
+        # answer gets cut at the first sustained blank.
+        self.say_blank_cid_grace_ms = int(cfg.get("say_blank_cid_grace_ms", 8000))
         # Silence the outgoing music before raising to reply_volume, so the raise is not heard as a
         # "bump" on the ~1s of music still playing before the clip replaces the stream.
         self.say_pause_before_reply = bool(cfg.get("say_pause_before_reply", True))

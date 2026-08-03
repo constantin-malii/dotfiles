@@ -71,12 +71,13 @@ class SayTunablesTest(unittest.TestCase):
         s = config.Settings({})
         self.assertAlmostEqual(s.reply_volume, 0.40)
         self.assertEqual(s.say_start_timeout_ms, 5000)
-        self.assertEqual(s.say_reply_timeout_ms, 30000)
+        self.assertEqual(s.say_reply_timeout_ms, 180000)   # long knowledge-agent replies
         self.assertEqual(s.say_poll_ms, 500)
         self.assertEqual(s.say_internal_base, "192.168.122.10:8123")
         self.assertTrue(s.say_owns_restore)
         self.assertEqual(s.say_call_timeout_ms, 20000)      # MA play_media outruns the 5s REST default
         self.assertEqual(s.say_double_speak_window_ms, 8000)
+        self.assertEqual(s.say_blank_cid_grace_ms, 8000)
         self.assertTrue(s.suppress_announce_during_interaction)
         self.assertEqual(s.interaction_turn_window_ms, 30000)
 
