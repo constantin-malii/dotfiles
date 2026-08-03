@@ -59,9 +59,48 @@ design live in the per-topic docs; this log is for discrete operational changes.
   `decrease the volume`) — generated and validated at `/tmp/new_vcs2.json` on the host, blocked on HA's
   automation-config endpoint timing out repeatedly. Until applied, use **"volume down" / "turn it down" /
   "quieter" / "turn the volume down"**, which all work.
-- **Restart pending:** the bump fix and the long-reply timeout are deployed to the host but inactive until
-  `sudo systemctl restart mass-resolver`.
+- **Restart DONE (10:28:25) — everything above is live.** Post-restart verified: resolver `active`, `/command`
+  bound, `200/401`, **zero tracebacks**, and the running `config.json` carries `say_reply_timeout_ms=180000`,
+  `say_blank_cid_grace_ms=8000`, `say_pause_before_reply=true`.
 - **Tests:** 326 local / 229 host.
+- **Integrated:** PR **#35** merged → `main` `3c23575`; worktree removed, branch deleted. The merge pulled in
+  PR #34 (the 2026-08-01 troubleshooting notes below) — both changelog sides were kept, and reading them forced
+  the 0.04 correction above.
+- **Live gates RELEASED → FREE.** This work claimed **HA-live** (6 ceiling scripts + `automation.voice_ceiling_
+  speakers` + the agent split) and the **resolver deploy**. All of it is merged, deployed and verified live, so
+  the gate is free for the next item. *(Say otherwise if you'd rather hold it.)*
+
+### Handoff — where Slice 5 should start
+
+**Do first (small, both known):**
+1. **Knowledge-agent instructions** — currently unconstrained, so live web answers come back as markdown
+   headings + hourly bullet lists in Fahrenheit, which Piper reads aloud verbatim. Needs: no markdown/lists,
+   no URLs, metric, 1–2 sentences by default. Prompt-only change on `conversation.openai_conversation_2`.
+2. **Volume phrasings** — `lower the volume` / `turn down the volume` / `decrease the volume` reach nothing
+   (the first is swallowed by an HA **built-in** intent looking for a device named "volume"). Generated and
+   validated at `/tmp/new_vcs2.json` on the host; blocked purely on HA's automation-config endpoint timing out.
+   Working today: **"volume down" / "turn it down" / "quieter" / "turn the volume down"**.
+
+**Open, none blocking:**
+- **0.04 crater — partially explained only** (see above). Second source unidentified; the zone self-heals now.
+- **MA transient `RADIO PLAY FAILED code=2`** after an ~11 s stall — the documented playback-lock family.
+  `RADIO CONFIRM` + the new `details=` logging will now name it when it recurs.
+- **Two Assist turns ~1 s apart** ("multiple voices") — different clip fingerprints, so two genuine turns, not
+  one event twice. Upstream wake-retrigger / pipeline re-listen. Satellite ruled out (single slot at the time,
+  no speaker attached).
+- **LLM tool mis-selection** (e.g. volume requests landing on `ceiling_pause`). `openai_conversation` debug
+  logging is **on**; use the assist-pipeline traces, not `resolver.log`. Lowering the control agent's
+  **temperature from 1 → ~0.2** is the obvious untried lever for determinism (NL-01).
+- **`_restore` stale-read** — a sub-second duck→restore reads the pre-duck value, calls it `user_override` and
+  pops the snapshot, leaving the zone at the floor **with no dead-man**. Only reproducible by an agent probe;
+  real turns are seconds apart. Fix would be to treat "already at baseline" as *already restored*.
+- **Proposed, not applied:** alias **"Calgary"** on `weather.forecast_home` (home *is* Calgary — lat 50.8898 /
+  lon −114.0179), so "weather in Calgary" answers locally with no egress. Exposure-adjacent → needs approval.
+- **S1a grace-G never applied.** Slice 4 specified repurposing `idle→restore` into a grace-G backstop; making
+  the resolver the single writer achieved decision (b) without touching the automation, so it was deliberately
+  skipped. Revisit only if `say_owns_restore` is ever set false.
+- **Slice 5 scope grew:** E2E sign-off should now cover the **agent split** (both wake words, tool isolation)
+  and the rerouted stop/resume/volume paths — not just the reply route.
 
 ## 2026-08-02 — THE reason voice `volume up` / `stop` kept failing: `automation.voice_ceiling_speakers` (prefer-local sentence layer) bypassed every script fix. Rerouted through the resolver (HA-live)
 
