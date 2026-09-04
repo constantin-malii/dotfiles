@@ -51,6 +51,30 @@ updates-apply --os       # also offers to install pending Windows Updates (eleva
 
 Windows Updates are opt-in via `--os` and always require an elevated terminal — OS-level updates can trigger a reboot, so they're excluded by default even with `--yes` unless `--os` is also passed.
 
+## Rollback safety
+
+Before touching anything, `updates-apply` tries to create a **System Restore point** (requires an elevated shell). If it succeeds, one command undoes the whole batch:
+
+```powershell
+rstrui.exe                              # interactive restore UI
+# or
+Get-ComputerRestorePoint                # find the sequence number
+Restore-Computer -RestorePoint <seq>    # non-interactive, will reboot
+```
+
+Caveats:
+- Requires elevation. Running `updates-apply` from a non-elevated shell skips the restore point and proceeds anyway (with a warning) — re-run elevated if you want the safety net.
+- Windows throttles restore-point creation to once per 24 hours by default. A second run the same day may silently reuse/skip — check `Get-ComputerRestorePoint` if unsure one was actually made.
+- System Restore mainly covers system files, registry, and installed programs — it does not reliably undo Windows Update installations. Use the per-source rollback below for anything restore doesn't catch.
+
+**Per-source manual rollback**, if restore isn't available or doesn't cover it:
+
+| Source | Rollback |
+|---|---|
+| Choco | `choco install <pkg> --version=<old-version>` (downgrade, if the old version is still in the source cache) |
+| Winget | No built-in downgrade — reinstall the specific older version manually: `winget install <id> --version <old-version>` (only works if that version is still published) |
+| Windows Update | `Get-WUHistory` to find the KB, then `wusa /uninstall /kb:<number>` or `Remove-WindowsUpdate -KBArticleID <number>` (from `PSWindowsUpdate`) |
+
 ## Scope / limitations
 
 - **`updates` / `updates-full` never install anything** — report only. Use `updates-apply` to actually apply winget/choco updates, or update by hand (`winget upgrade <id>`, `choco upgrade <id>`, Windows Update, or the app's own updater).

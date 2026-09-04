@@ -28,6 +28,28 @@ section() {
     echo "== $1 =="
 }
 
+section "System Restore point"
+if command -v powershell.exe >/dev/null 2>&1; then
+    powershell.exe -NoProfile -Command '
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Write-Output "  Skipped: requires an elevated (Run as Administrator) shell to create a restore point."
+            Write-Output "  Proceeding WITHOUT a rollback point. Re-run elevated for a safety net."
+        } else {
+            try {
+                Enable-ComputerRestore -Drive "C:\" -ErrorAction Stop
+                Checkpoint-Computer -Description "Before updates-apply ($(Get-Date -Format s))" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+                Write-Output "  Restore point created. To roll back: rstrui.exe, or Restore-Computer -RestorePoint <seq>"
+            } catch {
+                Write-Output "  Could not create a restore point: $($_.Exception.Message)"
+                Write-Output "  Proceeding WITHOUT a rollback point."
+            }
+        }
+    ' 2>&1 | sed 's/\r$//'
+else
+    echo "  powershell.exe not found; proceeding without a rollback point."
+fi
+
 section "Winget apps"
 if command -v powershell.exe >/dev/null 2>&1; then
     if confirm "Run 'winget upgrade --all'?"; then
