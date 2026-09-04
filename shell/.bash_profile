@@ -394,6 +394,7 @@ alias sc='shellcheck'
 # Check for OS, winget, choco, and Claude Code plugin updates in one place
 alias updates='bash ~/.claude/scripts/check-updates.sh'
 alias updates-full='bash ~/.claude/scripts/check-updates.sh --full'
+alias updates-apply='bash ~/.claude/scripts/apply-updates.sh'
 
 # Quick command to view markdown files beautifully
 readme() {

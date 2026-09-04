@@ -9,9 +9,12 @@ Checks OS updates and app updates from one command instead of checking Windows U
 ```bash
 updates          # check winget, choco, Windows Update, and Claude plugins
 updates-full     # same, plus list installed apps winget doesn't recognize
+updates-apply    # apply outdated winget/choco packages, with a confirm prompt per category
 ```
 
-Script: `claude/scripts/check-updates.sh`, deployed to `~/.claude/scripts/check-updates.sh` by `bash install.sh --claude`.
+Scripts: `claude/scripts/check-updates.sh` (report only) and `claude/scripts/apply-updates.sh` (applies updates), deployed to `~/.claude/scripts/` by `bash install.sh --claude`.
+
+`updates` and `updates-full` never install anything — they only list what's outdated. `updates-apply` is the one that changes your system, and it asks for confirmation before touching winget or choco. Pass `--yes` to skip prompts, `--os` to also install pending Windows Updates (still prompted unless combined with `--yes`; requires an elevated shell).
 
 Run from a normal Git-Bash or PowerShell terminal — not a sandboxed/restricted shell, since winget needs write access to `C:\WINDOWS\WinGet`.
 
@@ -38,8 +41,18 @@ Install-Module PSWindowsUpdate -Scope CurrentUser -Force
 
 Without it, the script prints the install command instead of failing.
 
+## Applying updates
+
+```bash
+updates-apply            # prompts before winget upgrade --all and choco upgrade all
+updates-apply --yes      # same, no prompts
+updates-apply --os       # also offers to install pending Windows Updates (elevated shell required)
+```
+
+Windows Updates are opt-in via `--os` and always require an elevated terminal — OS-level updates can trigger a reboot, so they're excluded by default even with `--yes` unless `--os` is also passed.
+
 ## Scope / limitations
 
-- **Doesn't auto-install anything.** It's a checker, not an updater — it only lists what's outdated. Apply updates yourself (`winget upgrade <id>`, `choco upgrade <id>`, Windows Update, or the app's own updater).
+- **`updates` / `updates-full` never install anything** — report only. Use `updates-apply` to actually apply winget/choco updates, or update by hand (`winget upgrade <id>`, `choco upgrade <id>`, Windows Update, or the app's own updater).
 - **Doesn't cover** browser extensions, VS Code extensions, npm/pip globals, or anything not tracked by winget/choco/Windows Update — out of scope by design; too much surface area to track reliably.
 - Manually-installed apps that winget *does* recognize (matched by name/publisher heuristics) are already covered by the winget section — `--full`'s extra list is only for apps winget has no idea about.
