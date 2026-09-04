@@ -32,9 +32,12 @@ fi
 section "Windows OS updates"
 if command -v powershell.exe >/dev/null 2>&1; then
     powershell.exe -NoProfile -Command '
-        if (Get-Module -ListAvailable -Name PSWindowsUpdate) {
+        $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        if (-not $isAdmin) {
+            Write-Output "  Skipped: requires an elevated (Run as Administrator) shell."
+        } elseif (Get-Module -ListAvailable -Name PSWindowsUpdate) {
             Import-Module PSWindowsUpdate
-            $updates = Get-WindowsUpdate -MicrosoftUpdate -ErrorAction SilentlyContinue
+            $updates = Get-WindowsUpdate -MicrosoftUpdate -ErrorAction Stop
             if ($updates) { $updates | Format-Table -AutoSize KB, Size, Title }
             else { Write-Output "  No pending updates found." }
         } else {
