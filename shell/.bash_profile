@@ -391,6 +391,10 @@ alias http='curlie'                 # HTTPie-style syntax
 # shellcheck - Bash script linter
 alias sc='shellcheck'
 
+# Check for OS, winget, choco, and Claude Code plugin updates in one place
+alias updates='bash ~/.claude/scripts/check-updates.sh'
+alias updates-full='bash ~/.claude/scripts/check-updates.sh --full'
+
 # Quick command to view markdown files beautifully
 readme() {
     if [ -f "README.md" ]; then
