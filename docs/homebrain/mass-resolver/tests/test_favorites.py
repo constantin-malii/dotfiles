@@ -107,5 +107,74 @@ class AliasResolutionTest(unittest.TestCase):
         self.assertEqual(favorites.resolve_alias(self.CFG, ""), "")
 
 
+
+class SayAsHandleTest(unittest.TestCase):
+    """Cyrillic-named stations are unsayable to STT (the Noroc lesson). A favorite may carry a
+    short ASCII `say_as` handle: it is what the listing reads out AND what the user can say back,
+    so one field serves discovery and addressability without a second list to keep in sync."""
+
+    RC = {
+        "favorites": [
+            {"name": "Mega Hits", "uri": "library://radio/16", "country": "pt", "say_as": "mega hits"},
+            {"name": "Русское Радио", "uri": "library://radio/7", "country": "ru", "say_as": "russian radio"},
+            {"name": "Kiss FM 106.5", "uri": "library://radio/11", "country": "ua"},
+        ],
+        "aliases": {},
+    }
+
+    def test_say_as_resolves_like_an_alias(self):
+        self.assertEqual(favorites.resolve_alias(self.RC, "russian radio"),
+                         u"Русское Радио")
+
+    def test_say_as_reaches_the_station_by_name(self):
+        out = favorites.by_name(self.RC, "russian radio")
+        self.assertTrue(out)
+        self.assertEqual(out[0]["uri"], "library://radio/7")
+
+    def test_explicit_alias_still_wins_when_both_exist(self):
+        rc = dict(self.RC)
+        rc["aliases"] = {"russian radio": "Mega Hits"}
+        self.assertEqual(favorites.resolve_alias(rc, "russian radio"), "Mega Hits")
+
+
+class FavoritesListingTest(unittest.TestCase):
+    RC = SayAsHandleTest.RC
+
+    def test_all_returns_every_favorite_in_file_order(self):
+        out = favorites.all_favorites(self.RC)
+        self.assertEqual([s["uri"] for s in out],
+                         ["library://radio/16", "library://radio/7", "library://radio/11"])
+
+    def test_all_carries_the_spoken_handle(self):
+        out = favorites.all_favorites(self.RC)
+        self.assertEqual(out[0]["say_as"], "mega hits")
+        self.assertEqual(out[1]["say_as"], "russian radio")
+
+    def test_station_without_a_handle_falls_back_to_its_name(self):
+        out = favorites.all_favorites(self.RC)
+        self.assertEqual(favorites.spoken_name(out[2]), "Kiss FM 106.5")
+        self.assertEqual(favorites.spoken_name(out[1]), "russian radio")
+
+
+
+class SpokenNameSafetyTest(unittest.TestCase):
+    def test_never_returns_none(self):
+        # A malformed favorite must not put None into a ", ".join() on the live media path.
+        self.assertEqual(favorites.spoken_name({}), "")
+        self.assertEqual(favorites.spoken_name(None), "")
+        self.assertEqual(favorites.spoken_name({"name": "Kiss FM"}), "Kiss FM")
+        self.assertEqual(favorites.spoken_name({"name": "X", "say_as": "ex"}), "ex")
+
+
+class AliasTieBreakTest(unittest.TestCase):
+    def test_equal_length_keys_resolve_deterministically(self):
+        # Three 13-char keys: order must not depend on dict iteration order.
+        cfg = {"favorites": [], "aliases": {"russian radio": "A", "russian songs": "B",
+                                            "noroc moldova": "C"}}
+        for _ in range(5):
+            self.assertEqual(favorites.resolve_alias(cfg, "play russian songs now"), "B")
+            self.assertEqual(favorites.resolve_alias(cfg, "play russian radio now"), "A")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

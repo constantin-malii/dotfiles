@@ -1,6 +1,61 @@
 {
   "favorites": [
     {
+      "name": "Mega Hits",
+      "uri": "library://radio/16",
+      "country": "pt",
+      "language": "pt",
+      "genres": [
+        "pop",
+        "hits"
+      ],
+      "say_as": "mega hits"
+    },
+    {
+      "name": "Радио Родных Дорог",
+      "uri": "library://radio/17",
+      "country": "ru",
+      "language": "ru",
+      "genres": [
+        "folk",
+        "retro"
+      ],
+      "say_as": "native roads"
+    },
+    {
+      "name": "Радио Русские Песни",
+      "uri": "library://radio/4",
+      "country": "ru",
+      "language": "ru",
+      "genres": [
+        "folk",
+        "retro"
+      ],
+      "say_as": "russian songs"
+    },
+    {
+      "name": "Русское Радио",
+      "uri": "library://radio/7",
+      "country": "ru",
+      "language": "ru",
+      "genres": [
+        "pop",
+        "hits"
+      ],
+      "say_as": "russian radio"
+    },
+    {
+      "name": "Ретро ФМ",
+      "uri": "library://radio/8",
+      "country": "ru",
+      "language": "ru",
+      "genres": [
+        "retro",
+        "oldies"
+      ],
+      "say_as": "retro fm"
+    },
+    {
       "name": "101 SMOOTH JAZZ",
       "uri": "library://radio/2",
       "country": "us",
@@ -9,7 +64,8 @@
         "jazz",
         "smooth jazz",
         "relax"
-      ]
+      ],
+      "say_as": "smooth jazz"
     },
     {
       "name": "Café del Mar",
@@ -20,7 +76,8 @@
         "chillout",
         "lounge",
         "relax"
-      ]
+      ],
+      "say_as": "cafe del mar"
     },
     {
       "name": "Classic FM Relax",
@@ -30,7 +87,8 @@
       "genres": [
         "classical",
         "relax"
-      ]
+      ],
+      "say_as": "classic fm"
     },
     {
       "name": "Deep House Radio - Bucharest Romania",
@@ -41,7 +99,8 @@
         "dance",
         "house",
         "electronic"
-      ]
+      ],
+      "say_as": "deep house"
     },
     {
       "name": "Europa Plus",
@@ -51,7 +110,8 @@
       "genres": [
         "pop",
         "hits"
-      ]
+      ],
+      "say_as": "europa plus"
     },
     {
       "name": "Hit FM (UKraine) - 128kb/s",
@@ -61,7 +121,8 @@
       "genres": [
         "pop",
         "hits"
-      ]
+      ],
+      "say_as": "hit fm"
     },
     {
       "name": "Kiss FM 106.5",
@@ -71,7 +132,8 @@
       "genres": [
         "pop",
         "dance"
-      ]
+      ],
+      "say_as": "kiss fm"
     },
     {
       "name": "Люкс FМ 103.1",
@@ -80,17 +142,8 @@
       "language": "uk",
       "genres": [
         "pop"
-      ]
-    },
-    {
-      "name": "Mega Hits",
-      "uri": "library://radio/16",
-      "country": "pt",
-      "language": "pt",
-      "genres": [
-        "pop",
-        "hits"
-      ]
+      ],
+      "say_as": "lux fm"
     },
     {
       "name": "Наше Радио",
@@ -99,7 +152,8 @@
       "language": "ru",
       "genres": [
         "rock"
-      ]
+      ],
+      "say_as": "nashe nine"
     },
     {
       "name": "Nashe Radio",
@@ -108,17 +162,8 @@
       "language": "ru",
       "genres": [
         "rock"
-      ]
-    },
-    {
-      "name": "Радио Родных Дорог",
-      "uri": "library://radio/17",
-      "country": "ru",
-      "language": "ru",
-      "genres": [
-        "folk",
-        "retro"
-      ]
+      ],
+      "say_as": "nashe thirteen"
     },
     {
       "name": "Radio Romania Actualității",
@@ -128,37 +173,8 @@
       "genres": [
         "news",
         "talk"
-      ]
-    },
-    {
-      "name": "Радио Русские Песни",
-      "uri": "library://radio/4",
-      "country": "ru",
-      "language": "ru",
-      "genres": [
-        "folk",
-        "retro"
-      ]
-    },
-    {
-      "name": "Ретро ФМ",
-      "uri": "library://radio/8",
-      "country": "ru",
-      "language": "ru",
-      "genres": [
-        "retro",
-        "oldies"
-      ]
-    },
-    {
-      "name": "Русское Радио",
-      "uri": "library://radio/7",
-      "country": "ru",
-      "language": "ru",
-      "genres": [
-        "pop",
-        "hits"
-      ]
+      ],
+      "say_as": "radio romania"
     },
     {
       "name": "Спокойное радио",
@@ -168,7 +184,8 @@
       "genres": [
         "relax",
         "ambient"
-      ]
+      ],
+      "say_as": "calm radio"
     }
   ],
   "aliases": {
@@ -263,6 +280,8 @@
   "defaults": {
     "find_internal": 5,
     "find_speak": 3,
-    "fallback_browse_limit": 10
+    "fallback_browse_limit": 10,
+    "default_station": "101 SMOOTH JAZZ",
+    "favorites_speak": 5
   }
 }

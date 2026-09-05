@@ -81,6 +81,45 @@ class HA(object):
             except Exception:
                 pass
 
+    def _post_json(self, path, data, timeout=10):
+        """POST JSON and return the parsed JSON body (unlike call_service_rest, which discards it).
+        Fresh per-call connection, safe from any thread. Never logs the token."""
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+        try:
+            headers = {"Authorization": "Bearer " + (self.token or ""),
+                       "Content-Type": "application/json"}
+            conn.request("POST", path, body=json.dumps(data).encode("utf-8"), headers=headers)
+            resp = conn.getresponse()
+            body = resp.read()
+            if resp.status not in (200, 201):
+                raise IOError("HA REST POST %s -> HTTP %s" % (path, resp.status))
+            return json.loads(body.decode("utf-8"))
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def tts_get_url(self, engine_id, message, timeout=10):
+        """Turn TEXT into a playable clip URL via HA's /api/tts_get_url.
+
+        Why this exists: the ceiling cannot be handed a sentence. The obvious route
+        (tts.speak -> MA play_announcement) is broken on this Universal->Squeezelite player -- MA's
+        own docs require the player to report state and elapsed time correctly, which it does not,
+        and the call fails with 'Failed to stream audio'. So we resolve the text to a clip and play
+        it through the same play_media route every reply already uses."""
+        d = self._post_json("/api/tts_get_url",
+                            {"engine_id": engine_id, "message": message}, timeout) or {}
+        url = d.get("url")
+        if not url:
+            raise IOError("HA tts_get_url returned no url")
+        # Must be absolute: _say only swaps the netloc, so a scheme-less url becomes "//host/..."
+        # which MA cannot fetch -- and that failure would surface only as a start-poll timeout,
+        # far from its cause.
+        if not str(url).startswith("http"):
+            raise IOError("HA tts_get_url returned a non-absolute url")
+        return url
+
     def announce(self, message, settings):
         svc = (getattr(settings, "tts_service", "") or "").strip()
         parts = svc.split(".", 1)

@@ -8,7 +8,35 @@ LOG = logging.getLogger("resolver")
 
 
 def _st(fav):
-    return {"name": fav.get("name"), "uri": fav.get("uri"), "source": "favorite"}
+    return {"name": fav.get("name"), "uri": fav.get("uri"), "source": "favorite",
+            "say_as": fav.get("say_as")}
+
+
+def all_favorites(radio_cfg):
+    """Every favorite, in radio.json order -- the order the listing reads them out in."""
+    return [_st(f) for f in config.favorites(radio_cfg)]
+
+
+def spoken_name(station):
+    """What to SAY for a station: its short handle when it has one, else its real name.
+    Cyrillic names are unusable aloud (Piper mangles them and the user cannot say them back),
+    so a handle is the only useful thing to read out for those."""
+    # Never return None: this feeds ", ".join() on the live media path, where a None would raise
+    # a TypeError mid-turn instead of merely reading badly.
+    st = station or {}
+    return st.get("say_as") or st.get("name") or ""
+
+
+def _alias_map(radio_cfg):
+    """Explicit `aliases` plus each favorite's `say_as`, so one handle both gets read out and
+    gets understood. Explicit aliases win: they are the hand-tuned STT-mangling repairs."""
+    out = {}
+    for f in config.favorites(radio_cfg):
+        h = f.get("say_as")
+        if h and f.get("name"):
+            out[h] = f.get("name")
+    out.update((radio_cfg or {}).get("aliases", {}))
+    return out
 
 
 _MIN_ALIAS_KEY = 4          # shorter keys would collide with ordinary words inside a long query
@@ -26,7 +54,7 @@ def resolve_alias(radio_cfg, query):
     key first so the most specific alias wins, and also against a compacted form so a spelled-out
     "N O R O C" collapses to "noroc". Keys shorter than 4 chars are skipped: they would fire on
     ordinary words."""
-    aliases = (radio_cfg or {}).get("aliases", {})
+    aliases = _alias_map(radio_cfg)
     q = (query or "").strip()
     if not q or not aliases:
         return q
@@ -37,7 +65,10 @@ def resolve_alias(radio_cfg, query):
     if ql in lowered:                       # exact alias, the cheap and unambiguous case
         return lowered[ql]
     qc = compact(ql)
-    for k in sorted(lowered.keys(), key=len, reverse=True):
+    # Longest key first so the most specific alias wins; then alphabetical, so equal-length keys
+    # (e.g. "russian radio" / "russian songs") resolve the same way on every run rather than
+    # inheriting dict order.
+    for k in sorted(lowered.keys(), key=lambda x: (-len(x), x)):
         kc = compact(k)
         if len(kc) < _MIN_ALIAS_KEY:
             continue

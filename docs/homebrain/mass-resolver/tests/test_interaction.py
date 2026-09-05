@@ -13,6 +13,14 @@ class FakeHA(object):
         self._states = None
         self.calls = []                              # (domain, service, data)
         self.timeouts = []                           # (service, timeout)
+        self.tts_url = None                          # what tts_get_url() should return
+        self.tts_calls = []                          # (engine_id, message)
+        self.tts_boom = None
+    def tts_get_url(self, engine_id, message, timeout=10):
+        self.tts_calls.append((engine_id, message))
+        if self.tts_boom is not None:
+            raise self.tts_boom
+        return self.tts_url
     def set_states(self, states):
         self._states = list(states)
     def get_entity_state(self, entity_id):
@@ -1541,6 +1549,110 @@ class ReplyBumpTest(unittest.TestCase):
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertFalse(r["ok"])
         self.assertIn("media_play", [c[1] for c in ha.calls])       # un-paused on the way out
+
+
+
+class SayTextTest(unittest.TestCase):
+    """`say` needs a clip URI, so nothing in the house could ask the ceiling to speak a SENTENCE.
+    The obvious route -- tts.speak -> MA play_announcement -- is broken on this player: MA's own
+    docs require correct state + elapsed-time reporting, which the Universal->Squeezelite pair does
+    not provide, and it fails with 'Failed to stream audio' (HA log, 2026-09-05). say_text therefore
+    resolves the text to a clip URL and hands it to the PROVEN play_media route."""
+
+    def setUp(self):
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/t.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ha_ok(self):
+        ha = FakeHA()
+        ha.tts_url = self.norm_uri
+        ha.set_states([idle_state(),                              # capture
+                       playing_with_id(0.70, self.reply_mid),     # start-poll
+                       idle_state()])                             # finish-poll
+        return ha
+
+    def test_text_is_resolved_to_a_clip_and_played_via_play_media(self):
+        cap = self._cap(); ha = self._ha_ok()
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "Your timer is finished."})
+        self.assertTrue(r["ok"])
+        self.assertEqual(ha.tts_calls, [("tts.piper", "Your timer is finished.")])
+        pm = [c for c in ha.calls if c[1] == "play_media"]
+        self.assertEqual(len(pm), 1)
+        self.assertEqual(pm[0][2]["media_id"], self.norm_uri)
+
+    def test_it_never_uses_the_broken_announce_path(self):
+        cap = self._cap(); ha = self._ha_ok()
+        run(cap, FakeCtx(ha), {"mode": "say_text", "text": "hello"})
+        for domain, service, _ in ha.calls:
+            self.assertNotEqual((domain, service), ("tts", "speak"))
+            self.assertNotIn("announce", service)
+
+    def test_empty_text_is_rejected_before_any_call(self):
+        cap = self._cap(); ha = FakeHA()
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "   "})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "invalid_input")
+        self.assertEqual(ha.tts_calls, [])
+        self.assertEqual(ha.calls, [])
+
+    def test_a_tts_failure_is_reported_not_swallowed(self):
+        cap = self._cap(); ha = FakeHA(); ha.tts_boom = IOError("tts 500")
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "hello"})
+        self.assertFalse(r["ok"])
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
+
+    def test_no_url_returned_is_an_honest_failure(self):
+        cap = self._cap(); ha = FakeHA(); ha.tts_url = None
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "hello"})
+        self.assertFalse(r["ok"])
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
+
+
+
+class SayTextFreshPlaybackTest(unittest.TestCase):
+    """`say` declines to speak when the SAME turn already started playback -- correct for a media
+    command, whose action is its own confirmation. It is wrong for say_text: a timer chime or any
+    other pushed sentence is not confirmed by unrelated music starting, and the caller was told
+    "Said." while nothing was spoken."""
+
+    def setUp(self):
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/t.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ha(self):
+        ha = FakeHA()
+        ha.tts_url = self.norm_uri
+        ha.set_states([idle_state(),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        return ha
+
+    def test_say_text_still_speaks_when_the_turn_started_playback(self):
+        cap = self._cap(); ha = self._ha()
+        zone = "media_player.ceiling_speakers"
+        cap._turns[zone] = {"ts": 1000.0, "playback": "library://radio/2"}
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "Your timer is finished."})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"].get("said"), "say_text was skipped as a media confirmation")
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 1)
+
+    def test_plain_say_is_still_skipped_when_the_turn_started_playback(self):
+        # The original behaviour must survive: a media command's spoken confirmation stays skipped.
+        cap = self._cap(); ha = self._ha()
+        zone = "media_player.ceiling_speakers"
+        cap._turns[zone] = {"ts": 1000.0, "playback": "library://radio/2"}
+        r = run(cap, FakeCtx(ha), {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"].get("said"))
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
 
 
 if __name__ == "__main__":
