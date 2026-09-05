@@ -44,9 +44,10 @@ Without it, the script prints the install command instead of failing.
 ## Applying updates
 
 ```bash
-updates-apply            # non-elevated: prompts before winget upgrade --all
-updates-apply --yes      # same, no prompts
-updates-apply --os       # elevated only: prompts for choco upgrade all, and (with --os) Windows Update
+updates-apply              # non-elevated: prompts before winget upgrade --all
+updates-apply --yes        # same, no prompts
+updates-apply --os         # elevated only: prompts for choco upgrade all, and (with --os) Windows Update
+updates-apply --defer-git  # also queues a background watcher to upgrade Git once you close everything
 ```
 
 **Run it twice, in two different shells — this is intentional, not a bug:**
@@ -60,7 +61,9 @@ Why: winget refuses to upgrade a user-scope package (glow, tealdeer, etc.) when 
 
 This is broader than "close your Git Bash windows": **Claude Code itself keeps Git Bash processes alive** in the background (its own tool shell, plus a statusline script that shells out on every prompt) for as long as the CLI is open — even if you don't have a visible Git Bash terminal. `git update-git-for-windows` silently fails under this condition too (it tries to kill the blocking process and can't, and just abandons the update — check `%TEMP%\gfw-install-*.exe`: 0-byte files there are failed attempts).
 
-To actually upgrade Git:
+To upgrade Git, either:
+
+**A. Manually**, once you're closing everything anyway:
 1. Close **every** terminal window, including any window running Claude Code.
 2. Open a fresh PowerShell or cmd window with nothing else open.
 3. Run:
@@ -68,7 +71,20 @@ To actually upgrade Git:
    winget upgrade Git.Git
    ```
 
-Not worth doing on every `updates-apply` run — do it occasionally when you're about to close everything anyway.
+**B. Deferred**, via `updates-apply --defer-git`:
+
+```bash
+updates-apply --defer-git
+```
+
+This queues a detached background watcher (`claude/scripts/git-upgrade-watcher.ps1`) that polls every 15 seconds for any running `bash` or `claude` process. Once none remain anywhere on the machine — i.e. once you've closed every terminal, including this Claude Code session — it runs `winget upgrade Git.Git` on its own and logs the result. Gives up after 3 hours if bash/claude never fully exit.
+
+Check on it any time:
+```bash
+cat ~/.claude/logs/git-upgrade-watcher.log
+```
+
+The watcher is a standalone process (`Start-Process`, not a child of the calling shell), so it survives this session, this terminal, and Claude Code all closing.
 
 ## Rollback safety
 

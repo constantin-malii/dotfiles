@@ -11,20 +11,26 @@
 #
 # Git.Git can never be upgraded from this script, or from any window while
 # Claude Code is running (it keeps bash/ssh-agent processes alive in the
-# background). See docs/check-updates.md for the manual upgrade steps.
+# background). See docs/check-updates.md for the manual upgrade steps, or
+# use --defer-git to queue a background watcher that upgrades it once every
+# bash/claude process on the machine has exited.
 #
-# Usage: bash apply-updates.sh [--yes] [--os]
-#   --yes   skip confirmation prompts (non-interactive)
-#   --os    also install pending Windows Updates (only runs if elevated, may reboot)
+# Usage: bash apply-updates.sh [--yes] [--os] [--defer-git]
+#   --yes         skip confirmation prompts (non-interactive)
+#   --os          also install pending Windows Updates (only runs if elevated, may reboot)
+#   --defer-git   queue a detached watcher that upgrades Git once all bash/claude
+#                 processes exit (i.e. once you close every terminal, including this one)
 
 set -uo pipefail
 
 YES=false
 DO_OS=false
+DEFER_GIT=false
 for arg in "$@"; do
     case "$arg" in
         --yes) YES=true ;;
         --os) DO_OS=true ;;
+        --defer-git) DEFER_GIT=true ;;
     esac
 done
 
@@ -119,7 +125,25 @@ else
         echo "  powershell.exe not found"
     fi
     echo "  Note: Git.Git will always fail here (and even outside this script while"
-    echo "  Claude Code is running). See docs/check-updates.md for how to upgrade Git."
+    echo "  Claude Code is running). See docs/check-updates.md for how to upgrade Git,"
+    echo "  or re-run with --defer-git to queue a background watcher for it."
+
+    if $DEFER_GIT; then
+        section "Git upgrade (deferred)"
+        if command -v powershell.exe >/dev/null 2>&1; then
+            SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+            WATCHER_PS1_WIN=$(cygpath -w "$SCRIPT_DIR/git-upgrade-watcher.ps1" 2>/dev/null || echo "$SCRIPT_DIR/git-upgrade-watcher.ps1")
+            LOG_DIR="$HOME/.claude/logs"
+            mkdir -p "$LOG_DIR"
+            LOG_WIN=$(cygpath -w "$LOG_DIR/git-upgrade-watcher.log" 2>/dev/null || echo "$LOG_DIR/git-upgrade-watcher.log")
+            powershell.exe -NoProfile -Command "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','$WATCHER_PS1_WIN','-LogPath','$LOG_WIN'" 2>&1 | sed 's/\r$//'
+            echo "  Watcher queued. It will upgrade Git once every bash/claude process on"
+            echo "  this machine exits (close all terminals, including this one)."
+            echo "  Check progress: cat ~/.claude/logs/git-upgrade-watcher.log"
+        else
+            echo "  powershell.exe not found; cannot queue watcher."
+        fi
+    fi
 
     section "Windows OS updates"
     if $DO_OS; then

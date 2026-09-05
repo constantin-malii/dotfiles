@@ -140,6 +140,7 @@ if [[ "$RUN_CLAUDE" == true ]]; then
         echo "→ Copying scripts..."
         cp -r "$REPO_DIR/claude/scripts/"*.sh "$CLAUDE_DIR/scripts/" 2>/dev/null || true
         cp -r "$REPO_DIR/claude/scripts/"*.py "$CLAUDE_DIR/scripts/" 2>/dev/null || true
+        cp -r "$REPO_DIR/claude/scripts/"*.ps1 "$CLAUDE_DIR/scripts/" 2>/dev/null || true
         cp -r "$REPO_DIR/claude/scripts/"*.md "$CLAUDE_DIR/scripts/" 2>/dev/null || true
         chmod +x "$CLAUDE_DIR/scripts/"*.sh 2>/dev/null || true
         chmod +x "$CLAUDE_DIR/scripts/"*.py 2>/dev/null || true
