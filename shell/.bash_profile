@@ -396,6 +396,16 @@ alias updates='bash ~/.claude/scripts/check-updates.sh'
 alias updates-full='bash ~/.claude/scripts/check-updates.sh --full'
 alias updates-apply='bash ~/.claude/scripts/apply-updates.sh'
 
+# Render a URL to PDF (requires: cd $REPOS_DIR/dotfiles/tools/url2pdf && npm install && npx playwright install chromium)
+url2pdf() {
+    node "$REPOS_DIR/dotfiles/tools/url2pdf/url2pdf.js" "$@"
+}
+
+# Save a logged-in session for url2pdf --state (usage: url2pdf-login <url> [state-name])
+url2pdf-login() {
+    node "$REPOS_DIR/dotfiles/tools/url2pdf/login.js" "$@"
+}
+
 # Quick command to view markdown files beautifully
 readme() {
     if [ -f "README.md" ]; then

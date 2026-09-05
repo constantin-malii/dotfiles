@@ -1,0 +1,19 @@
+{
+  "name": "url2pdf",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CLI that renders a URL to PDF using headless Chrome",
+  "main": "url2pdf.js",
+  "bin": {
+    "url2pdf": "./url2pdf.js"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  },
+  "scripts": {
+    "test": "node --test test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
