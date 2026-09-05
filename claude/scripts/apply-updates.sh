@@ -9,10 +9,9 @@
 #   - non-elevated: does winget (excluding Git, see note below), skips choco + OS updates
 #   - elevated:     does choco + OS updates (if --os), skips winget
 #
-# Git.Git can never be upgraded from this script when run inside Git Bash:
-# its installer refuses to proceed while any bash/ssh-agent process is open,
-# and this script's own shell always counts as one. Upgrade Git manually from
-# plain PowerShell/cmd: winget upgrade Git.Git
+# Git.Git can never be upgraded from this script, or from any window while
+# Claude Code is running (it keeps bash/ssh-agent processes alive in the
+# background). See docs/check-updates.md for the manual upgrade steps.
 #
 # Usage: bash apply-updates.sh [--yes] [--os]
 #   --yes   skip confirmation prompts (non-interactive)
@@ -119,10 +118,8 @@ else
     else
         echo "  powershell.exe not found"
     fi
-    echo "  Note: Git.Git will always fail here — its installer refuses to run while"
-    echo "  any Git Bash session is open (this script's own shell counts as one)."
-    echo "  Close all Git Bash windows and run from plain PowerShell/cmd instead:"
-    echo "    winget upgrade Git.Git"
+    echo "  Note: Git.Git will always fail here (and even outside this script while"
+    echo "  Claude Code is running). See docs/check-updates.md for how to upgrade Git."
 
     section "Windows OS updates"
     if $DO_OS; then

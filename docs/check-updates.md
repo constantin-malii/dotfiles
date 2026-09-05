@@ -56,11 +56,19 @@ updates-apply --os       # elevated only: prompts for choco upgrade all, and (wi
 
 Why: winget refuses to upgrade a user-scope package (glow, tealdeer, etc.) when run elevated — `"The package installed for user scope cannot be uninstalled when running with administrator privileges."` Choco, on the other hand, needs elevation to do anything at all (non-elevated it prints a warning, times out on a prompt, and upgrades nothing). Windows Update also requires elevation. There's no single elevation state that satisfies all three, so the script detects which one it's in and runs only the matching subset, telling you to re-run the other way for the rest.
 
-**Known gotcha — Git can never self-upgrade from this script.** `winget upgrade Git.Git` fails whenever any Git Bash / ssh-agent process is open — and since this script itself runs inside Git Bash, its own shell always counts as one of the blocking processes, even with every other window closed. The script always prints a reminder after the winget section; upgrade Git manually from a **plain PowerShell or cmd window** (not Git Bash):
+**Known gotcha — Git can never self-upgrade while anything is using Git Bash.** `winget upgrade Git.Git` (and `git update-git-for-windows`) both fail whenever any bash/ssh-agent process is running — the Git-for-Windows installer refuses to proceed and lists the blocking PIDs.
 
-```powershell
-winget upgrade Git.Git
-```
+This is broader than "close your Git Bash windows": **Claude Code itself keeps Git Bash processes alive** in the background (its own tool shell, plus a statusline script that shells out on every prompt) for as long as the CLI is open — even if you don't have a visible Git Bash terminal. `git update-git-for-windows` silently fails under this condition too (it tries to kill the blocking process and can't, and just abandons the update — check `%TEMP%\gfw-install-*.exe`: 0-byte files there are failed attempts).
+
+To actually upgrade Git:
+1. Close **every** terminal window, including any window running Claude Code.
+2. Open a fresh PowerShell or cmd window with nothing else open.
+3. Run:
+   ```powershell
+   winget upgrade Git.Git
+   ```
+
+Not worth doing on every `updates-apply` run — do it occasionally when you're about to close everything anyway.
 
 ## Rollback safety
 
