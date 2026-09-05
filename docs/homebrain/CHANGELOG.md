@@ -3,6 +3,179 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-05 — Voice timers are now audible AND repeat until dismissed: resolver `say_text` (text → clip → `play_media`) · `tts.speak` on the ceiling PROVEN BROKEN · 2 self-inflicted defects found and fixed
+
+> Resolver code + a new HA automation. Deployed and **operator-eared**. Corrects two `ONBOARDING.md`
+> claims that were the opposite of the truth.
+
+- **Symptom:** "set a timer" worked, but when it finished there was only the LED ring — no sound.
+- **Why:** the reSpeaker has **no speaker**, so HA's voice-timer chime plays into nothing. That part
+  was expected. What was not expected is that there is **no way to hook it**: subscribing to the
+  *entire* HA event bus during a timer showed **no timer event of any kind** — the only observable
+  signal is the satellite's own `media_player` going `playing`.
+- **First attempt was silent, and the docs had warned us.** An automation calling
+  `script.ceiling_announce` (→ `tts.speak` → MA `play_announcement`) fired correctly and produced
+  nothing audible. HA's log gives the reason:
+  `Ceiling: Announce: Error executing script ... Failed to stream audio` /
+  `Error streaming tts: Cannot write to closing transport`, with the traceback in
+  `music_assistant/media_player.py:499 _async_handle_play_announcement`.
+  **Music Assistant's own documentation states the precondition:** *"The MA announcement feature will
+  ONLY work reliably if the player reports the state (e.g. playing, paused, idle) and the progress
+  report (elapsed time) correctly."* Universal→Squeezelite does **not** — that is the same state-
+  reporting defect behind the long-running stop-wedge. So announcements cannot be made to work here;
+  the precondition is unmeetable, not a bug to fix.
+  The `2026-07-15` reply design (§13) already recorded `tts.speak` as deterministically silent on this
+  player. `ONBOARDING.md` §5 and §12 claimed the opposite. **Both corrected.**
+- **Fix — new `interaction` mode `say_text`.** Text → HA `/api/tts_get_url` → clip URL → the existing
+  `_say`, i.e. the **`play_media` route every reply already uses**. It inherits internal-base
+  normalisation (HA returns the *external* base `192.168.1.104`, which MA cannot fetch — `_say`
+  rewrites it), reply volume, poll-to-completion, restore, source replay, barge-in and the
+  reply-started guard. `haconn` gains `tts_get_url()` plus a `_post_json()` that, unlike
+  `call_service_rest`, returns the response body.
+- **Guard added after a test caught it:** if the URL resolves empty, `_say` would play nothing and
+  still report success — the exact "claimed success, did nothing" class this stack keeps producing.
+  `say_text` now fails honestly instead.
+- **New automation `satellite_timer_announce_on_ceiling`** — triggers on satellite local playback,
+  **conditioned on `assist_satellite` being `idle` for 5 s**. That condition is load-bearing: the
+  satellite's media_player plays on **every** wake and reply (~107 state changes in 20 minutes), so
+  without it the automation would announce a timer on every turn. Consequences, accepted: a timer
+  finishing **during** a conversation is missed by design, and if HA ever changes how the chime is
+  delivered this stops working **silently**.
+- **VERIFIED live, voice-initiated, operator-eared.** The decisive run was a real one: the operator
+  said *"set a one minute timer"* to Nabu and heard the completion announcement. Log:
+  `15:05:57 SAY clip=2e697283` (the "timer set" reply) then, **exactly 60 s later**,
+  `15:06:57 SAY_TEXT req=36ac6346 engine=tts.piper chars=23` -> `finish-poll exit after 2.0s:
+  state=idle` -> `restored -> 0.36`, `reply_started=True`. `chars=23` is "Your timer is finished."
+  Dismissal works too: *"stop the timer"* was confirmed aloud and cleared the LEDs.
+  The earlier agent-run test (below) drove the timer through the API; this one used the real path.
+- **Agent-run test, same result:**
+  `45.1s satellite media_player -> playing` → `AUTOMATION TRIGGERED` → `volume_set 0.7` →
+  `cid -> .../tts_proxy/yx7` → `46.0s ceiling playing` → `48.8s volume_set 0.36`. Resolver:
+  `SAY_TEXT req=242f7e3a engine=tts.piper chars=23` → `finish-poll exit after 2.5s: state=idle` →
+  `restored -> 0.36`, `reply_started=True likely_silent=False`. **1.5 s from chime to speech.**
+  The failed announce attempt, by contrast, left the ceiling reporting a **stale** cid from hours
+  earlier — nothing ever loaded.
+- **Repeats until dismissed** (added after the first cut announced once, which is easy to miss from
+  another room). The loop announces, waits 25 s, and re-checks; dismissing the timer ends it. Capped
+  at 8 rounds so a stuck state cannot announce forever. **VERIFIED live:** `15:38:13` / `15:38:41` /
+  `15:39:10` `SAY_TEXT`, evenly spaced, stopping when the operator said "stop the timer".
+- **Two defects were shipped and fixed in the same session. Both came from testing the path I was
+  thinking about rather than the ordinary next thing an operator would do.**
+  1. **The loop could be sustained by its own announcements.** The ceiling audio false-wakes the
+     satellite — it hears *"Your timer is finished."* and transcribes it as **"The pipeline is
+     finished."** / **"The point is finished."** (pipeline traces, 21:05 and 21:14). A conversation
+     also makes the satellite's media_player play, which was the loop's continue condition, so:
+     announce → self-wake → player plays → announce again. Fixed by requiring `assist_satellite`
+     **idle** in the `while` as well, so a self-wake now *ends* the loop. Fail-safe direction: worst
+     case is fewer reminders, never a runaway.
+  2. **Every wake word announced a false timer.** The satellite's **wake sound** makes its
+     media_player `playing` ~**180 ms before** HA marks the satellite `listening`
+     (measured: `21:26:47.680 playing` → `21:26:47.862 listening`), so the entry condition
+     ("idle for 5 s") was still true and the automation fired on every *"Okay Nabu"*. A state
+     condition cannot win a 180 ms race, so the automation now **waits 3 s and re-checks** that the
+     satellite is still idle. **VERIFIED by the operator:** asking Nabu a question no longer
+     produces a timer announcement.
+- **The satellite's `media_player` is a SHARED, UNRELIABLE signal — treat it as such.** It plays for
+  wake sounds, the local copy of every reply, and timer chimes alike, and it returns to `idle`
+  **while the alarm is still ringing** (which is why the first loop stopped after one round). Any
+  automation keyed to it must confirm conversation state *after* things settle, and must not treat
+  `playing` as "still ringing".
+- **A real chime is NOT possible yet — blocked, diagnosed.** MA rejects `media-source://` URIs
+  (`HomeAssistantError: Only URLs are supported for announcements`) and cannot fetch HA's media
+  files, which need auth (`/media/local/... -> 401`; `/local/... -> 404`, nothing in `/config/www`
+  and no VM shell to put anything there). A 4 s two-note bell WAV was synthesised with stdlib and
+  uploaded to HA local media (`media-source://media_source/local/./timer_chime.wav`) and is waiting.
+  **Next step:** have the resolver resolve the media-source URI to a *signed* URL via HA and play it
+  through the existing `_say` — same shape and size as the `say_text` change. The alternative
+  (serving the file from the resolver's own HTTP server) needs a static-file route plus a
+  normalisation bypass, and adds surface for no real gain.
+- **Still true:** the announcement cannot say WHICH timer finished — no event payload exists. HA
+  itself supports multiple concurrent timers and named ones (`"create a timer for 8 minutes named
+  pizza"` works; `"set a pizza timer for 9 minutes"` does not), and if two finish close together the
+  media_player is already `playing`, so the second gets no separate announcement.
+
+### Proposed BACKLOG notes (not applied)
+
+> **1. Unify and choose the assistant voice.** Pipeline replies and resolver-spoken text (commands,
+> news, timer announcements) use different Piper voices: the Assist pipeline sets a voice, while
+> `tts_get_url` is called with an engine only and gets Piper's default. Add a `tts_voice` setting to
+> the resolver and pass it through, then pick one voice deliberately — needs a listening session.
+
+> **2. Ceiling audio can wake the satellite.** First hard evidence 2026-09-05: the timer announcement
+> played on the ceiling was transcribed back as *"The pipeline is finished."* This is a plausible
+> contributor to the false-wake problem otherwise attributed to wake words, and it applies to
+> **replies**, not just timers. Worth measuring before more wake-word tuning.
+
+> **3. Named timer announcements.** Needs the firmware `on_timer_finished` trigger and its payload —
+> the OTA gate. Only worth opening alongside other firmware work (e.g. a wake-model fix).
+
+- **Deploy (gated, user-run restart):** `haconn.py`, `interaction.py`; backup
+  **`~/mass-resolver/.bak/20260905-144136/`**; host **3.5.2** `py_compile` OK, host
+  `test_interaction.py` OK; restart **14:42:36**; `/command` bound, zero tracebacks.
+- **Tests:** **344 local** (was 337; +7).
+
+### Also surfaced by the HA error log, not acted on
+
+- **`Can't connect to ESPHome API for respeaker-living-room @ 192.168.1.132` (Errno 113)** — the
+  satellite drops its API connection. A plausible contributor to the `stt-no-text-recognized`
+  failures currently blamed on wake-word settings. **Investigate before more wake tuning.**
+- **`S1b-2 - Satellite Reply on Ceiling: Timeout when calling resource ".../command"`** — the reply
+  automation has timed out at least once. It has `continue_on_error`, so it fails quietly; the
+  symptom would be a reply that never reaches the ceiling.
+- **MA DNS drops still recurring** (`Failed to connect to ws://d5369777-music-assistant:8094/ws`) —
+  A1/A2a self-heal, still earning their keep.
+
+## 2026-09-05 — Radio favourites: spoken handles (`say_as`), a favourites listing, and a default station
+
+> Resolver code + `radio.json` data. Deployed and verified live. **No HA change** — the remaining
+> "play russian songs" mis-routing is an upstream slot problem and is NOT fixed here (below).
+
+- **"List my favourite stations" answered nothing.** `_candidates()` only filtered by station /
+  country / language / genre; with no filter it fell through to `return [], ""`, so `find` produced
+  `radio mode=find target='' candidates=0` and the assistant said *"I couldn't find a station for
+  that."* Reproduced live at 2026-09-05 11:48:56 before the fix. It now lists the favourites.
+- **Seven favourites were unsayable.** `Русское Радио`, `Радио Родных Дорог`, `Спокойное радио`,
+  `Люкс FM 103.1` and `Наше Радио` had no alias, so STT could never reach them — the Noroc problem,
+  seven times over. Worse, the alias `nashe` pointed at **`Nashe Radio` (radio/13)**, leaving
+  **`Наше Радио` (radio/9)** — a different station — unreachable by voice entirely.
+- **Fix — one `say_as` field per favourite, doing two jobs.** It is what the listing reads out AND
+  what the user can say back: folded into the alias map at lookup time, so there is no second list
+  to drift. Explicit `aliases` still win over handles, keeping the hand-tuned Noroc repairs
+  authoritative. Both Nashe stations now have distinct handles (`nashe nine` / `nashe thirteen`) so
+  the operator can pick a winner before one of them takes the plain `nashe` alias.
+- **`jazz` is deliberately NOT a handle** — it is a live genre synonym, and aliasing it would hijack
+  every genuine "play some jazz" request. Same reasoning that keeps `rock` unaliased (2026-08-02).
+  The station's handle is `smooth jazz`.
+- **Listing format:** count first, then five handles — 17 names read aloud would be unusable.
+  *"You have 17 favourites. The first 5 are: mega hits, native roads, russian songs, russian radio
+  and retro fm."* The first five are operator-chosen and are simply the first five entries in
+  `radio.json`; listing order **is** file order, so re-ranking needs no code.
+- **Default station added.** `defaults.default_station = "101 SMOOTH JAZZ"`, used when a play request
+  arrives with no station. **Caveat, unfixed:** the sentence-trigger path does NOT use it —
+  `script.ceiling_play_radio` carries its own hardcoded `{{ station | default('Radio Paradise') }}`
+  and bypasses the resolver entirely, so a bare "play radio" through the prefer-local layer still
+  plays **Radio Paradise**. That script also still calls `tts.speak` (the deterministically-silent
+  overlay path). Rerouting it through the resolver is proposed, not applied — the both-paths lesson
+  from 2026-08-02 applies.
+- **NOT fixed — "play russian songs" plays the wrong station.** The model collapses the phrase to
+  `country='Russia'` before the resolver sees it (`radio mode=play target='Russia'`), so the
+  `russian songs` handle is never consulted. The information is destroyed upstream and no
+  resolver-side change can recover it. The fix is deterministic sentence triggers for the handles —
+  designed, approved in principle, **not built**. Note the symptom has *changed*, not gone: the
+  reorder means `country=russia` now returns **Радио Родных Дорог** instead of Europa Plus.
+- **VERIFIED live** over `/command` after the restart (dry-run, so nothing played):
+  `russian radio -> Русское Радио` · `russian songs -> Радио Русские Песни` ·
+  `native roads -> Радио Родных Дорог` · `nashe nine -> Наше Радио` ·
+  `nashe thirteen -> Nashe Radio` · `calm radio -> Спокойное радио` · `lux fm -> Люкс FМ 103.1` ·
+  no station -> `101 SMOOTH JAZZ` · `genre=jazz -> 101 SMOOTH JAZZ` (genre path intact, not hijacked).
+- **Deploy (gated, user-run restart):** `favorites.py`, `radio.py`, `radio.json`; backup
+  **`~/mass-resolver/.bak/20260905-120255/`**; host **3.5.2** `py_compile` OK, `JSON OK 17 favorites`,
+  host `test_radio.py` OK; restart **12:08:02**, `/command` bound, `200/401`, zero tracebacks.
+  **Deploy note (still true):** multi-file `scp` hangs on this host — copy one file at a time.
+- **Tests:** **337 local** (was 326; +11). The listing test failed with the exact live symptom
+  (`I couldn't find a station for that`) before the fix existed, and one test pins that **no
+  non-ASCII character can reach the spoken text** — a list that reads Cyrillic aloud is useless.
+
 ## 2026-09-05 — S1b-2 Slice 5: reply route PASSES, **sign-off WITHHELD** (wake-word false accepts) · both pending fixes applied · 3 wake words tried, 2 confirmed misfiring, 3rd under observation
 
 > **Verdict: Slice 5 is NOT signed off.** The reply route itself is proven — four weeks of unattended

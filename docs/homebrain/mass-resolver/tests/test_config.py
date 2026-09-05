@@ -110,5 +110,18 @@ class SayTunablesTest(unittest.TestCase):
         self.assertFalse(hasattr(s, "say_announce_timeout_ms"))
 
 
+
+class TtsEngineSettingTest(unittest.TestCase):
+    """say_text picks the TTS engine from settings. The setting has to EXIST in config, or the
+    hardcoded fallback silently wins and the knob is unreachable -- which also blocks giving the
+    resolver the same voice the Assist pipeline uses."""
+
+    def test_default_is_piper(self):
+        self.assertEqual(config.Settings({}).tts_engine, "tts.piper")
+
+    def test_engine_is_overridable(self):
+        self.assertEqual(config.Settings({"tts_engine": "tts.other"}).tts_engine, "tts.other")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
