@@ -44,10 +44,11 @@ Without it, the script prints the install command instead of failing.
 ## Applying updates
 
 ```bash
-updates-apply              # non-elevated: prompts before winget upgrade --all
-updates-apply --yes        # same, no prompts
-updates-apply --os         # elevated only: prompts for choco upgrade all, and (with --os) Windows Update
-updates-apply --defer-git  # also queues a background watcher to upgrade Git once you close everything
+updates-apply                 # non-elevated: prompts before winget upgrade --all
+updates-apply --yes           # same, no prompts
+updates-apply --os            # elevated only: prompts for choco upgrade all, and (with --os) Windows Update
+updates-apply --defer-git     # also queues a background watcher to upgrade Git once you close everything
+updates-apply --defer-claude  # also queues a background watcher to upgrade the Claude desktop app once it's closed
 ```
 
 **Run it twice, in two different shells — this is intentional, not a bug:**
@@ -77,7 +78,7 @@ To upgrade Git, either:
 updates-apply --defer-git
 ```
 
-This queues a detached background watcher (`claude/scripts/git-upgrade-watcher.ps1`) that polls every 15 seconds for any running `bash` or `claude` process. Once none remain anywhere on the machine — i.e. once you've closed every terminal, including this Claude Code session — it runs `winget upgrade Git.Git` on its own and logs the result. Gives up after 3 hours if bash/claude never fully exit.
+This queues a detached background watcher (`claude/scripts/winget-upgrade-watcher.ps1 -Target bash-claude`) that polls every 15 seconds for any running `bash` or `claude` process. Once none remain anywhere on the machine — i.e. once you've closed every terminal, including this Claude Code session — it runs `winget upgrade Git.Git` on its own and logs the result. Gives up after 3 hours if bash/claude never fully exit.
 
 Check on it any time:
 ```bash
@@ -85,6 +86,16 @@ cat ~/.claude/logs/git-upgrade-watcher.log
 ```
 
 The watcher is a standalone process (`Start-Process`, not a child of the calling shell), so it survives this session, this terminal, and Claude Code all closing.
+
+### Claude desktop app
+
+The Claude desktop app has the same self-lock problem as Git: winget can't replace its files while it's running. Unlike Git, this only needs the **desktop app** closed — not Claude Code — since they're separate products that happen to share the `claude.exe` process name (the watcher tells them apart by install path: the desktop app lives under `WindowsApps\Claude_*`, Claude Code's CLI binary lives under `~/.local/bin`).
+
+```bash
+updates-apply --defer-claude
+```
+
+Queues the same watcher (`-Target claude-desktop`), logging to `~/.claude/logs/claude-desktop-upgrade-watcher.log`. Note the desktop app usually self-updates on its own in the background already — winget's version often just lags until you relaunch it — so this is mainly useful when winget shows a genuinely newer version and the app won't take it.
 
 ## Rollback safety
 
