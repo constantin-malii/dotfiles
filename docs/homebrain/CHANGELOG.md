@@ -41,7 +41,14 @@ design live in the per-topic docs; this log is for discrete operational changes.
   without it the automation would announce a timer on every turn. Consequences, accepted: a timer
   finishing **during** a conversation is missed by design, and if HA ever changes how the chime is
   delivered this stops working **silently**.
-- **VERIFIED live, operator-eared** ("your timer is finished - heard"):
+- **VERIFIED live, voice-initiated, operator-eared.** The decisive run was a real one: the operator
+  said *"set a one minute timer"* to Nabu and heard the completion announcement. Log:
+  `15:05:57 SAY clip=2e697283` (the "timer set" reply) then, **exactly 60 s later**,
+  `15:06:57 SAY_TEXT req=36ac6346 engine=tts.piper chars=23` -> `finish-poll exit after 2.0s:
+  state=idle` -> `restored -> 0.36`, `reply_started=True`. `chars=23` is "Your timer is finished."
+  Dismissal works too: *"stop the timer"* was confirmed aloud and cleared the LEDs.
+  The earlier agent-run test (below) drove the timer through the API; this one used the real path.
+- **Agent-run test, same result:**
   `45.1s satellite media_player -> playing` → `AUTOMATION TRIGGERED` → `volume_set 0.7` →
   `cid -> .../tts_proxy/yx7` → `46.0s ceiling playing` → `48.8s volume_set 0.36`. Resolver:
   `SAY_TEXT req=242f7e3a engine=tts.piper chars=23` → `finish-poll exit after 2.5s: state=idle` →
