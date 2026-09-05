@@ -1,0 +1,12 @@
+# Secrets — NEVER commit (live copies are 0600 on the host)
+.ma_token
+.ha_token
+.lidarr
+*.token
+
+# Runtime artifacts
+*.log
+serve.out
+serve.pid
+__pycache__/
+*.pyc

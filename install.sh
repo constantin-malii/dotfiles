@@ -65,6 +65,7 @@ declare -A SKILL_SCRIPTS
 SKILL_SCRIPTS[jira]="jira-rest-api.sh atlassian-common.sh create-issue-link.sh delete-issue-link.sh get-issue-links.sh setup-credentials-interactive.sh ATLASSIAN_SETUP.md"
 SKILL_SCRIPTS[confluence]="confluence-rest-api.sh atlassian-common.sh setup-credentials-interactive.sh ATLASSIAN_SETUP.md"
 SKILL_SCRIPTS[azure-devops]="azure-devops-rest-api.sh"
+SKILL_SCRIPTS[prompt-builder]="prompt_lint.py"
 
 # Detect if this is initial install or update
 if [[ -d "$CLAUDE_DIR/scripts" ]] || [[ -d "$CLAUDE_DIR/skills" ]]; then

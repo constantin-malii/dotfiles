@@ -1,0 +1,16 @@
+[Unit]
+Description=Music Assistant provider-aware resolver (local-only, Phase 1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=costea
+WorkingDirectory=/home/costea/mass-resolver
+ExecStart=/usr/bin/python3 /home/costea/mass-resolver/resolver.py --serve
+Restart=always
+RestartSec=5
+# tokens are read from 0600 files in WorkingDirectory; nothing secret in this unit
+
+[Install]
+WantedBy=multi-user.target

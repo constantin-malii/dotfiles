@@ -1,5 +1,55 @@
 # Claude Code Instructions
 
+This is the **dotfiles repo** — shell config, tool configs, Claude Code files, and the
+`docs/homebrain/` knowledge base for the HomeBrain home-automation stack. Most of this file is
+dotfiles maintenance (shell, install.sh, tools); the HomeBrain section below is a pointer, not a
+duplicate of its docs.
+
+## Worktree discipline
+
+**Make every repository change in an isolated git worktree — never edit files, commit, or run
+mutating git commands directly on `main`.**
+
+- Before starting any change, create/enter a worktree: use the **EnterWorktree** tool, or the
+  fallback `git worktree add .claude/worktrees/<name> -b <branch> <base>`. Worktrees live under
+  `.claude/worktrees/` (untracked — they never pollute git status).
+- **Base it on the up-to-date default branch.** Keep `main` pushed so the worktree's default base
+  (`origin/main`) is current; if `main` is ever ahead of `origin/main`, branch from local `HEAD`.
+- Commit on the worktree branch, then integrate via merge or PR, then remove the worktree. Keep
+  `main` clean.
+- Applies to all tracked files (shell config, tool configs, `claude/`, `docs/`, install scripts).
+  Scratchpad/throwaway files outside the repo are not repository changes and are exempt.
+
+## HomeBrain work
+
+HomeBrain = the Home Assistant / Music Assistant / ceiling-speaker stack documented under
+`docs/homebrain/`. Those docs are the **source of truth**. Before doing any HomeBrain work, read in
+this order:
+
+1. **`docs/homebrain/ONBOARDING.md` first** — the authoritative onboarding / current-state doc.
+2. **`docs/homebrain/CHANGELOG.md`** — latest operational changes.
+3. The relevant **design/plan docs** for your task (e.g. the F1 / F1-R designs and the plans under
+   `docs/homebrain/plans/`).
+
+**HomeBrain state pointer** (detail lives in `ONBOARDING.md` — do not duplicate it here): Inc 0
+complete · Inc 1 radio complete · F1/F1-R complete · Speaker reconnect fixed.
+
+## Operating rules (live systems)
+
+The HomeBrain host and Home Assistant are **live**. Without explicit approval:
+
+- Do **not** touch the live host.
+- Do **not** SSH — unless the user specifically asks for a read-only check.
+- Do **not** restart any service.
+- Do **not** modify Home Assistant scripts (or automations/entities/exposure).
+- Do **not** expose new ChatGPT tools.
+
+Always:
+
+- **Never** print, log, stage, or commit secrets (tokens, keys, cookies).
+- Do **not** stage unrelated files — commit only what the task touches.
+- Keep docs, code, and runtime/config changes in separate commits where practical.
+
 ## Commits and PRs
 
 - Do NOT mention Claude, Claude Code, or AI in commit messages or PR descriptions

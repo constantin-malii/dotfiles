@@ -1,0 +1,220 @@
+# Evaluation — prompt-builder
+
+How to validate that the skill assembles correct prompts and that the lint pass catches the
+enumerated defect classes. This is the manual eval for Increments 1 and 2; a scripted,
+scored harness is out of scope until later.
+
+## Corpus
+
+**Golden examples** (`examples/golden/`) — one finished, defect-free dispatch prompt per
+profile. Used for the golden eval.
+
+| File | Profile demonstrated |
+|---|---|
+| `golden/research-only.md` | mode research-only |
+| `golden/implementation-repo-safe.md` | mode implementation + overlay repo-safe |
+| `golden/implementation-with-required-skills.md` | implementation + repo-safe with an optional `REQUIRED SKILLS` section (2 downstream skills) |
+| `golden/live-gated-claimed.md` | overlay live-gated, gate explicitly claimed |
+| `golden/homebrain.md` | overlay homebrain (implies repo-safe + live-gated), gate free |
+
+**Defect examples** (`examples/defects/`) — each carries a bad excerpt tagged with the lint
+concerns it violates and the expected verdict. Hybrid corpus: one real example plus synthetic
+examples for the classes real data did not cover.
+
+| File | Source | Concerns covered |
+|---|---|---|
+| `defects/truncation-corruption.md` | REAL (trimmed) | 1, 2, 3 (+ corrupted table cell) |
+| `defects/unsafe-git.md` | SYNTHETIC | 8 |
+| `defects/missing-sections.md` | SYNTHETIC | 10, 11, 12, 13, 14 |
+| `defects/ambiguous-broken-stale.md` | SYNTHETIC | 4, 5, 6, 9 |
+| `defects/contradiction.md` | SYNTHETIC | 7 |
+| `defects/research-write-worktree-contradiction.md` | REAL (trimmed) | 7 (write-safety sub-case), 8, 10, 11 |
+| `defects/research-optional-write-waiver-regression.md` | REAL (regression) | 7 (write-safety sub-case), 8, 10, 11 |
+| `defects/research-worktree-write-final-output-regression.md` | REAL (regression) | 1, 2, 3, 4, 7 (write-safety), 8, 10, 11 |
+| `defects/emitted-output-truncation-regression.md` | REAL (regression) | 1, 2, 3 (visible-output corruption emitted while write-safety was correct) |
+| `defects/emitted-output-regeneration-corruption-regression.md` | REAL (regression) | 1, 2, 3 (corruption from regenerating the prompt instead of emitting the linted file verbatim) |
+| `defects/relay-corruption-postemit-regression.md` | REAL (regression) | Delivery integrity — relay/display corruption after emission (file clean by hash, transcript corrupted; not a content-lint concern) |
+| `defects/skill-dumping.md` | SYNTHETIC | 15 (too many, irrelevant, and leaked companion skills in `REQUIRED SKILLS`) |
+
+## Concern coverage matrix
+
+Every one of the 15 lint concerns is exercised by at least one defect example.
+
+| # | Concern | Covered by |
+|---|---|---|
+| 1 | truncated words | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
+| 2 | incomplete sentences | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
+| 3 | dangling fragments | truncation-corruption; research-worktree-write-final-output-regression; emitted-output-truncation-regression; emitted-output-regeneration-corruption-regression |
+| 4 | broken commands | ambiguous-broken-stale; research-worktree-write-final-output-regression |
+| 5 | broken file paths | ambiguous-broken-stale |
+| 6 | stale copied instructions | ambiguous-broken-stale |
+| 7 | contradictions | contradiction; research-write-worktree-contradiction; research-optional-write-waiver-regression; research-worktree-write-final-output-regression (write-safety sub-case) |
+| 8 | unsafe git or environment rules | unsafe-git; research-write-worktree-contradiction; research-optional-write-waiver-regression; research-worktree-write-final-output-regression |
+| 9 | ambiguous optional choices | ambiguous-broken-stale |
+| 10 | missing/invalid allowed-file scope | missing-sections; research-write-worktree-contradiction; research-optional-write-waiver-regression; research-worktree-write-final-output-regression |
+| 11 | missing forbidden actions / forbidden-allowed conflict | missing-sections; research-write-worktree-contradiction; research-optional-write-waiver-regression; research-worktree-write-final-output-regression |
+| 12 | missing verification | missing-sections |
+| 13 | missing stop conditions | missing-sections |
+| 14 | missing definition of done | missing-sections |
+| 15 | skill-selection discipline | skill-dumping |
+
+Beyond the 15 content concerns, one **delivery-integrity** concern is tracked separately:
+
+| Concern | Covered by |
+|---|---|
+| Relay/display corruption (post-emission; not lintable) | relay-corruption-postemit-regression |
+
+## Golden eval procedure
+
+For each golden file:
+1. Take the stated rough intent and profile.
+2. Run the skill's assemble and lint stages.
+3. Confirm the output contains all twelve sections in order and every hard rule of the stated
+   profile (for example, a homebrain output must contain the local `main` equals `origin/main`
+   check, the live-gate-free posture, changed-files verification, and the secret scan).
+4. Pass if the assembled output matches the golden file's intent and profile rules.
+
+## Defect eval procedure
+
+For each defect file:
+1. Feed the bad excerpt through the lint pass.
+2. Compare the lint result to the file's expected verdict and expected repair summary.
+3. Pass if the lint pass detects every tagged concern and produces the expected repair or
+   flag.
+
+## Scoring
+
+- Report **recall per concern**: of the defect entries tagging a concern, how many the lint
+  pass detected.
+- Structural concerns (7 through 14) are explicit section checks and are expected to reach
+  full detection.
+- Mechanical concerns (1 through 6) are checked by inspection until the deterministic
+  `prompt_lint.py` script lands (Increment 3); record them as inspection-based and do not
+  claim perfect detection for them yet.
+- Skill-selection discipline (concern 15) is judgment-based — the `REQUIRED SKILLS` section's
+  relevance, count, and companion-leakage are LLM inspection calls, not deterministic checks,
+  so record it as inspection-based like concerns 1 through 6.
+
+## Deterministic lint (prompt_lint.py)
+
+The deterministic script `prompt_lint.py` (Increment 3) covers the mechanically checkable
+subset: unbalanced code fences, broken markdown tables outside fences, placeholder markers
+outside fences and inline code, required-section presence and non-emptiness in prompt mode,
+trailing-hyphen / connective-before-break signals, and (prompt mode) the write-safety
+contradiction sub-case of concern 7 — a file write granted under a research-only,
+no-worktree, or no-main-edit stance. The write-safety check is conservative: it fires only
+when an affirmative write grant is present (a "Write:" allowed-files bullet, or a "write
+exception" / "working tree only" carve-out), so an ordinary `implementation` + `repo-safe`
+prompt (which grants a write *and* requires a worktree) is never flagged.
+
+How to run it as part of the eval:
+
+```bash
+# Structural check across the corpus and skill files (expect clean):
+python ~/.claude/scripts/prompt_lint.py claude/skills/prompt-builder
+
+# Prompt-mode check on a golden example's embedded prompt (expect clean):
+awk '/^```/{f=!f; next} f' claude/skills/prompt-builder/examples/golden/research-only.md \
+  | python ~/.claude/scripts/prompt_lint.py --stdin --prompt
+```
+
+Recorded run (2026-07-01, Python 3.12):
+- File-mode on the full skill dir (`SKILL.md`, references, examples): clean, 0 issues.
+- Prompt-mode on all four golden embedded prompts: clean, 0 issues each.
+- Prompt-mode on a synthetic bad prompt (only ROLE + GOAL, GOAL ending on a connective):
+  11 findings — 10 missing required sections plus 1 dangling line. Detection confirmed.
+- Unit behaviour confirmed: unbalanced fence flagged; a broken table INSIDE a fence not
+  flagged; placeholder in prose flagged; the same placeholder inside backticks not flagged.
+
+Write-safety detection run (2026-07-01, Python 3.12):
+- Prompt-mode on the `research-write-worktree-contradiction` bad excerpt: both write-safety
+  contradictions flagged (research-only + write; no-worktree + write), alongside the expected
+  missing-section findings for the partial excerpt.
+- Prompt-mode on a full 12-section research-only prompt with a working-tree write exception:
+  exactly 2 write-safety contradictions, no missing-section noise.
+- Prompt-mode on a full 12-section prompt that forbids editing `main` and grants a write with
+  no worktree mentioned: the third write-safety branch fires (no-main-edit + write, no worktree).
+- Control — a full `implementation` + `repo-safe` prompt granting a write *and* requiring a
+  worktree: clean, 0 issues. No false positive. All four goldens also remained clean.
+
+Regression run (2026-07-01, Python 3.12) — the `research-optional-write-waiver-regression`
+example (a real generated prompt that slipped the earlier rule):
+- Prompt-mode on the full 12-section regression prompt: 3 write-safety contradictions flagged —
+  the worktree-requirement waiver, research-only + write, and no-worktree + write — with no
+  missing-section noise. The earlier linter missed this because the write was phrased "Write
+  (optional …)" / "single optional uncommitted working-tree file" and the worktree was removed by
+  an explicit waiver rather than a "do not create worktrees" prohibition; both phrasings are now
+  covered.
+- The prior `research-write-worktree-contradiction` example still flags (no regression).
+- All four goldens remained clean after the broadened patterns (no new false positives).
+
+Final-output regression run (2026-07-01, Python 3.12) — the
+`research-worktree-write-final-output-regression` example (a real failed clean-session output:
+research-only + worktree + optional write, emitted with truncation artifacts):
+- Prompt-mode on the emitted text: 3 findings — a truncated word (`repositor-`), a dangling
+  connective (`and` before a break), and the write-safety contradiction (research-only + write).
+  The write-safety check fires **even though a worktree step is present**, confirming the
+  worktree does not rescue a research-only write.
+- This validates the Stage 4 final-output hygiene pass: linting the *emitted* text (not just the
+  draft) catches both the contradiction and the truncation. File-mode on the corpus stays clean
+  (the artifacts live inside a fenced excerpt).
+- All four goldens still clean; prior regression examples still flag.
+
+Visible-output regression run (2026-07-02, Python 3.12) — the
+`emitted-output-truncation-regression` example (a real clean-session output whose write-safety was
+correct — chat-only, no writes — but whose emitted text was riddled with mid-word truncation while
+the lint report still claimed clean):
+- Prompt-mode on the emitted text: the known-term truncation check flags `HomeBrai`/`homebrai`
+  (3 findings). The many other mid-word cuts (`repor`, `comp`, `aon`, `Assistect`, `t mode`,
+  `wantrain`) are **not** deterministically caught — which is the point: `prompt_lint.py` is a
+  backstop, not the gate.
+- Process hardening (SKILL.md Stage 4, lint-checklist concern 1): the exact visible text must be
+  read; a clean `prompt_lint.py` result does not authorize emission; on any corruption the process
+  STOPs and re-renders and the lint report may not claim clean.
+- Added a conservative deterministic known-term truncation heuristic (`HomeBrain`, `worktree`,
+  `Assistant`, `repository`, …); goldens remain clean (no false positives on short prefixes).
+
+Regeneration-corruption regression run (2026-07-02, Python 3.12) — the
+`emitted-output-regeneration-corruption-regression` example (a real clean-session output whose
+write-safety was correct — chat-only, zero writes — but whose visible prompt was corrupted while
+the lint report falsely claimed clean):
+- Root cause identified: the prompt was **regenerated / re-typed** into the reply after being
+  linted, so the check ran on a clean copy while the visible copy was corrupted.
+- Process fix (SKILL.md Stage 4): write the final prompt to a file, run
+  `prompt_lint.py --prompt <file>` on it, read that file word-by-word, then emit the file's exact
+  bytes verbatim (`cat`) — never regenerate the prompt separately. The lint report may claim clean
+  only for the exact bytes shown, and only if they came verbatim from the linted file.
+- Deterministic backstop on the fixture flags `HomeBrai` (known-term); the many other
+  corruptions (`research-oires`, `checkmended`, `variantnt`, …) are caught by the verbatim-emit +
+  read discipline, not the script. Note: `prompt_lint.py --prompt <file>` lints a file directly.
+
+Relay/display-corruption investigation + mitigation (2026-07-02, Python 3.12):
+- A clean-session run emitted a prompt that appeared corrupted in the transcript while claiming
+  clean. The raw linted file was inspected directly: SHA-256 verified, byte count 5901, **zero**
+  occurrences of every reported corruption fragment, pure printable ASCII, all key terms intact.
+  The corruption was **not in the file** — it was introduced by the display/relay layer *after*
+  emission, which the skill and `prompt_lint.py` cannot see or repair.
+- Conclusion: this is not a content-lint defect and cannot be caught deterministically (the script
+  only ever sees the clean file). The mitigation is **verifiability, not detection**: Stage 4 now
+  treats the output file as the authoritative artifact and reports its **path + byte count +
+  SHA-256**, claims cleanliness only of that file (never the transcript), and prefers file delivery
+  (inline text labelled a non-authoritative convenience copy) for long prompts. If the caller's
+  rendered copy does not match the hash, the file is authoritative. Captured as
+  `relay-corruption-postemit-regression`.
+
+## Results
+
+The deterministic portion has been run (see above). The golden and defect eval procedures
+below also require the judgment-based LLM lint pass; that combined run is recorded here.
+
+| Date | Scope | Result |
+|---|---|---|
+| 2026-07-01 | Deterministic lint (prompt_lint.py) across corpus + skill | Clean; detection confirmed on synthetic bad inputs |
+| 2026-07-01 | Write-safety contradiction (concern 7 sub-case) | Deterministic: 3 bad shapes flagged, control + 4 goldens clean. LLM guidance: profiles.md + lint-checklist.md concern 7/8/10/11 |
+| 2026-07-01 | Write-safety regression (optional write + waived worktree) | Deterministic: regression example flagged (3 findings), prior example still flagged, 4 goldens clean. Rule hardened: research-only = zero writes; worktree requirement non-waivable |
+| 2026-07-01 | Final-output regression (research-only + worktree + write, emitted with truncation) | Deterministic: flagged (truncation + dangling + write-safety, worktree does not rescue). Added Stage 4 final-output hygiene pass (lint the emitted text, not a draft). Clean-session test: builder stops-and-asks, no truncation |
+| 2026-07-02 | Visible-output regression (correct write-safety, corrupted emitted text) | Hardened Stage 4: read the exact visible text; clean prompt_lint does not authorize emission; STOP + re-render on any corruption; lint report cannot claim clean over corrupted output. Added known-term truncation heuristic (flags HomeBrai). Goldens clean |
+| 2026-07-02 | Regeneration-corruption regression (lint clean but visible prompt corrupted) | Root cause: prompt regenerated after linting. Stage 4 now mandates verbatim-from-file emit (write to file → lint the file → read the file → cat it); lint report valid only for the exact emitted bytes. Fixture added; clean-session test re-run |
+| 2026-07-02 | Relay/display corruption identified as post-emission (not in file) | Raw linted file verified clean by SHA-256; corruption is downstream of the skill. Mitigation added: Stage 4 reports artifact path + byte count + SHA-256, claims cleanliness only of the file (never the transcript), prefers file delivery for long prompts. Fixture `relay-corruption-postemit-regression` added |
+| 2026-07-02 | Skill-selection guidance added (concern 15) | New `references/skill-selection.md` (builder companion vs downstream required skills, curated table, 0–3 bounds); optional `REQUIRED SKILLS` section wired into core-template.md + output-schema.md (placed after ROLE, omitted when empty); lint concern 15 added (judgment-based). Golden `implementation-with-required-skills` and defect `skill-dumping` added. Deterministic file-mode lint over the skill dir: clean (the optional section is invisible to `prompt_lint.py`'s twelve-section check, so omitting it changes nothing) |
+| (pending) | LLM golden + defect eval (per-concern recall) | to be recorded when the full lint pass is run |
