@@ -115,18 +115,35 @@ When a new tool is installed on this machine and should be available on all mach
 ## Custom Node tools
 
 `tools/` holds small standalone Node CLIs that aren't part of Claude Code (skills/scripts) and
-aren't winget packages. Each has its own `package.json` and is not auto-installed by `install.sh`
-— set up manually per tool:
+aren't winget packages. Each has its own `package.json` and is **not** auto-installed by
+`install.sh` — set up manually per tool.
+
+**Prerequisite: Node.js 18+.** It is deliberately not in `winget-packages.json`, so a machine
+bootstrapped by the steps above has no `node`/`npm` and the setup below fails at `npm install`.
+Install it first: `winget install OpenJS.NodeJS.LTS`.
+
+**The shell aliases ship everywhere; the dependencies do not.** `install.sh` deploys
+`shell/.bash_profile` to every machine, so `url2pdf` and `url2pdf-login` exist as commands
+immediately and fail with `Cannot find module 'playwright'` until the per-tool setup is run.
+`verify.sh` does **not** check these tools, so a clean `verify.sh` says nothing about them.
 
 - `tools/url2pdf` — renders a URL to PDF via headless Chrome (Playwright). Setup:
-  `cd tools/url2pdf && npm install && npx playwright install chromium`. Usage: `url2pdf <url> [output.pdf]`
-  (alias defined in `shell/.bash_profile`).
+  `cd tools/url2pdf && npm install && npx playwright install chromium`. Usage:
+  `url2pdf <url> [output.pdf] [--state <state-name>]` (aliases defined in `shell/.bash_profile`).
   - For pages behind a login: `url2pdf-login <url> [state-name]` opens a visible browser, waits for
     you to log in manually (including any email/OTP step), then saves the session to
-    `tools/url2pdf/.states/<state-name>.json` (defaults to the URL's hostname). Pass
-    `--state <state-name>` to `url2pdf` to reuse that session across any page on the same site.
+    `tools/url2pdf/.states/<state-name>.json`. The default name is the URL's hostname **with dots
+    and other punctuation replaced by dashes** — `wiki.example.com` becomes `wiki-example-com`.
+    `url2pdf-login` prints the exact path it wrote. Pass `--state <state-name>` to `url2pdf` to
+    reuse that session across any page on the same site.
+  - **Sessions expire.** `url2pdf` detects the usual case (a redirect off the requested host) and
+    exits non-zero telling you to re-run `url2pdf-login`. It cannot catch every variant, so if a
+    PDF comes back looking like a login screen, that is why — re-capture the session.
+  - Tests: `cd tools/url2pdf && npm test` (uses Node's built-in runner; no Playwright needed —
+    it covers argument handling and filename derivation, not the browser).
   - `tools/url2pdf/.states/` holds live session cookies — gitignored, never commit it, never print
-    its contents.
+    its contents. State names are restricted to `[A-Za-z0-9._-]` precisely because the name becomes
+    a filename, and a `..` in it would write credentials outside that gitignore.
 
 ---
 

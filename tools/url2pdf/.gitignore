@@ -1,3 +1,7 @@
 node_modules/
+# Rendered output defaults to $PWD; this catches any written inside the tool dir.
 *.pdf
+# Live session cookies + localStorage written by login.js -- NEVER commit.
+# The root .gitignore's *token*/*secret*/*key* patterns do NOT match these filenames,
+# so this line is the only thing preventing a credential commit.
 .states/
