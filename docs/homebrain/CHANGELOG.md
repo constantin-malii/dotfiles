@@ -3,7 +3,7 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
-## 2026-09-05 — S1b-2 Slice 5: reply route PASSES, **sign-off WITHHELD** (wake-word false accepts) · both pending fixes applied · 3 wake words tried, all misfire
+## 2026-09-05 — S1b-2 Slice 5: reply route PASSES, **sign-off WITHHELD** (wake-word false accepts) · both pending fixes applied · 3 wake words tried, 2 confirmed misfiring, 3rd under observation
 
 > **Verdict: Slice 5 is NOT signed off.** The reply route itself is proven — four weeks of unattended
 > production plus a live operator run. What blocks sign-off sits upstream of it: the satellite wakes on
@@ -36,10 +36,10 @@ design live in the per-topic docs; this log is for discrete operational changes.
 | 4 · dropped-reply guard + chirp | **NOT DONE** — the chirp needs the firmware step S1b-2 deliberately skipped; the resolver half (unfetchable URI → `reply_started=false`) was never run |
 | 5 · latency + cost | **not measured** |
 | 6 · barge-in | **not exercised** |
-| 7 · no regressions | **pass** — music, radio, news, status, volume all exercised clean |
+| 7 · no regressions | **partial** — music, radio, news, status and volume were each exercised without fault during the operator run, but no systematic regression pass was made |
 | media command silent-on-success | **pass** — `SAY SKIPPED: this turn started library://radio/3` → `RADIO CONFIRM ... is playing` |
 | volume persists into next turn | **pass** — `VOLUME volume_up: baseline 0.25 -> 0.35`, then the next turn ducked **from 0.35** |
-| both wake words exercised | **pass** |
+| both wake words exercised | **pass** — slot 1 "Okay Nabu"; slot 2 as "Hey Jarvis"/"Kenobi" before the rename to "Hey Mycroft" |
 | tool isolation | **pass, with a caveat** — see the hallucinated action below |
 
 ### The agent split needed three fixes, all found in traces rather than logs
@@ -50,7 +50,9 @@ design live in the per-topic docs; this log is for discrete operational changes.
   training data with full confidence (*"the most recent Formula 1 race ... October 8, 2023"* — wrong by
   three years). **It never had web access:** asked the same question, it could not get Tokyo's
   temperature while the knowledge agent could. The live headlines it *did* produce came from the
-  resolver's own `news` tool (`NEWS bucket=world`), by design. **The ADR's separation held throughout.**
+  resolver's own `news` tool (`NEWS bucket=world`), by design. **The ADR's tool/web separation held
+  throughout** — which is not the same as saying the split is without risk; see the room-audio
+  exposure below, which the ADR did not anticipate.
   Fixed by prompt: defer to the knowledge agent, never state time-varying facts from memory, one or two
   sentences capped at ~60 words (which also makes a 180 s overrun structurally impossible), and stay
   silent when not clearly addressed. **VERIFIED in production 2026-09-02:** *"Who flew first on the moon
@@ -91,20 +93,30 @@ exposure the ADR's threat model (injection flowing *in*) did not anticipate.
    and the wake model is the only remaining explanation.
 4. `wake_word_sensitivity` is already at its floor (`Slightly sensitive`) — **no lever remains.**
 
-**Three wake words tried so far, three failures, same slot — that points at the wake model, not the
-word.** A fourth (`Hey Mycroft`) is now live and under observation. The
+**Three wake words tried on the same slot; two confirmed misfiring.** `Hey Jarvis` and `Kenobi` both
+false-woke repeatedly; `Hey Mycroft` is the third and is **live and under observation** — the operator
+reports it working so far, which is encouraging but not yet a measured result. If it also misfires,
+that points at the wake model rather than the word. The
 real fix is firmware (a better model, or a confidence threshold the UI does not expose), which is the OTA
 gate this workstream has deliberately kept shut. **Recommendation: treat slot 2 as unfit for always-on
 use** until `Hey Mycroft` has been observed for a few days — arm it to ask something, disarm it otherwise.
+
+### Also found and FIXED here
+
+- **`ONBOARDING.md` understated the exposed surface** — §1 and §4 named three ChatGPT tools when there are
+  at least five (`script.news` and `script.media_status` are both exposed and were both observed firing
+  within 24 h), and the `script.ceiling_*` list omitted `next` / `previous` / `play_music`. Both sections
+  corrected.
+- **`ONBOARDING.md` still claimed "turn **down the volume**" does not work** — disproved by fix (b) above,
+  which verified that phrasing reaching the resolver. Replaced with the extended phrasing list.
+- **`ONBOARDING.md` §6 said nothing about the slot-2 exposure** — a reader onboarding from the
+  authoritative current-state doc would have armed the web-search wake word unwarned. Added.
 
 ### Also found, not fixed
 
 - **`status` reports the duck floor as the user's volume.** *"Playing 'Dicke Titten' by Rammstein at 15%
   volume"* — 15% is the duck floor mid-turn, not the listening level. Same class as the `reply_volume`
   misreport fixed 2026-08-02; the floor case was missed.
-- **`ONBOARDING.md` §4 understated the exposed surface** — it named three ChatGPT tools when there are at
-  least five (`script.news` and `script.media_status` are both exposed and both fired within 24 h) and
-  omitted `ceiling_next` / `ceiling_previous` / `ceiling_play_music`. Corrected in this branch.
 - **`ANNOUNCE send failed (BrokenPipeError)`** on 2026-08-26 and 2026-08-31 — retried and succeeded via
   `tts.speak` both times. Self-healing, twice-seen, not chased.
 - **Runbook correction, not applied:** `quick-connect-and-health-check.md` §1 says to run
@@ -124,7 +136,9 @@ use** until `Hey Mycroft` has been observed for a few days — arm it to ask som
 ### Runtime config
 
 - `reply_volume` 0.60 → **0.70** at the operator's request (global — there is no per-agent reply volume).
-  Restart 2026-09-05 10:57:01; backup `~/mass-resolver/.bak/20260904-114909/`.
+  Backup taken **2026-09-04** (`~/mass-resolver/.bak/20260904-114909/`) when the change was staged;
+  the operator-run restart that made it live was **2026-09-05 10:57:01**. The date gap is expected,
+  not a typo — the staging and the restart happened on different days.
 
 ### Proposed BACKLOG note (not applied)
 
@@ -136,7 +150,8 @@ use** until `Hey Mycroft` has been observed for a few days — arm it to ask som
 
 ### Verification
 
-- Tests **337 local** (was 326). Health check green after each restart: resolver `active`, `/command`
+- Tests **326 local, unchanged** — this branch contains no code or test changes (the 337 count belongs
+  to `homebrain/radio-favorites-listing`). Health check green after each restart: resolver `active`, `/command`
   bound, `200/401`, **zero tracebacks** across the whole log.
 - No firmware touched. Every restart operator-run. Live changes: the `voice_ceiling_speakers` POST, two
   agent prompts, two satellite `select` values, and `reply_volume` — each with a rollback pointer.
