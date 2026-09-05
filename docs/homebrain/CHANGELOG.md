@@ -176,6 +176,159 @@ design live in the per-topic docs; this log is for discrete operational changes.
   (`I couldn't find a station for that`) before the fix existed, and one test pins that **no
   non-ASCII character can reach the spoken text** — a list that reads Cyrillic aloud is useless.
 
+## 2026-09-05 — S1b-2 Slice 5: reply route PASSES, **sign-off WITHHELD** (wake-word false accepts) · both pending fixes applied · 3 wake words tried, 2 confirmed misfiring, 3rd under observation
+
+> **Verdict: Slice 5 is NOT signed off.** The reply route itself is proven — four weeks of unattended
+> production plus a live operator run. What blocks sign-off sits upstream of it: the satellite wakes on
+> ordinary conversation, so the assistant is certified to reply correctly **when correctly addressed**,
+> and being correctly addressed is not currently reliable.
+
+### Pending fixes from Slice 4 — both closed
+
+- **(a) Knowledge-agent instructions — were already applied**, confirmed by reading the prompt (HA's
+  WS API exposes subentry ids but not their data, so this needed the operator). Behaviour verified
+  independently: no markdown, no bullets, no URLs, metric unprompted, one-to-two sentences by default.
+  Its `stay under about 150 words` also means the knowledge agent **cannot** hit the 180 s reply
+  ceiling — that exposure sits entirely on the control agent.
+- **(b) Volume phrasings — APPLIED.** `/tmp/new_vcs2.json` POSTed (200 `{"result":"ok"}`, first try;
+  the endpoint that kept timing out behaved). Diffed against live first: the only delta was 4 added
+  "up" and 5 added "down" sentences, with the Slice-4 reroute intact (7 triggers, 0 `media_stop`,
+  0 direct `volume_set`, 4 `rest_command.resolver_command`). **VERIFIED live:**
+  `lower the volume` → `VOLUME volume_down: -> 0.3` · `turn down the volume` → `0.2` ·
+  `decrease the volume` → `0.1`, restored to 0.4. Rollback `/tmp/vcs_SNAPSHOT.json`;
+  pre-POST live copy saved to `/tmp/live_vcs_now.json`.
+
+### Slice 5 steps
+
+| Step | Result |
+|---|---|
+| 1 · audible reply over radio | **pass** — operator-eared, `replayed=True` |
+| 1 · over local music | **pass** — Rammstein "Dicke Titten" turn |
+| 2 · restore to pre-duck baseline | **pass** — `restored -> 0.46` / `0.36` / `0.27` / `0.25`, exact, every turn |
+| 3 · source replay | **pass** — `replayed=True`; `RESUME replaying library://radio/2` |
+| 4 · dropped-reply guard + chirp | **NOT DONE** — the chirp needs the firmware step S1b-2 deliberately skipped; the resolver half (unfetchable URI → `reply_started=false`) was never run |
+| 5 · latency + cost | **not measured** |
+| 6 · barge-in | **not exercised** |
+| 7 · no regressions | **partial** — music, radio, news, status and volume were each exercised without fault during the operator run, but no systematic regression pass was made |
+| media command silent-on-success | **pass** — `SAY SKIPPED: this turn started library://radio/3` → `RADIO CONFIRM ... is playing` |
+| volume persists into next turn | **pass** — `VOLUME volume_up: baseline 0.25 -> 0.35`, then the next turn ducked **from 0.35** |
+| both wake words exercised | **pass** — slot 1 "Okay Nabu"; slot 2 as "Hey Jarvis"/"Kenobi" before the rename to "Hey Mycroft" |
+| tool isolation | **pass, with a caveat** — see the hallucinated action below |
+
+### The agent split needed three fixes, all found in traces rather than logs
+
+- **The control agent was answering general questions by explicit instruction.** Its prompt carried
+  `For other, non-home questions, answer briefly from general knowledge`, written before the split
+  existed; post-split that contradicts the ADR. It also answered *time-sensitive* questions from stale
+  training data with full confidence (*"the most recent Formula 1 race ... October 8, 2023"* — wrong by
+  three years). **It never had web access:** asked the same question, it could not get Tokyo's
+  temperature while the knowledge agent could. The live headlines it *did* produce came from the
+  resolver's own `news` tool (`NEWS bucket=world`), by design. **The ADR's tool/web separation held
+  throughout** — which is not the same as saying the split is without risk; see the room-audio
+  exposure below, which the ADR did not anticipate.
+  Fixed by prompt: defer to the knowledge agent, never state time-varying facts from memory, one or two
+  sentences capped at ~60 words (which also makes a 180 s overrun structurally impossible), and stay
+  silent when not clearly addressed. **VERIFIED in production 2026-09-02:** *"Who flew first on the moon
+  and in what year?"* → *"I can't answer that yet."*
+- **The knowledge agent claimed an action it cannot perform.** *"Um turn the volume up."* →
+  **"Turning the volume up."** It did **nothing** — no `VOLUME` line, `script.ceiling_volume_up` last
+  fired two minutes earlier, and the baseline stayed 0.46 across every following turn. Tool isolation
+  held, but the reply is indistinguishable from success. Its old wording said it had no *control*, which
+  the model read as a preference; hardened to "you have NO tools ... never say you are doing, have done,
+  or will do any of those things".
+- **Knowledge weather answered for the whole United States** — `home location` is off on the web search
+  (ADR), so it has no idea where the house is. Fixed in the prompt (`The user is in Calgary, Alberta,
+  Canada`) rather than by enabling the setting, which would leak coordinates.
+- **A wake-word rename broke a cross-reference — twice.** The control prompt named "Jarvis"; renaming slot 2 left
+  it directing the user to a wake word that no longer existed. The knowledge prompt, written
+  wake-word-agnostically ("the main assistant"), survived for free — **prefer generic cross-references
+  between agents.**
+
+### Wake-word false accepts — the reason sign-off is withheld
+
+Assist pipeline traces (`resolver.log` cannot see this — it only records turns that *reached* the
+resolver) show the satellite answering ordinary household conversation. Roughly **8 of 20** stored runs
+were false wakes, including a work call transcribed and answered with automation advice, and a private
+medical conversation. Because slot 2 carries **web search**, room audio can leave the house — an
+exposure the ADR's threat model (injection flowing *in*) did not anticipate.
+
+**Three mitigations tried, all failed:**
+
+1. `finished_speaking_detection` `relaxed` → `aggressive` — predicted to shorten captures; measured
+   afterwards, it did not meaningfully (a 20-word capture after the change vs ~45 before). It also became
+   the prime suspect for `stt-no-text-recognized` failures on slot 2. Operator chose to keep it for now.
+2. Wake word `Hey Jarvis` → `Kenobi`, on the theory that "Jarvis" was phonetically weak. **Wrong, and
+   backwards:** the detector matches an acoustic pattern, not the word, and a single unprefixed
+   three-syllable word matches *more* loosely. Three false wakes in five minutes followed.
+3. Wake word `Kenobi` → `Hey Mycroft` (2026-09-05, operator's choice over disarming) — the last
+   available option and the one with the most phonetic material. **Under observation**; if slot 2 keeps
+   false-waking on a two-word four-syllable wake phrase at minimum sensitivity, the word is exonerated
+   and the wake model is the only remaining explanation.
+4. `wake_word_sensitivity` is already at its floor (`Slightly sensitive`) — **no lever remains.**
+
+**Three wake words tried on the same slot; two confirmed misfiring.** `Hey Jarvis` and `Kenobi` both
+false-woke repeatedly; `Hey Mycroft` is the third and is **live and under observation** — the operator
+reports it working so far, which is encouraging but not yet a measured result. If it also misfires,
+that points at the wake model rather than the word. The
+real fix is firmware (a better model, or a confidence threshold the UI does not expose), which is the OTA
+gate this workstream has deliberately kept shut. **Recommendation: treat slot 2 as unfit for always-on
+use** until `Hey Mycroft` has been observed for a few days — arm it to ask something, disarm it otherwise.
+
+### Also found and FIXED here
+
+- **`ONBOARDING.md` understated the exposed surface** — §1 and §4 named three ChatGPT tools when there are
+  at least five (`script.news` and `script.media_status` are both exposed and were both observed firing
+  within 24 h), and the `script.ceiling_*` list omitted `next` / `previous` / `play_music`. Both sections
+  corrected.
+- **`ONBOARDING.md` still claimed "turn **down the volume**" does not work** — disproved by fix (b) above,
+  which verified that phrasing reaching the resolver. Replaced with the extended phrasing list.
+- **`ONBOARDING.md` §6 said nothing about the slot-2 exposure** — a reader onboarding from the
+  authoritative current-state doc would have armed the web-search wake word unwarned. Added.
+
+### Also found, not fixed
+
+- **`status` reports the duck floor as the user's volume.** *"Playing 'Dicke Titten' by Rammstein at 15%
+  volume"* — 15% is the duck floor mid-turn, not the listening level. Same class as the `reply_volume`
+  misreport fixed 2026-08-02; the floor case was missed.
+- **`ANNOUNCE send failed (BrokenPipeError)`** on 2026-08-26 and 2026-08-31 — retried and succeeded via
+  `tts.speak` both times. Self-healing, twice-seen, not chased.
+- **Runbook correction, not applied:** `quick-connect-and-health-check.md` §1 says to run
+  `eval "$(ssh-agent -s)"` each call. Followed literally that spawns a fresh agent per call; after ~13 of
+  them `ssh-add` began hanging and SSH calls timed out at two minutes. A persistent agent already exists —
+  the preamble should be `ssh-add` alone. The runbook is outside this branch's allowed files.
+
+### Carried-over items — observed, not fixed
+
+- **0.04 crater:** repeated volume-down steps are a fixed **absolute 0.10**, so 0.44 minus four steps lands
+  exactly on 0.04; from 0.40 the walk is 0.30/0.20/0.10. Corroborates the stepping route. The second,
+  unidentified source is untouched and still open.
+- **MA transient `code=2`**, **two-Assist-turns**, **`_restore` sub-second stale read**, **Calgary alias**,
+  **S1a grace-G** — no recurrence observed, no action taken. The two-Assist-turns item is now better
+  explained by repeated false wakes during continuous conversation than by one event firing twice.
+
+### Runtime config
+
+- `reply_volume` 0.60 → **0.70** at the operator's request (global — there is no per-agent reply volume).
+  Backup taken **2026-09-04** (`~/mass-resolver/.bak/20260904-114909/`) when the change was staged;
+  the operator-run restart that made it live was **2026-09-05 10:57:01**. The date gap is expected,
+  not a typo — the staging and the restart happened on different days.
+
+### Proposed BACKLOG note (not applied)
+
+> `S1b-2` row · **proposed**: Slice 5 **partially complete** — reply route, duck/restore/replay,
+> stop/resume/volume and both wake words verified live; steps 4 (dropped-reply guard), 5 (latency) and
+> 6 (barge-in) outstanding. **Sign-off withheld** pending wake-word false accepts, which are a
+> firmware-level problem and warrant their own item (`S1c — satellite wake reliability`) rather than more
+> config tuning. Slot 2 recommended off by default until then.
+
+### Verification
+
+- Tests **326 local, unchanged** — this branch contains no code or test changes (the 337 count belongs
+  to `homebrain/radio-favorites-listing`). Health check green after each restart: resolver `active`, `/command`
+  bound, `200/401`, **zero tracebacks** across the whole log.
+- No firmware touched. Every restart operator-run. Live changes: the `voice_ceiling_speakers` POST, two
+  agent prompts, two satellite `select` values, and `reply_volume` — each with a rollback pointer.
+
 ## 2026-08-03 — Assist SPLIT into control + knowledge agents (2nd wake word, web search, tool-isolated) · long replies allowed · pre-announcement bump fixed
 
 > **ADR:** [`2026-08-03-agent-split-routing-adr.md`](./2026-08-03-agent-split-routing-adr.md). Config only —

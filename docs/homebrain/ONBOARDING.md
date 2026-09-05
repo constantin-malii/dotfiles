@@ -15,11 +15,13 @@ A host-side **`mass-resolver`** service (Python 3.5, on the host `costea@192.168
 - **Exposed ChatGPT tools (all synchronous — F1-R "hard tool return"):**
   - `script.play_music` — play from the **local** music library (MA `filesystem_smb`).
   - `script.play_radio` — radio (favorites-first → RadioBrowser; by station/genre/country/language).
-  - `script.find_stations` — list stations (genre/country).
+  - `script.find_stations` — list stations (genre/country), and with **no filter** the favourites list.
+  - `script.news` — read the latest world headlines (resolver `news` capability).
+  - `script.media_status` — what is playing on the ceiling, and at what volume.
   - Each calls `rest_command.resolver_command`, captures `response_variable`, and **returns `{chat_text: r.content.chat_text}` via `stop` + `response_variable`** so the OpenAI agent relays the real outcome. The agent carries one instruction: *"When a tool returns a chat_text field, relay that text verbatim."*
 - **TTS ownership:** the **resolver is the sole TTS owner** (Piper speaks `spoken_text`). The scripts do **NOT** call `tts.speak` and do **NOT** use `set_conversation_response` (proven ignored by the OpenAI agent for tool-called scripts — see the F1-R addendum). Play success is silent (the stream is the confirmation); no-match and find speak once.
 - **Dual-path kept:** the **event adapter** (`mass_play_request` / `mass_radio_request`) remains live as a fallback; **`mass_sync_request`** (Lidarr) is **untouched**.
-- **Rollback:** per-script backups at `~/script_backups/*.preF1R.json`; restoring one reverts just that script to its event path while `/command` and the event path stay available. `gpt-4o-mini` unchanged; no new tools beyond the three above.
+- **Rollback:** per-script backups at `~/script_backups/*.preF1R.json`; restoring one reverts just that script to its event path while `/command` and the event path stay available. `gpt-4o-mini` unchanged.
 
 Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
@@ -41,7 +43,7 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - **Two wake words, two agents (2026-08-03 — see the agent-split ADR):**
   - **"Okay Nabu"** → pipeline **Living Room ChatGPT** → prefer-local intents first, then
     `conversation.openai_conversation` (gpt-4o-mini) **with** house tools, **no** web. ← house control
-  - **"Hey Jarvis"** → pipeline **Living Room Knowledge** → `conversation.openai_conversation_2` (gpt-4o)
+  - **"Hey Mycroft"** (was "Hey Jarvis", then "Kenobi"; both misfired — see CHANGELOG 2026-09-05) → pipeline **Living Room Knowledge** → `conversation.openai_conversation_2` (gpt-4o)
     **with web search**, **no tools/entities**, prefer-local **off**. ← questions / live data
   Never give the control agent web access, and never give the knowledge agent tools — that separation is the
   whole security argument (`2026-08-03-agent-split-routing-adr.md`).
@@ -95,7 +97,9 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   "resume", "volume up/down", "set volume" — so a fix applied only to the scripts is **invisible to voice**.
   This cost several rounds of debugging on 2026-08-02. Both paths now route through the resolver
   (`interaction` modes `resume` / `volume_up` / `volume_down` / `set_volume`); keep them in step.
-  Phrasing is exact-match: "turn **the volume** down" works, "turn **down the volume**" does not.
+  Phrasing is exact-match against the automation's sentence list. **Extended 2026-09-05:** "lower the
+  volume", "turn down the volume", "decrease the volume", "reduce the volume", "raise/increase the
+  volume" and "turn up/down the volume|music" now all match (verified reaching the resolver).
 - **The satellite's own `media_player` plays on EVERY turn** (~107 state changes in 20 min) — wake
   sounds and the local TTS copy, all inaudible (no speaker). So "local playback **while the satellite
   is idle**" is the only usable signal that a **timer/alarm** fired: HA emits **no event** for voice-timer
@@ -107,8 +111,8 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   garbled transcription is invisible there — several 2026-08-02 puzzles ("volume up" doing nothing, the wrong
   station) had to be inferred from `last_triggered` instead. Use the traces first. (Per the 2026-08-01 notes;
   `openai_conversation` debug logging is also on.)
-- **ChatGPT-exposed media tools (resolver-backed — F1-R hard tool return):** `script.play_music` (local library), `script.play_radio` (radio), `script.find_stations` (station list). See the **Resolver / Inc 0–1 / F1-R current state** section.
-- **Local ceiling control / fast-phrase layer (`script.ceiling_*`):** `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `announce` (TTS primitive, **not** LLM-exposed), plus the legacy `ceiling_play_radio` (kept for the deterministic sentence-trigger layer; **un-exposed** to ChatGPT).
+- **ChatGPT-exposed media tools (resolver-backed — F1-R hard tool return):** `script.play_music` (local library), `script.play_radio` (radio), `script.find_stations` (station list / favourites), `script.news` (world headlines), `script.media_status` (now playing + volume). **Five, not three** — corrected 2026-09-05 after `news` and `media_status` were both observed firing. See the **Resolver / Inc 0–1 / F1-R current state** section.
+- **Local ceiling control / fast-phrase layer (`script.ceiling_*`):** `pause`, `resume`, `stop`, `set_volume`, `volume_up`, `volume_down`, `next`, `previous`, `play_music`, `announce` (TTS primitive, **not** LLM-exposed — and **broken**, see §5), plus the legacy `ceiling_play_radio` (kept for the deterministic sentence-trigger layer; **un-exposed** to ChatGPT).
   **Rewired 2026-08-02:** `stop` → `media_pause` (**never** `media_stop` — it wedges the Squeezelite child and
   holds MA's playback lock); `resume` → resolver `interaction:resume` (replays the last **real** source, since
   `media_play` cannot restart a cleared radio queue and would otherwise replay a spent TTS clip);
@@ -143,6 +147,14 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - ⚠️ **YTM cookie rotates** — re-extract via incognito when YTM returns nothing.
 - ⚠️ **Piper TTS** crashes the Assist pipeline → TTS **off** in pipelines; only explicit `tts.speak` to ceiling works. Whisper STT fine (model `auto`/sherpa-parakeet; couldn't pin tiny-int8). **Update 2026-07-14:** Piper TTS **runs fine in the new "Living Room Voice" satellite pipeline** (spoken replies confirmed on the reSpeaker) — the old crash may be version-stale; the shared HA/phone pipelines still keep TTS off pending a re-test.
 - ⚠️ **HA↔MA connection** drops after MA restarts / intermittently (internal DNS). Recover: `POST /api/config/config_entries/entry/01KVPNW1JFHJG30NANAPVARHY8/reload`. A1/A2a automate this.
+- ⚠️ **The satellite false-wakes on ordinary conversation, and slot 2 carries web search.** Roughly
+  8 of 20 stored pipeline runs were unaddressed speech (including a work call and a private medical
+  conversation). `wake_word_sensitivity` is already at its floor, and three wake words have been
+  tried on slot 2. Because the knowledge agent has web search, **room audio can leave the house** —
+  an exposure the agent-split ADR's threat model did not anticipate. **Treat slot 2 as unfit for
+  always-on use** until this is measured again; arm it to ask, disarm it otherwise. Ceiling audio
+  also wakes the satellite (a timer announcement came back as "The pipeline is finished"), so
+  replies and announcements contribute. See CHANGELOG 2026-09-05.
 - ⚠️ **MA stuck playback lock** ("previous holder appears stuck") — consequence of the stop-wedge; clears on MA restart; `players/cmd/stop` does **not** reliably clear it.
 
 ---
@@ -263,7 +275,7 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 | **Ceiling speech goes through the resolver `say_text`, NOT `tts.speak`** (revised 2026-09-05) | `tts.speak` routes to MA `play_announcement`, which **fails on this player** ("Failed to stream audio") — MA requires correct state/elapsed reporting and Universal→Squeezelite does not give it. `script.ceiling_announce` is broken and kept only for reference. The working primitive is resolver `interaction:say_text` (text → `/api/tts_get_url` → `play_media`), which reuses the whole reply route. |
 | **Auto-reload automations (A1 + A2a) exist** | The HA↔MA integration drops its connection (internal DNS) and doesn't auto-reconnect — it sits silently dead until a config-entry reload. A1 covers restart drops; A2a's active probe covers silent drops. Both reload the entry to self-heal, with debounce/cooldown to avoid loops. |
 | **`http_profile` left at `no_content_length`** | No value fixes both play and stop: `chunked` breaks streaming on HTTP/1.0; `forced_content_length` still wedges. `no_content_length` is the baseline that at least plays. |
-| **Control and knowledge agents are SPLIT (2026-08-03)** | Web search belongs on an agent with **no** house tools: untrusted web text + ability to act is what makes prompt injection consequential. "Okay Nabu" = tools, no web (prefer-local first). "Hey Jarvis" = web, no tools. Inverting to LLM-first was rejected — it trades a safe failure ("didn't understand") for an unsafe one (wrong action), adds LLM latency to every command, and breaks house control when the internet does. ADR: `2026-08-03-agent-split-routing-adr.md`. |
+| **Control and knowledge agents are SPLIT (2026-08-03)** | Web search belongs on an agent with **no** house tools: untrusted web text + ability to act is what makes prompt injection consequential. "Okay Nabu" = tools, no web (prefer-local first). "Hey Mycroft" (was "Hey Jarvis", then "Kenobi") = web, no tools. Inverting to LLM-first was rejected — it trades a safe failure ("didn't understand") for an unsafe one (wrong action), adds LLM latency to every command, and breaks house control when the internet does. ADR: `2026-08-03-agent-split-routing-adr.md`. |
 | **The resolver owns ceiling volume, not the player** | While a turn is ducked the live volume IS the 0.15 floor, so any relative step computed from it lands wrong and the restore then wipes it. Volume commands therefore move the **duck baseline** and take effect when the turn ends. Both the LLM script path and the prefer-local sentence automation route through the resolver — fixing only one is invisible to the other. |
 | **NAT NIC + host Squeezelite for the ceiling zone** | macvtap isolates host↔VM; a reversible second NAT NIC (`192.168.122.10`) lets the host reach MA's stream server. Host Squeezelite drives the analog `hw:1,0` ceiling speakers (no desktop/PulseAudio, exclusive ALSA). |
 
