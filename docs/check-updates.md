@@ -44,12 +44,19 @@ Without it, the script prints the install command instead of failing.
 ## Applying updates
 
 ```bash
-updates-apply            # prompts before winget upgrade --all and choco upgrade all
+updates-apply            # non-elevated: prompts before winget upgrade --all and choco upgrade all
 updates-apply --yes      # same, no prompts
-updates-apply --os       # also offers to install pending Windows Updates (elevated shell required)
+updates-apply --os       # elevated only: also offers to install pending Windows Updates
 ```
 
-Windows Updates are opt-in via `--os` and always require an elevated terminal — OS-level updates can trigger a reboot, so they're excluded by default even with `--yes` unless `--os` is also passed.
+**Run it twice, in two different shells — this is intentional, not a bug:**
+
+- **Non-elevated** shell → does winget + choco, skips Windows Update.
+- **Elevated** (Run as Administrator) shell → does Windows Update (only with `--os`), skips winget + choco.
+
+Why: winget refuses to upgrade a user-scope package (glow, tealdeer, etc.) when run elevated — `"The package installed for user scope cannot be uninstalled when running with administrator privileges."` Windows Update, in turn, requires elevation. There's no single elevation state that does both cleanly, so the script detects which one it's in and runs only the matching half, telling you to re-run the other way for the rest.
+
+**Known gotcha — Git upgrade fails while Git Bash is open.** The Git-for-Windows installer refuses to proceed if any bash/ssh-agent process is running (it lists the PIDs and aborts). Close all Git Bash windows, then re-run `updates-apply` to pick up the Git upgrade specifically.
 
 ## Rollback safety
 
