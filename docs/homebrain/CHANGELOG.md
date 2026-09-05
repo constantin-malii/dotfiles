@@ -3,6 +3,57 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-05 — Radio favourites: spoken handles (`say_as`), a favourites listing, and a default station
+
+> Resolver code + `radio.json` data. Deployed and verified live. **No HA change** — the remaining
+> "play russian songs" mis-routing is an upstream slot problem and is NOT fixed here (below).
+
+- **"List my favourite stations" answered nothing.** `_candidates()` only filtered by station /
+  country / language / genre; with no filter it fell through to `return [], ""`, so `find` produced
+  `radio mode=find target='' candidates=0` and the assistant said *"I couldn't find a station for
+  that."* Reproduced live at 2026-09-05 11:48:56 before the fix. It now lists the favourites.
+- **Seven favourites were unsayable.** `Русское Радио`, `Радио Родных Дорог`, `Спокойное радио`,
+  `Люкс FM 103.1` and `Наше Радио` had no alias, so STT could never reach them — the Noroc problem,
+  seven times over. Worse, the alias `nashe` pointed at **`Nashe Radio` (radio/13)**, leaving
+  **`Наше Радио` (radio/9)** — a different station — unreachable by voice entirely.
+- **Fix — one `say_as` field per favourite, doing two jobs.** It is what the listing reads out AND
+  what the user can say back: folded into the alias map at lookup time, so there is no second list
+  to drift. Explicit `aliases` still win over handles, keeping the hand-tuned Noroc repairs
+  authoritative. Both Nashe stations now have distinct handles (`nashe nine` / `nashe thirteen`) so
+  the operator can pick a winner before one of them takes the plain `nashe` alias.
+- **`jazz` is deliberately NOT a handle** — it is a live genre synonym, and aliasing it would hijack
+  every genuine "play some jazz" request. Same reasoning that keeps `rock` unaliased (2026-08-02).
+  The station's handle is `smooth jazz`.
+- **Listing format:** count first, then five handles — 17 names read aloud would be unusable.
+  *"You have 17 favourites. The first 5 are: mega hits, native roads, russian songs, russian radio
+  and retro fm."* The first five are operator-chosen and are simply the first five entries in
+  `radio.json`; listing order **is** file order, so re-ranking needs no code.
+- **Default station added.** `defaults.default_station = "101 SMOOTH JAZZ"`, used when a play request
+  arrives with no station. **Caveat, unfixed:** the sentence-trigger path does NOT use it —
+  `script.ceiling_play_radio` carries its own hardcoded `{{ station | default('Radio Paradise') }}`
+  and bypasses the resolver entirely, so a bare "play radio" through the prefer-local layer still
+  plays **Radio Paradise**. That script also still calls `tts.speak` (the deterministically-silent
+  overlay path). Rerouting it through the resolver is proposed, not applied — the both-paths lesson
+  from 2026-08-02 applies.
+- **NOT fixed — "play russian songs" plays the wrong station.** The model collapses the phrase to
+  `country='Russia'` before the resolver sees it (`radio mode=play target='Russia'`), so the
+  `russian songs` handle is never consulted. The information is destroyed upstream and no
+  resolver-side change can recover it. The fix is deterministic sentence triggers for the handles —
+  designed, approved in principle, **not built**. Note the symptom has *changed*, not gone: the
+  reorder means `country=russia` now returns **Радио Родных Дорог** instead of Europa Plus.
+- **VERIFIED live** over `/command` after the restart (dry-run, so nothing played):
+  `russian radio -> Русское Радио` · `russian songs -> Радио Русские Песни` ·
+  `native roads -> Радио Родных Дорог` · `nashe nine -> Наше Радио` ·
+  `nashe thirteen -> Nashe Radio` · `calm radio -> Спокойное радио` · `lux fm -> Люкс FМ 103.1` ·
+  no station -> `101 SMOOTH JAZZ` · `genre=jazz -> 101 SMOOTH JAZZ` (genre path intact, not hijacked).
+- **Deploy (gated, user-run restart):** `favorites.py`, `radio.py`, `radio.json`; backup
+  **`~/mass-resolver/.bak/20260905-120255/`**; host **3.5.2** `py_compile` OK, `JSON OK 17 favorites`,
+  host `test_radio.py` OK; restart **12:08:02**, `/command` bound, `200/401`, zero tracebacks.
+  **Deploy note (still true):** multi-file `scp` hangs on this host — copy one file at a time.
+- **Tests:** **337 local** (was 326; +11). The listing test failed with the exact live symptom
+  (`I couldn't find a station for that`) before the fix existed, and one test pins that **no
+  non-ASCII character can reach the spoken text** — a list that reads Cyrillic aloud is useless.
+
 ## 2026-08-03 — Assist SPLIT into control + knowledge agents (2nd wake word, web search, tool-isolated) · long replies allowed · pre-announcement bump fixed
 
 > **ADR:** [`2026-08-03-agent-split-routing-adr.md`](./2026-08-03-agent-split-routing-adr.md). Config only —
