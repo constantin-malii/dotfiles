@@ -3,10 +3,16 @@
 # Windows OS updates. Prompts for confirmation before each category.
 #
 # Winget upgrades of user-scope packages fail when run elevated ("cannot be
-# uninstalled when running with administrator privileges"), and Windows
-# Update requires elevation. So this script splits by elevation state:
-#   - non-elevated: does winget + choco, skips OS updates
-#   - elevated:     does OS updates (if --os), skips winget + choco
+# uninstalled when running with administrator privileges"). Choco and Windows
+# Update both require elevation to do anything useful. So this script splits
+# by elevation state:
+#   - non-elevated: does winget (excluding Git, see note below), skips choco + OS updates
+#   - elevated:     does choco + OS updates (if --os), skips winget
+#
+# Git.Git can never be upgraded from this script when run inside Git Bash:
+# its installer refuses to proceed while any bash/ssh-agent process is open,
+# and this script's own shell always counts as one. Upgrade Git manually from
+# plain PowerShell/cmd: winget upgrade Git.Git
 #
 # Usage: bash apply-updates.sh [--yes] [--os]
 #   --yes   skip confirmation prompts (non-interactive)
@@ -65,8 +71,19 @@ fi
 
 if $IS_ADMIN; then
     echo ""
-    echo "Running elevated: skipping winget/choco (user-scope packages fail to upgrade"
-    echo "when elevated). Re-run this script WITHOUT elevation to apply those."
+    echo "Running elevated: skipping winget (user-scope packages fail to upgrade"
+    echo "when elevated). Re-run this script WITHOUT elevation for those."
+
+    section "Chocolatey apps"
+    if command -v powershell.exe >/dev/null 2>&1; then
+        if confirm "Run 'choco upgrade all -y'?"; then
+            powershell.exe -NoProfile -Command 'choco upgrade all -y' 2>&1 | sed 's/\r$//'
+        else
+            echo "  Skipped."
+        fi
+    else
+        echo "  powershell.exe not found"
+    fi
 
     if $DO_OS; then
         section "Windows OS updates"
@@ -96,25 +113,16 @@ else
     if command -v powershell.exe >/dev/null 2>&1; then
         if confirm "Run 'winget upgrade --all'?"; then
             powershell.exe -NoProfile -Command 'winget upgrade --all --include-unknown --accept-source-agreements --accept-package-agreements' 2>&1 | sed 's/\r$//'
-            echo "  Note: any package with an open process holding a lock (e.g. Git while"
-            echo "  a bash/ssh-agent session is running) will fail — close those and re-run."
         else
             echo "  Skipped."
         fi
     else
         echo "  powershell.exe not found"
     fi
-
-    section "Chocolatey apps"
-    if command -v powershell.exe >/dev/null 2>&1; then
-        if confirm "Run 'choco upgrade all -y'?"; then
-            powershell.exe -NoProfile -Command 'choco upgrade all -y' 2>&1 | sed 's/\r$//'
-        else
-            echo "  Skipped."
-        fi
-    else
-        echo "  powershell.exe not found"
-    fi
+    echo "  Note: Git.Git will always fail here — its installer refuses to run while"
+    echo "  any Git Bash session is open (this script's own shell counts as one)."
+    echo "  Close all Git Bash windows and run from plain PowerShell/cmd instead:"
+    echo "    winget upgrade Git.Git"
 
     section "Windows OS updates"
     if $DO_OS; then

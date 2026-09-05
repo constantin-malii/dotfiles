@@ -44,19 +44,23 @@ Without it, the script prints the install command instead of failing.
 ## Applying updates
 
 ```bash
-updates-apply            # non-elevated: prompts before winget upgrade --all and choco upgrade all
+updates-apply            # non-elevated: prompts before winget upgrade --all
 updates-apply --yes      # same, no prompts
-updates-apply --os       # elevated only: also offers to install pending Windows Updates
+updates-apply --os       # elevated only: prompts for choco upgrade all, and (with --os) Windows Update
 ```
 
 **Run it twice, in two different shells — this is intentional, not a bug:**
 
-- **Non-elevated** shell → does winget + choco, skips Windows Update.
-- **Elevated** (Run as Administrator) shell → does Windows Update (only with `--os`), skips winget + choco.
+- **Non-elevated** shell → does winget only. Skips choco and Windows Update.
+- **Elevated** (Run as Administrator) shell → does choco, and Windows Update if `--os` is passed. Skips winget.
 
-Why: winget refuses to upgrade a user-scope package (glow, tealdeer, etc.) when run elevated — `"The package installed for user scope cannot be uninstalled when running with administrator privileges."` Windows Update, in turn, requires elevation. There's no single elevation state that does both cleanly, so the script detects which one it's in and runs only the matching half, telling you to re-run the other way for the rest.
+Why: winget refuses to upgrade a user-scope package (glow, tealdeer, etc.) when run elevated — `"The package installed for user scope cannot be uninstalled when running with administrator privileges."` Choco, on the other hand, needs elevation to do anything at all (non-elevated it prints a warning, times out on a prompt, and upgrades nothing). Windows Update also requires elevation. There's no single elevation state that satisfies all three, so the script detects which one it's in and runs only the matching subset, telling you to re-run the other way for the rest.
 
-**Known gotcha — Git upgrade fails while Git Bash is open.** The Git-for-Windows installer refuses to proceed if any bash/ssh-agent process is running (it lists the PIDs and aborts). Close all Git Bash windows, then re-run `updates-apply` to pick up the Git upgrade specifically.
+**Known gotcha — Git can never self-upgrade from this script.** `winget upgrade Git.Git` fails whenever any Git Bash / ssh-agent process is open — and since this script itself runs inside Git Bash, its own shell always counts as one of the blocking processes, even with every other window closed. The script always prints a reminder after the winget section; upgrade Git manually from a **plain PowerShell or cmd window** (not Git Bash):
+
+```powershell
+winget upgrade Git.Git
+```
 
 ## Rollback safety
 
