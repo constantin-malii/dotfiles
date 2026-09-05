@@ -112,6 +112,16 @@ When a new tool is installed on this machine and should be available on all mach
 1. Run: `winget export -o winget-packages.json`
 2. Commit the updated `winget-packages.json`
 
+## Custom Node tools
+
+`tools/` holds small standalone Node CLIs that aren't part of Claude Code (skills/scripts) and
+aren't winget packages. Each has its own `package.json` and is not auto-installed by `install.sh`
+— set up manually per tool:
+
+- `tools/url2pdf` — renders a URL to PDF via headless Chrome (Playwright). Setup:
+  `cd tools/url2pdf && npm install && npx playwright install chromium`. Usage: `url2pdf <url> [output.pdf]`
+  (alias defined in `shell/.bash_profile`).
+
 ---
 
 ## Agent Task Guide
