@@ -190,5 +190,19 @@ class TtsGetUrlTest(unittest.TestCase):
         self.assertRaises(IOError, h.tts_get_url, "tts.piper", "hello")
 
 
+
+class TtsGetUrlAbsoluteTest(unittest.TestCase):
+    def _ha(self, reply):
+        h = haconn.HA("host", 1, "tok")
+        h._post_json = lambda path, data, timeout=10: reply
+        return h
+
+    def test_relative_url_is_rejected(self):
+        # A scheme-less url normalises to "//host/..." which MA cannot fetch; the failure would
+        # otherwise surface only as a start-poll timeout, far from its cause.
+        h = self._ha({"url": "/api/tts_proxy/abc.mp3"})
+        self.assertRaises(IOError, h.tts_get_url, "tts.piper", "hello")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

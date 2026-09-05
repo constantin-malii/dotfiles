@@ -382,7 +382,7 @@ class FavoritesListingTest(unittest.TestCase):
     def test_listing_speaks_the_count_and_the_first_five_handles(self):
         res = self._run({"mode": "find"})
         spoken = res["spoken_text"]
-        self.assertIn("17 favourites" if False else "6 favourites", spoken)
+        self.assertIn("6 favourites", spoken)
         for handle in ("mega hits", "native roads", "russian songs", "russian radio", "retro fm"):
             self.assertIn(handle, spoken)
         self.assertNotIn("smooth jazz", spoken)   # sixth: past the five-handle cap
@@ -407,6 +407,44 @@ class DefaultStationTest(unittest.TestCase):
         res = cap.execute(ctx, resolved, "rid")
         self.assertEqual(res["metadata"]["uri"], "library://radio/2")
         self.assertEqual(res["metadata"]["station"], "101 SMOOTH JAZZ")
+
+
+
+class FindSpeaksHandlesTest(unittest.TestCase):
+    """The say_as handles existed only on the favourites LISTING. An ordinary filtered find still
+    read the real names aloud -- so "find russian stations" spoke the Cyrillic names the handles
+    were introduced to avoid."""
+
+    def _run(self, params):
+        cap = radio.RadioCapability()
+        ctx = FakeCtx(FakeMA(), RC_FAV)
+        resolved = cap.resolve(ctx, params)
+        self.assertIsNone(cap.validate(ctx, resolved))
+        return cap.execute(ctx, resolved, "rid")
+
+    def test_filtered_find_speaks_handles_not_cyrillic_names(self):
+        res = self._run({"mode": "find", "country": "russia"})
+        for ch in res["spoken_text"]:
+            self.assertLess(ord(ch), 128, "non-ASCII %r leaked into spoken text" % ch)
+        self.assertIn("native roads", res["spoken_text"])
+
+    def test_filtered_find_keeps_real_names_in_chat(self):
+        res = self._run({"mode": "find", "country": "russia"})
+        self.assertIn(u"Радио Родных Дорог", res["chat_text"])
+
+
+class EmptyFavouritesListingTest(unittest.TestCase):
+    def test_no_favourites_says_so_plainly(self):
+        rc = dict(RC_FAV); rc["favorites"] = []
+        cap = radio.RadioCapability()
+        ctx = FakeCtx(FakeMA(), rc)
+        resolved = cap.resolve(ctx, {"mode": "find"})
+        self.assertIsNone(cap.validate(ctx, resolved),
+                          "empty favourites should not be a not_found error")
+        res = cap.execute(ctx, resolved, "rid")
+        self.assertTrue(res["ok"])
+        self.assertNotIn("couldn't find", res["spoken_text"])
+        self.assertIn("favourites", res["spoken_text"])
 
 
 if __name__ == "__main__":

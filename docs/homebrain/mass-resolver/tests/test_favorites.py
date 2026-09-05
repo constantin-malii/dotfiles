@@ -156,5 +156,25 @@ class FavoritesListingTest(unittest.TestCase):
         self.assertEqual(favorites.spoken_name(out[1]), "russian radio")
 
 
+
+class SpokenNameSafetyTest(unittest.TestCase):
+    def test_never_returns_none(self):
+        # A malformed favorite must not put None into a ", ".join() on the live media path.
+        self.assertEqual(favorites.spoken_name({}), "")
+        self.assertEqual(favorites.spoken_name(None), "")
+        self.assertEqual(favorites.spoken_name({"name": "Kiss FM"}), "Kiss FM")
+        self.assertEqual(favorites.spoken_name({"name": "X", "say_as": "ex"}), "ex")
+
+
+class AliasTieBreakTest(unittest.TestCase):
+    def test_equal_length_keys_resolve_deterministically(self):
+        # Three 13-char keys: order must not depend on dict iteration order.
+        cfg = {"favorites": [], "aliases": {"russian radio": "A", "russian songs": "B",
+                                            "noroc moldova": "C"}}
+        for _ in range(5):
+            self.assertEqual(favorites.resolve_alias(cfg, "play russian songs now"), "B")
+            self.assertEqual(favorites.resolve_alias(cfg, "play russian radio now"), "A")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

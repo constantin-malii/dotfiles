@@ -1612,5 +1612,48 @@ class SayTextTest(unittest.TestCase):
         self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
 
 
+
+class SayTextFreshPlaybackTest(unittest.TestCase):
+    """`say` declines to speak when the SAME turn already started playback -- correct for a media
+    command, whose action is its own confirmation. It is wrong for say_text: a timer chime or any
+    other pushed sentence is not confirmed by unrelated music starting, and the caller was told
+    "Said." while nothing was spoken."""
+
+    def setUp(self):
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/t.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ha(self):
+        ha = FakeHA()
+        ha.tts_url = self.norm_uri
+        ha.set_states([idle_state(),
+                       playing_with_id(0.70, self.reply_mid),
+                       idle_state()])
+        return ha
+
+    def test_say_text_still_speaks_when_the_turn_started_playback(self):
+        cap = self._cap(); ha = self._ha()
+        zone = "media_player.ceiling_speakers"
+        cap._turns[zone] = {"ts": 1000.0, "playback": "library://radio/2"}
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "Your timer is finished."})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"].get("said"), "say_text was skipped as a media confirmation")
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 1)
+
+    def test_plain_say_is_still_skipped_when_the_turn_started_playback(self):
+        # The original behaviour must survive: a media command's spoken confirmation stays skipped.
+        cap = self._cap(); ha = self._ha()
+        zone = "media_player.ceiling_speakers"
+        cap._turns[zone] = {"ts": 1000.0, "playback": "library://radio/2"}
+        r = run(cap, FakeCtx(ha), {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"].get("said"))
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

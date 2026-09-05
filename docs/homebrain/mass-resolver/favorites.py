@@ -21,7 +21,10 @@ def spoken_name(station):
     """What to SAY for a station: its short handle when it has one, else its real name.
     Cyrillic names are unusable aloud (Piper mangles them and the user cannot say them back),
     so a handle is the only useful thing to read out for those."""
-    return (station or {}).get("say_as") or (station or {}).get("name")
+    # Never return None: this feeds ", ".join() on the live media path, where a None would raise
+    # a TypeError mid-turn instead of merely reading badly.
+    st = station or {}
+    return st.get("say_as") or st.get("name") or ""
 
 
 def _alias_map(radio_cfg):
@@ -62,7 +65,10 @@ def resolve_alias(radio_cfg, query):
     if ql in lowered:                       # exact alias, the cheap and unambiguous case
         return lowered[ql]
     qc = compact(ql)
-    for k in sorted(lowered.keys(), key=len, reverse=True):
+    # Longest key first so the most specific alias wins; then alphabetical, so equal-length keys
+    # (e.g. "russian radio" / "russian songs") resolve the same way on every run rather than
+    # inheriting dict order.
+    for k in sorted(lowered.keys(), key=lambda x: (-len(x), x)):
         kc = compact(k)
         if len(kc) < _MIN_ALIAS_KEY:
             continue

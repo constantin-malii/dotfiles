@@ -40,7 +40,10 @@ class Settings(object):
         # TTS announce service: domain.service + a template of data fields.
         # tts_data placeholders {msg}/{entity} are filled by haconn.announce().
         self.tts_service = cfg.get("tts_service", "")          # e.g. "tts.speak"
-        self.tts_data = cfg.get("tts_data", {})               # e.g. {"entity_id":"tts.x","media_player_entity_id":"{entity}","message":"{msg}"}
+        self.tts_data = cfg.get("tts_data", {})
+        # Engine for interaction mode say_text (text -> /api/tts_get_url -> clip -> play_media).
+        # Separate from tts_service above, which drives the (broken on this player) announce path.
+        self.tts_engine = cfg.get("tts_engine", "tts.piper")               # e.g. {"entity_id":"tts.x","media_player_entity_id":"{entity}","message":"{msg}"}
         # AU-02/AU-03 interaction duck/restore tunables
         self.interaction_floor = int(cfg.get("interaction_floor", 15))          # % while interacting
         self.fade_ms = int(cfg.get("fade_ms", 0))                               # reserved (no fade v1)

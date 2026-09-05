@@ -113,6 +113,11 @@ class HA(object):
         url = d.get("url")
         if not url:
             raise IOError("HA tts_get_url returned no url")
+        # Must be absolute: _say only swaps the netloc, so a scheme-less url becomes "//host/..."
+        # which MA cannot fetch -- and that failure would surface only as a start-poll timeout,
+        # far from its cause.
+        if not str(url).startswith("http"):
+            raise IOError("HA tts_get_url returned a non-absolute url")
         return url
 
     def announce(self, message, settings):

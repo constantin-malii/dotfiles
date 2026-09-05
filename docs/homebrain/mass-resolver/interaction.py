@@ -425,7 +425,7 @@ class InteractionCapability(capability.Capability):
         proven reply route applies (internal-base normalisation, reply volume, poll-to-completion,
         restore, source replay, barge-in). Deliberately never touches the announce/overlay path."""
         text = resolved.get("text") or ""
-        engine = getattr(ctx.settings, "tts_engine", "") or "tts.piper"
+        engine = getattr(ctx.settings, "tts_engine", "") or "tts.piper"   # config default is tts.piper
         try:
             uri = ctx.ha.tts_get_url(engine, text)
         except Exception as e:
@@ -445,6 +445,10 @@ class InteractionCapability(capability.Capability):
         LOG.info("SAY_TEXT req=%s zone=%s engine=%s chars=%d", rid, resolved.get("zone"),
                  engine, len(text))
         resolved["uri"] = uri
+        # A pushed sentence (timer chime, alert) is NOT confirmed by unrelated playback starting in
+        # the same turn, so it must not inherit _say's media-confirmation skip -- that would drop it
+        # silently while still reporting "Said.".
+        resolved["skip_on_fresh_playback"] = False
         return self._say(ctx, resolved, rid)
 
     def _say(self, ctx, resolved, rid):
@@ -455,7 +459,8 @@ class InteractionCapability(capability.Capability):
         # the confirmation clip here would replace the stream the same turn just started (and the
         # capture below would find it still starting, so nothing would replay it) -- the command
         # would report success and leave silence.
-        if bool(getattr(ctx.settings, "say_skip_on_fresh_playback", True)):
+        if (bool(getattr(ctx.settings, "say_skip_on_fresh_playback", True))
+                and resolved.get("skip_on_fresh_playback", True)):
             with self._lock:
                 turn = self._turns.get(zone) or {}
                 started = turn.get("playback")

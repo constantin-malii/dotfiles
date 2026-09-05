@@ -129,6 +129,10 @@ class RadioCapability(capability.Capability):
             raise
 
     def validate(self, ctx, resolved):
+        # An empty FAVOURITES listing is not a failed lookup -- "I couldn't find a station for
+        # favorites" is nonsense. execute() answers it plainly instead.
+        if resolved.get("listing"):
+            return None
         if not resolved.get("candidates"):
             label = resolved.get("label") or "that"
             resolved["ma"].close()
@@ -147,6 +151,10 @@ class RadioCapability(capability.Capability):
         try:
             if mode == "find" and resolved.get("listing"):
                 total = len(cands)
+                if total == 0:
+                    spoken = "You don't have any favourites yet."
+                    return cr.ok(self.name, rid, spoken, spoken_text=spoken,
+                                 metadata={"stations": [], "mode": "find", "label": label})
                 cap = resolved.get("favorites_speak") or 5
                 names = [favorites.spoken_name(s) for s in cands[:cap]]
                 joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
@@ -158,12 +166,16 @@ class RadioCapability(capability.Capability):
                              metadata={"stations": cands, "mode": "find", "label": label})
 
             if mode == "find":
-                names = [s["name"] for s in cands[:find_speak]]
+                picked = cands[:find_speak]
+                names = [s["name"] for s in picked]
+                # SPEAK the handles: a Cyrillic station name is unusable aloud (Piper mangles it and
+                # the user cannot say it back). The chat text keeps the real names.
+                said = [favorites.spoken_name(s) for s in picked]
                 if len(names) == 1:
-                    spoken = "I found " + names[0] + "."
+                    spoken = "I found " + said[0] + "."
                     chat = "Here are some stations: " + names[0] + "."
                 else:
-                    spoken = "I found " + ", ".join(names[:-1]) + " and " + names[-1] + "."
+                    spoken = "I found " + ", ".join(said[:-1]) + " and " + said[-1] + "."
                     chat = "Here are some stations: " + ", ".join(names[:-1]) + " and " + names[-1] + "."
                 return cr.ok(self.name, rid, chat, spoken_text=spoken,
                              metadata={"stations": cands, "mode": "find", "label": label})
