@@ -106,12 +106,24 @@ class RadioCapability(capability.Capability):
         try:
             if getattr(ma, "s", None) is None:
                 ma.connect()
-            cands, label = _candidates(ma, radio_cfg, params, d["find_internal"])
             mode = params.get("mode") or "play"
+            filtered = any(params.get(k) for k in ("station", "country", "language", "genre"))
+            # A bare "play radio" has no station: fall back to the configured default rather than
+            # picking an arbitrary favorite.
+            if not filtered and mode == "play" and d.get("default_station"):
+                params = dict(params); params["station"] = d["default_station"]; filtered = True
+            # A bare "list my favourites" has no filter either -- that used to fall through
+            # _candidates() to `return [], ""` and answer "I couldn't find a station".
+            listing = (not filtered and mode == "find")
+            if listing:
+                cands, label = favorites.all_favorites(radio_cfg), "favorites"
+            else:
+                cands, label = _candidates(ma, radio_cfg, params, d["find_internal"])
             dry_run = bool(params.get("dry_run"))
             LOG.info("req=%s radio mode=%s target=%r candidates=%d", rid, mode, label, len(cands))
             return {"ma": ma, "mode": mode, "candidates": cands, "label": label,
-                    "dry_run": dry_run, "find_speak": d["find_speak"]}
+                    "dry_run": dry_run, "find_speak": d["find_speak"],
+                    "listing": listing, "favorites_speak": d.get("favorites_speak", 5)}
         except Exception:
             ma.close()
             raise
@@ -133,6 +145,18 @@ class RadioCapability(capability.Capability):
         label = resolved.get("label") or "that"
         find_speak = resolved.get("find_speak") or 3
         try:
+            if mode == "find" and resolved.get("listing"):
+                total = len(cands)
+                cap = resolved.get("favorites_speak") or 5
+                names = [favorites.spoken_name(s) for s in cands[:cap]]
+                joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+                if total <= cap:
+                    spoken = "You have %d favourites: %s." % (total, joined)
+                else:
+                    spoken = "You have %d favourites. The first %d are: %s." % (total, len(names), joined)
+                return cr.ok(self.name, rid, spoken, spoken_text=spoken,
+                             metadata={"stations": cands, "mode": "find", "label": label})
+
             if mode == "find":
                 names = [s["name"] for s in cands[:find_speak]]
                 if len(names) == 1:

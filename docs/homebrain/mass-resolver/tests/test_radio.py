@@ -44,8 +44,8 @@ class FakeSettings(object):
 
 
 class FakeCtx(object):
-    def __init__(self, ma):
-        self._ma = ma; self.radio_cfg = RC; self.settings = FakeSettings()
+    def __init__(self, ma, radio_cfg=None):
+        self._ma = ma; self.radio_cfg = radio_cfg or RC; self.settings = FakeSettings()
     def ma_factory(self):
         return self._ma
 
@@ -342,6 +342,71 @@ class PlayFailureDetailsTest(unittest.TestCase):
         with self.assertLogs("resolver", level="ERROR") as cm:
             radio.resolve_radio(ctx, {"mode": "play", "station": "smooth jazz"}, "rid")
         self.assertIn("code=9", " | ".join(cm.output))
+
+
+
+RC_FAV = {
+    "favorites": [
+        {"name": "Mega Hits", "uri": "library://radio/16", "country": "pt", "say_as": "mega hits"},
+        {"name": "Радио Родных Дорог", "uri": "library://radio/17", "country": "ru", "say_as": "native roads"},
+        {"name": "Радио Русские Песни", "uri": "library://radio/4", "country": "ru", "say_as": "russian songs"},
+        {"name": "Русское Радио", "uri": "library://radio/7", "country": "ru", "say_as": "russian radio"},
+        {"name": "Ретро ФМ", "uri": "library://radio/8", "country": "ru", "say_as": "retro fm"},
+        {"name": "101 SMOOTH JAZZ", "uri": "library://radio/2", "country": "us", "say_as": "smooth jazz"},
+    ],
+    "aliases": {}, "country_codes": {"russia": "ru"}, "languages": {},
+    "genre_synonyms": {},
+    "defaults": {"find_internal": 5, "find_speak": 3, "favorites_speak": 5,
+                 "default_station": "101 SMOOTH JAZZ"},
+}
+
+
+class FavoritesListingTest(unittest.TestCase):
+    """`find` with no genre/country/language/station used to fall through to `return [], ""`,
+    so "list my favourite stations" answered candidates=0. It now lists the favourites, and
+    reads back the SAY_AS handles -- a list of unsayable Cyrillic names would be useless."""
+
+    def _run(self, params):
+        cap = radio.RadioCapability()
+        ctx = FakeCtx(FakeMA(), RC_FAV)
+        resolved = cap.resolve(ctx, params)
+        err = cap.validate(ctx, resolved)
+        self.assertIsNone(err, "validate rejected the listing: %r" % (err,))
+        return cap.execute(ctx, resolved, "rid")
+
+    def test_find_with_no_filter_lists_every_favorite(self):
+        res = self._run({"mode": "find"})
+        self.assertTrue(res["ok"])
+        self.assertEqual(len(res["metadata"]["stations"]), 6)
+
+    def test_listing_speaks_the_count_and_the_first_five_handles(self):
+        res = self._run({"mode": "find"})
+        spoken = res["spoken_text"]
+        self.assertIn("17 favourites" if False else "6 favourites", spoken)
+        for handle in ("mega hits", "native roads", "russian songs", "russian radio", "retro fm"):
+            self.assertIn(handle, spoken)
+        self.assertNotIn("smooth jazz", spoken)   # sixth: past the five-handle cap
+
+    def test_listing_never_reads_a_cyrillic_name_aloud(self):
+        spoken = self._run({"mode": "find"})["spoken_text"]
+        for ch in spoken:
+            self.assertLess(ord(ch), 128, "non-ASCII %r leaked into spoken text" % ch)
+
+    def test_a_filtered_find_is_unaffected(self):
+        res = self._run({"mode": "find", "country": "russia"})
+        self.assertEqual(len(res["metadata"]["stations"]), 4)
+        self.assertIn("I found", res["spoken_text"])
+
+
+class DefaultStationTest(unittest.TestCase):
+    def test_play_with_no_station_uses_the_default(self):
+        cap = radio.RadioCapability()
+        ctx = FakeCtx(FakeMA(), RC_FAV)
+        resolved = cap.resolve(ctx, {"mode": "play", "dry_run": True})
+        self.assertIsNone(cap.validate(ctx, resolved))
+        res = cap.execute(ctx, resolved, "rid")
+        self.assertEqual(res["metadata"]["uri"], "library://radio/2")
+        self.assertEqual(res["metadata"]["station"], "101 SMOOTH JAZZ")
 
 
 if __name__ == "__main__":
