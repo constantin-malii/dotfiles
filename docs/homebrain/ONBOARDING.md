@@ -96,6 +96,11 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   This cost several rounds of debugging on 2026-08-02. Both paths now route through the resolver
   (`interaction` modes `resume` / `volume_up` / `volume_down` / `set_volume`); keep them in step.
   Phrasing is exact-match: "turn **the volume** down" works, "turn **down the volume**" does not.
+- **The satellite's own `media_player` plays on EVERY turn** (~107 state changes in 20 min) — wake
+  sounds and the local TTS copy, all inaudible (no speaker). So "local playback **while the satellite
+  is idle**" is the only usable signal that a **timer/alarm** fired: HA emits **no event** for voice-timer
+  completion (verified by subscribing to the whole bus, 2026-09-05). That is what
+  `automation.satellite_timer_announce_on_ceiling` triggers on.
 - **To see what the assistant actually heard and chose**, use the **HA assist-pipeline debug traces** (WS
   `assist_pipeline/pipeline_debug/list` + `…/get`, pipeline `01kxygpr39jas5hgsf28cph108`): per-turn STT text →
   agent/tool → TTS. `resolver.log` only shows turns that **reached** the resolver, so a mis-selected tool or a
@@ -119,7 +124,14 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - ✅ **Local music + radio via the resolver (synchronous, F1-R)** — `script.play_music` (local library), `script.play_radio`, `script.find_stations`; ChatGPT relays the real `chat_text`. See the **Resolver / Inc 0–1 / F1-R current state** section.
 - ✅ **Phone voice control (Phase 2)** — Companion app → Whisper STT → `automation.voice_ceiling_speakers` → ceiling. **Text replies only** (Piper TTS disabled in pipeline). Generic spoken-number volume parsing.
 - ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; runs the exposed resolver media tools (`play_music`/`play_radio`/`find_stations`) and the ceiling control scripts, and reads `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
-- ✅ **Ceiling TTS announcements** — `tts.speak` (tts.piper) → `media_player.ceiling_speakers` (`script.ceiling_announce`). MA announcements **resume prior playback** afterward (so no "stop" confirmation).
+- ⚠️ **Ceiling TTS announcements via `tts.speak` DO NOT WORK** (corrected 2026-09-05). `tts.speak` → MA
+  `play_announcement` fails on this player: `Ceiling: Announce: Error executing script ... Failed to
+  stream audio`. MA's docs give the precondition — announcements need correct **state + elapsed-time**
+  reporting, which Universal→Squeezelite does not provide (the same defect behind the stop-wedge).
+  `script.ceiling_announce` is therefore **broken**; it moves the volume and plays nothing.
+  **Use the resolver instead:** `interaction` mode **`say_text`** resolves text via HA
+  `/api/tts_get_url` and plays the clip with `play_media` — the proven audible route, inheriting duck,
+  restore, replay and the reply-started guard.
 - ✅ **A1 + A2a self-healing** — HA↔MA connection drops intermittently (internal Docker DNS); these auto-reload the config entry to recover (validated).
 - ✅ **YTM auth + search** — after refreshing the cookie via the **incognito method** (extract from a private window, close it without logging out). Search resolves `ytmusic://` URIs for track/artist/album/playlist. Artist/album/playlist queries reliable; multi-word **track-name** queries often return 0 (use simpler terms or artist).
 
@@ -248,7 +260,7 @@ For the **open** stop-wedge / playback-lock problem. See [`research-playback-loc
 | **Exposed playback = local library + radio (resolver / F1-R)** | `play_music` (local files via MA `filesystem_smb`), `play_radio`, and `find_stations` are exposed through the synchronous resolver `/command` path. **YTM track playback stays unexposed** (stop-wedge + cold-start latency — §8–§13). |
 | **Phone-pipeline TTS disabled** | Piper crashes the pipeline, and TTS proxy URLs resolve to the NAT IP `192.168.122.10` which the **phone can't reach** (macvtap split). Spoken replies on the phone would fail; text replies are reliable. **Update 2026-07-14:** the NAT-IP reachability half is fixed (Internal URL → LAN `192.168.1.104`) and Piper TTS works in the reSpeaker's dedicated pipeline — so **phone TTS is worth re-testing**; kept off until verified. |
 | **LLM exposure restricted to helper scripts (+ weather)** | Entity exposure is shared by all conversation agents; exposing raw `media_player`/TV/etc. would re-enable broken built-in intents and widen the LLM's reach. Purpose-built `script.ceiling_*` are a safe, minimal, bounded action surface. `expose_new_entities` turned off. |
-| **Ceiling TTS via explicit `tts.speak`, not the pipeline** | The pipeline TTS is off (Piper); explicit `tts.speak` to `media_player.ceiling_speakers` works because the **host** can fetch the NAT-IP TTS URL. `script.ceiling_announce` is the reusable primitive (kept un-exposed to the LLM). |
+| **Ceiling speech goes through the resolver `say_text`, NOT `tts.speak`** (revised 2026-09-05) | `tts.speak` routes to MA `play_announcement`, which **fails on this player** ("Failed to stream audio") — MA requires correct state/elapsed reporting and Universal→Squeezelite does not give it. `script.ceiling_announce` is broken and kept only for reference. The working primitive is resolver `interaction:say_text` (text → `/api/tts_get_url` → `play_media`), which reuses the whole reply route. |
 | **Auto-reload automations (A1 + A2a) exist** | The HA↔MA integration drops its connection (internal DNS) and doesn't auto-reconnect — it sits silently dead until a config-entry reload. A1 covers restart drops; A2a's active probe covers silent drops. Both reload the entry to self-heal, with debounce/cooldown to avoid loops. |
 | **`http_profile` left at `no_content_length`** | No value fixes both play and stop: `chunked` breaks streaming on HTTP/1.0; `forced_content_length` still wedges. `no_content_length` is the baseline that at least plays. |
 | **Control and knowledge agents are SPLIT (2026-08-03)** | Web search belongs on an agent with **no** house tools: untrusted web text + ability to act is what makes prompt injection consequential. "Okay Nabu" = tools, no web (prefer-local first). "Hey Jarvis" = web, no tools. Inverting to LLM-first was rejected — it trades a safe failure ("didn't understand") for an unsafe one (wrong action), adds LLM latency to every command, and breaks house control when the internet does. ADR: `2026-08-03-agent-split-routing-adr.md`. |

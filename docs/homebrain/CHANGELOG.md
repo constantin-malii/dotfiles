@@ -3,6 +3,70 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-05 — Voice timers are now audible: resolver `say_text` (text → clip → `play_media`) · `tts.speak` on the ceiling PROVEN BROKEN
+
+> Resolver code + a new HA automation. Deployed and **operator-eared**. Corrects two `ONBOARDING.md`
+> claims that were the opposite of the truth.
+
+- **Symptom:** "set a timer" worked, but when it finished there was only the LED ring — no sound.
+- **Why:** the reSpeaker has **no speaker**, so HA's voice-timer chime plays into nothing. That part
+  was expected. What was not expected is that there is **no way to hook it**: subscribing to the
+  *entire* HA event bus during a timer showed **no timer event of any kind** — the only observable
+  signal is the satellite's own `media_player` going `playing`.
+- **First attempt was silent, and the docs had warned us.** An automation calling
+  `script.ceiling_announce` (→ `tts.speak` → MA `play_announcement`) fired correctly and produced
+  nothing audible. HA's log gives the reason:
+  `Ceiling: Announce: Error executing script ... Failed to stream audio` /
+  `Error streaming tts: Cannot write to closing transport`, with the traceback in
+  `music_assistant/media_player.py:499 _async_handle_play_announcement`.
+  **Music Assistant's own documentation states the precondition:** *"The MA announcement feature will
+  ONLY work reliably if the player reports the state (e.g. playing, paused, idle) and the progress
+  report (elapsed time) correctly."* Universal→Squeezelite does **not** — that is the same state-
+  reporting defect behind the long-running stop-wedge. So announcements cannot be made to work here;
+  the precondition is unmeetable, not a bug to fix.
+  The `2026-07-15` reply design (§13) already recorded `tts.speak` as deterministically silent on this
+  player. `ONBOARDING.md` §5 and §12 claimed the opposite. **Both corrected.**
+- **Fix — new `interaction` mode `say_text`.** Text → HA `/api/tts_get_url` → clip URL → the existing
+  `_say`, i.e. the **`play_media` route every reply already uses**. It inherits internal-base
+  normalisation (HA returns the *external* base `192.168.1.104`, which MA cannot fetch — `_say`
+  rewrites it), reply volume, poll-to-completion, restore, source replay, barge-in and the
+  reply-started guard. `haconn` gains `tts_get_url()` plus a `_post_json()` that, unlike
+  `call_service_rest`, returns the response body.
+- **Guard added after a test caught it:** if the URL resolves empty, `_say` would play nothing and
+  still report success — the exact "claimed success, did nothing" class this stack keeps producing.
+  `say_text` now fails honestly instead.
+- **New automation `satellite_timer_announce_on_ceiling`** — triggers on satellite local playback,
+  **conditioned on `assist_satellite` being `idle` for 5 s**. That condition is load-bearing: the
+  satellite's media_player plays on **every** wake and reply (~107 state changes in 20 minutes), so
+  without it the automation would announce a timer on every turn. Consequences, accepted: a timer
+  finishing **during** a conversation is missed by design, and if HA ever changes how the chime is
+  delivered this stops working **silently**.
+- **VERIFIED live, operator-eared** ("your timer is finished - heard"):
+  `45.1s satellite media_player -> playing` → `AUTOMATION TRIGGERED` → `volume_set 0.7` →
+  `cid -> .../tts_proxy/yx7` → `46.0s ceiling playing` → `48.8s volume_set 0.36`. Resolver:
+  `SAY_TEXT req=242f7e3a engine=tts.piper chars=23` → `finish-poll exit after 2.5s: state=idle` →
+  `restored -> 0.36`, `reply_started=True likely_silent=False`. **1.5 s from chime to speech.**
+  The failed announce attempt, by contrast, left the ceiling reporting a **stale** cid from hours
+  earlier — nothing ever loaded.
+- **Known gap:** the timer alarm keeps ringing (LEDs) until dismissed; the announcement is one-shot.
+  Dismiss by voice. Richer announcements ("your 10 minute timer") are impossible without an event
+  payload — that needs the firmware `on_timer_finished` trigger, i.e. the OTA gate, still shut.
+- **Deploy (gated, user-run restart):** `haconn.py`, `interaction.py`; backup
+  **`~/mass-resolver/.bak/20260905-144136/`**; host **3.5.2** `py_compile` OK, host
+  `test_interaction.py` OK; restart **14:42:36**; `/command` bound, zero tracebacks.
+- **Tests:** **344 local** (was 337; +7).
+
+### Also surfaced by the HA error log, not acted on
+
+- **`Can't connect to ESPHome API for respeaker-living-room @ 192.168.1.132` (Errno 113)** — the
+  satellite drops its API connection. A plausible contributor to the `stt-no-text-recognized`
+  failures currently blamed on wake-word settings. **Investigate before more wake tuning.**
+- **`S1b-2 - Satellite Reply on Ceiling: Timeout when calling resource ".../command"`** — the reply
+  automation has timed out at least once. It has `continue_on_error`, so it fails quietly; the
+  symptom would be a reply that never reaches the ceiling.
+- **MA DNS drops still recurring** (`Failed to connect to ws://d5369777-music-assistant:8094/ws`) —
+  A1/A2a self-heal, still earning their keep.
+
 ## 2026-09-05 — Radio favourites: spoken handles (`say_as`), a favourites listing, and a default station
 
 > Resolver code + `radio.json` data. Deployed and verified live. **No HA change** — the remaining
