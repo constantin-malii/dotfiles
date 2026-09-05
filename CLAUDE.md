@@ -121,6 +121,12 @@ aren't winget packages. Each has its own `package.json` and is not auto-installe
 - `tools/url2pdf` — renders a URL to PDF via headless Chrome (Playwright). Setup:
   `cd tools/url2pdf && npm install && npx playwright install chromium`. Usage: `url2pdf <url> [output.pdf]`
   (alias defined in `shell/.bash_profile`).
+  - For pages behind a login: `url2pdf-login <url> [state-name]` opens a visible browser, waits for
+    you to log in manually (including any email/OTP step), then saves the session to
+    `tools/url2pdf/.states/<state-name>.json` (defaults to the URL's hostname). Pass
+    `--state <state-name>` to `url2pdf` to reuse that session across any page on the same site.
+  - `tools/url2pdf/.states/` holds live session cookies — gitignored, never commit it, never print
+    its contents.
 
 ---
 
