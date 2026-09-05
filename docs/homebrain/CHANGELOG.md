@@ -3,7 +3,7 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
-## 2026-09-05 — Voice timers are now audible: resolver `say_text` (text → clip → `play_media`) · `tts.speak` on the ceiling PROVEN BROKEN
+## 2026-09-05 — Voice timers are now audible AND repeat until dismissed: resolver `say_text` (text → clip → `play_media`) · `tts.speak` on the ceiling PROVEN BROKEN · 2 self-inflicted defects found and fixed
 
 > Resolver code + a new HA automation. Deployed and **operator-eared**. Corrects two `ONBOARDING.md`
 > claims that were the opposite of the truth.
@@ -55,9 +55,60 @@ design live in the per-topic docs; this log is for discrete operational changes.
   `restored -> 0.36`, `reply_started=True likely_silent=False`. **1.5 s from chime to speech.**
   The failed announce attempt, by contrast, left the ceiling reporting a **stale** cid from hours
   earlier — nothing ever loaded.
-- **Known gap:** the timer alarm keeps ringing (LEDs) until dismissed; the announcement is one-shot.
-  Dismiss by voice. Richer announcements ("your 10 minute timer") are impossible without an event
-  payload — that needs the firmware `on_timer_finished` trigger, i.e. the OTA gate, still shut.
+- **Repeats until dismissed** (added after the first cut announced once, which is easy to miss from
+  another room). The loop announces, waits 25 s, and re-checks; dismissing the timer ends it. Capped
+  at 8 rounds so a stuck state cannot announce forever. **VERIFIED live:** `15:38:13` / `15:38:41` /
+  `15:39:10` `SAY_TEXT`, evenly spaced, stopping when the operator said "stop the timer".
+- **Two defects were shipped and fixed in the same session. Both came from testing the path I was
+  thinking about rather than the ordinary next thing an operator would do.**
+  1. **The loop could be sustained by its own announcements.** The ceiling audio false-wakes the
+     satellite — it hears *"Your timer is finished."* and transcribes it as **"The pipeline is
+     finished."** / **"The point is finished."** (pipeline traces, 21:05 and 21:14). A conversation
+     also makes the satellite's media_player play, which was the loop's continue condition, so:
+     announce → self-wake → player plays → announce again. Fixed by requiring `assist_satellite`
+     **idle** in the `while` as well, so a self-wake now *ends* the loop. Fail-safe direction: worst
+     case is fewer reminders, never a runaway.
+  2. **Every wake word announced a false timer.** The satellite's **wake sound** makes its
+     media_player `playing` ~**180 ms before** HA marks the satellite `listening`
+     (measured: `21:26:47.680 playing` → `21:26:47.862 listening`), so the entry condition
+     ("idle for 5 s") was still true and the automation fired on every *"Okay Nabu"*. A state
+     condition cannot win a 180 ms race, so the automation now **waits 3 s and re-checks** that the
+     satellite is still idle. **VERIFIED by the operator:** asking Nabu a question no longer
+     produces a timer announcement.
+- **The satellite's `media_player` is a SHARED, UNRELIABLE signal — treat it as such.** It plays for
+  wake sounds, the local copy of every reply, and timer chimes alike, and it returns to `idle`
+  **while the alarm is still ringing** (which is why the first loop stopped after one round). Any
+  automation keyed to it must confirm conversation state *after* things settle, and must not treat
+  `playing` as "still ringing".
+- **A real chime is NOT possible yet — blocked, diagnosed.** MA rejects `media-source://` URIs
+  (`HomeAssistantError: Only URLs are supported for announcements`) and cannot fetch HA's media
+  files, which need auth (`/media/local/... -> 401`; `/local/... -> 404`, nothing in `/config/www`
+  and no VM shell to put anything there). A 4 s two-note bell WAV was synthesised with stdlib and
+  uploaded to HA local media (`media-source://media_source/local/./timer_chime.wav`) and is waiting.
+  **Next step:** have the resolver resolve the media-source URI to a *signed* URL via HA and play it
+  through the existing `_say` — same shape and size as the `say_text` change. The alternative
+  (serving the file from the resolver's own HTTP server) needs a static-file route plus a
+  normalisation bypass, and adds surface for no real gain.
+- **Still true:** the announcement cannot say WHICH timer finished — no event payload exists. HA
+  itself supports multiple concurrent timers and named ones (`"create a timer for 8 minutes named
+  pizza"` works; `"set a pizza timer for 9 minutes"` does not), and if two finish close together the
+  media_player is already `playing`, so the second gets no separate announcement.
+
+### Proposed BACKLOG notes (not applied)
+
+> **1. Unify and choose the assistant voice.** Pipeline replies and resolver-spoken text (commands,
+> news, timer announcements) use different Piper voices: the Assist pipeline sets a voice, while
+> `tts_get_url` is called with an engine only and gets Piper's default. Add a `tts_voice` setting to
+> the resolver and pass it through, then pick one voice deliberately — needs a listening session.
+
+> **2. Ceiling audio can wake the satellite.** First hard evidence 2026-09-05: the timer announcement
+> played on the ceiling was transcribed back as *"The pipeline is finished."* This is a plausible
+> contributor to the false-wake problem otherwise attributed to wake words, and it applies to
+> **replies**, not just timers. Worth measuring before more wake-word tuning.
+
+> **3. Named timer announcements.** Needs the firmware `on_timer_finished` trigger and its payload —
+> the OTA gate. Only worth opening alongside other firmware work (e.g. a wake-model fix).
+
 - **Deploy (gated, user-run restart):** `haconn.py`, `interaction.py`; backup
   **`~/mass-resolver/.bak/20260905-144136/`**; host **3.5.2** `py_compile` OK, host
   `test_interaction.py` OK; restart **14:42:36**; `/command` bound, zero tracebacks.
