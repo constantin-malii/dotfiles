@@ -64,7 +64,7 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - **Knowledge weather answered for the whole United States** — `home location` is off on the web search
   (ADR), so it has no idea where the house is. Fixed in the prompt (`The user is in Calgary, Alberta,
   Canada`) rather than by enabling the setting, which would leak coordinates.
-- **A wake-word rename broke a cross-reference.** The control prompt named "Jarvis"; renaming slot 2 left
+- **A wake-word rename broke a cross-reference — twice.** The control prompt named "Jarvis"; renaming slot 2 left
   it directing the user to a wake word that no longer existed. The knowledge prompt, written
   wake-word-agnostically ("the main assistant"), survived for free — **prefer generic cross-references
   between agents.**
@@ -85,13 +85,17 @@ exposure the ADR's threat model (injection flowing *in*) did not anticipate.
 2. Wake word `Hey Jarvis` → `Kenobi`, on the theory that "Jarvis" was phonetically weak. **Wrong, and
    backwards:** the detector matches an acoustic pattern, not the word, and a single unprefixed
    three-syllable word matches *more* loosely. Three false wakes in five minutes followed.
-3. `wake_word_sensitivity` is already at its floor (`Slightly sensitive`) — **no lever remains.**
+3. Wake word `Kenobi` → `Hey Mycroft` (2026-09-05, operator's choice over disarming) — the last
+   available option and the one with the most phonetic material. **Under observation**; if slot 2 keeps
+   false-waking on a two-word four-syllable wake phrase at minimum sensitivity, the word is exonerated
+   and the wake model is the only remaining explanation.
+4. `wake_word_sensitivity` is already at its floor (`Slightly sensitive`) — **no lever remains.**
 
-**Three wake words, three failures, same slot — that is a wake-model problem, not a word problem.** The
+**Three wake words tried so far, three failures, same slot — that points at the wake model, not the
+word.** A fourth (`Hey Mycroft`) is now live and under observation. The
 real fix is firmware (a better model, or a confidence threshold the UI does not expose), which is the OTA
 gate this workstream has deliberately kept shut. **Recommendation: treat slot 2 as unfit for always-on
-use** — arm it to ask something, disarm it otherwise. `Hey Mycroft` is the one untried option (two words,
-four syllables) if another attempt is wanted.
+use** until `Hey Mycroft` has been observed for a few days — arm it to ask something, disarm it otherwise.
 
 ### Also found, not fixed
 
