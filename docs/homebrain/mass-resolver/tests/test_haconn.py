@@ -164,5 +164,31 @@ class CallServiceRestTest(unittest.TestCase):
         self.assertEqual(FakeHTTPConnection.created[0].timeout, 5)
 
 
+
+class TtsGetUrlTest(unittest.TestCase):
+    """The ceiling cannot be handed a sentence -- only a clip URL -- because MA's announce path is
+    broken on this player. HA's /api/tts_get_url turns text into that URL."""
+
+    def _ha(self, reply):
+        h = haconn.HA("host", 1, "tok")
+        h.posted = []
+        h._post_json = lambda path, data, timeout=10: (h.posted.append((path, data)) or reply)
+        return h
+
+    def test_posts_engine_and_message_and_returns_the_url(self):
+        h = self._ha({"url": "http://192.168.122.10:8123/api/tts_proxy/abc.mp3", "path": "/x"})
+        url = h.tts_get_url("tts.piper", "Your timer is finished.")
+        self.assertEqual(url, "http://192.168.122.10:8123/api/tts_proxy/abc.mp3")
+        self.assertEqual(len(h.posted), 1)
+        path, data = h.posted[0]
+        self.assertEqual(path, "/api/tts_get_url")
+        self.assertEqual(data["engine_id"], "tts.piper")
+        self.assertEqual(data["message"], "Your timer is finished.")
+
+    def test_missing_url_raises_rather_than_returning_none(self):
+        h = self._ha({"path": "/x"})          # no url key
+        self.assertRaises(IOError, h.tts_get_url, "tts.piper", "hello")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
