@@ -6,7 +6,7 @@ import capability
 import command_result as cr
 
 LOG = logging.getLogger("resolver")
-_MODES = ("duck", "restore", "say", "say_text", "resume", "volume_up", "volume_down",
+_MODES = ("duck", "restore", "say", "say_text", "resume", "pause", "volume_up", "volume_down",
           "set_volume")
 
 
@@ -20,7 +20,8 @@ class InteractionCapability(capability.Capability):
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
-        self._turns = {}                              # zone -> {"ts": float, "playback": uri|None}
+        self._turns = {}                              # zone -> {"ts": float, "playback": uri|None,
+                                                      #          "stopped": bool}
                                                       #   ts of the last duck REQUEST. A duck request is
                                                       #   the satellite announcing a turn, whether or not there
                                                       #   was anything to attenuate -- so this marks "a turn is
@@ -62,6 +63,8 @@ class InteractionCapability(capability.Capability):
             return self._say_text(ctx, resolved, rid)
         if resolved["mode"] == "resume":
             return self._resume(ctx, resolved["zone"], rid)
+        if resolved["mode"] == "pause":
+            return self._pause(ctx, resolved["zone"], rid)
         if resolved["mode"] in ("volume_up", "volume_down", "set_volume"):
             return self._volume(ctx, resolved, rid)
         return self._restore(ctx, resolved["zone"], rid)
@@ -297,6 +300,44 @@ class InteractionCapability(capability.Capability):
         return cr.ok(self.name, rid, "There is nothing to resume.", spoken_text=None,
                      metadata={"resumed": False, "reason": "nothing_to_resume", "zone": zone})
 
+    def _pause(self, ctx, zone, rid):
+        """Pause this zone and mark the turn, so the spoken confirmation cannot undo the pause.
+
+        A pause issued straight from HA (`media_player.media_pause` in the voice automation) is
+        invisible to the reply route: `_say` captures the zone's state milliseconds later, before HA
+        has propagated `paused`, so it sees "playing" and replays the source at step 9 -- restarting
+        the very stream this command stopped, while the user hears "Stopped." That race is not
+        winnable on timing, so the turn records the intent instead and `_say` trusts the turn over
+        its own capture. Mirror of note_playback for the opposite direction."""
+        try:
+            st = ctx.ha.get_entity_state(zone) or {}
+        except Exception as e:
+            LOG.warning("PAUSE req=%s zone=%s read failed (%r)", rid, zone, e)
+            st = {}
+        cid = ((st.get("attributes") or {}).get("media_content_id")) or ""
+        self.remember_source(zone, cid)         # keep `resume` able to bring this station back
+        self.note_stopped(zone)                 # BEFORE the call: the reply must never race the mark
+        ctx.ha.call_service_rest("media_player", "media_pause", {"entity_id": zone})
+        LOG.info("PAUSE req=%s zone=%s was=%s source=%s", rid, zone, st.get("state"), cid or None)
+        return cr.ok(self.name, rid, "Paused.", spoken_text=None,
+                     metadata={"paused": True, "was": st.get("state"), "zone": zone})
+
+    def note_stopped(self, zone):
+        """Record that the current turn stopped media on this zone (see _pause)."""
+        with self._lock:
+            turn = self._turns.get(zone)
+            if turn is None:
+                # No turn open: this pause came from a non-satellite caller, so no reply clip is
+                # coming and there is nothing to suppress. Same reasoning as note_playback --
+                # inventing a turn here would suppress a later, unrelated reply.
+                return
+            turn["stopped"] = True
+
+    def _turn_stopped(self, zone):
+        with self._lock:
+            turn = self._turns.get(zone) or {}
+            return bool(turn.get("stopped"))
+
     def note_playback(self, ctx, zone, uri):
         """Record that the resolver just started media on this zone as part of the current turn.
 
@@ -483,6 +524,16 @@ class InteractionCapability(capability.Capability):
         source_id = battrs.get("media_content_id")
         prev_volume = battrs.get("volume_level")
         self.remember_source(zone, source_id)       # music started outside a turn is resumable too
+
+        # Mirror of the fresh-playback guard above, for the opposite direction: if this turn PAUSED
+        # the zone, the capture ran before HA propagated `paused` and still says "playing". Replaying
+        # on that stale reading restarts the stream the user just stopped -- the confirmation undoes
+        # the command it is confirming. The turn's intent outranks the capture.
+        if (bool(getattr(ctx.settings, "say_skip_replay_on_stop", True))
+                and was_playing and self._turn_stopped(zone)):
+            LOG.info("SAY req=%s zone=%s clip=%s this turn stopped playback -- the reply will not "
+                     "replay the source", rid, zone, clip)
+            was_playing = False
 
         # 2. barge-in gen-id: bump this zone's generation; a later say() will bump it again and
         #    supersede us -- we then abort remaining steps rather than fight over the finish.

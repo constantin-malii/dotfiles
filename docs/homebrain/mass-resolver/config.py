@@ -75,6 +75,10 @@ class Settings(object):
         # A media command is confirmed by the action (decision (e)): skip the spoken reply clip when
         # this turn just started playback, since the clip would replace it and leave silence.
         self.say_skip_on_fresh_playback = bool(cfg.get("say_skip_on_fresh_playback", True))
+        # The same decision for the opposite direction: when this turn PAUSED the zone, the reply is
+        # still spoken but must not replay the source afterwards, or the confirmation restarts the
+        # stream the user just stopped.
+        self.say_skip_replay_on_stop = bool(cfg.get("say_skip_replay_on_stop", True))
         # How long to tolerate MA reporting an EMPTY media_content_id mid-clip before concluding the
         # reply finished. Too short cuts replies off; unbounded holds the zone at reply volume for the
         # whole say_reply_timeout_ms.

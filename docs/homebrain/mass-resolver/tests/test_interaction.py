@@ -1134,6 +1134,133 @@ class FreshPlaybackSkipTest(unittest.TestCase):
         self.assertEqual(cap._turns[self.zone]["playback"], "library://radio/2")
 
 
+class StopReplaySkipTest(unittest.TestCase):
+    """The live "Nabu does not stop the music" bug (2026-09-05). The voice automation issued
+    `media_player.media_pause` straight from HA and spoke "Stopped."; `_say` captured the zone 28 ms
+    later -- before HA had propagated `paused` -- so it read "playing" and replayed the source at
+    step 9. Observed three times: the radio came back every time while the user heard "Stopped."
+
+    Mirror of FreshPlaybackSkipTest: there a turn that STARTED playback must not have the reply
+    replace it; here a turn that STOPPED playback must not have the reply resurrect it. Neither race
+    is winnable on timing, so both trust the turn's recorded intent over the live capture."""
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+        self.source = "library://radio/17"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+
+    def _ctx(self, ha, settings=None):
+        ctx = FakeCtx(ha)
+        ctx.settings = settings or OwnershipSettings()
+        return ctx
+
+    def _stale_capture_states(self):
+        # HA has NOT yet propagated `paused`: the capture still reports the stream playing.
+        return [playing_with_id(0.15, self.source),
+                playing_with_id(0.70, self.reply_mid),
+                idle_state()]
+
+    def _replayed_source(self, ha):
+        return ("music_assistant", "play_media",
+                {"entity_id": self.zone, "media_id": self.source}) in ha.calls
+
+    def test_pause_pauses_the_zone_and_marks_the_turn(self):
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})                      # turn opens
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "pause"})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["paused"])
+        self.assertEqual(r["metadata"]["was"], "playing")
+        self.assertIn(("media_player", "media_pause", {"entity_id": self.zone}), ha.calls)
+        self.assertTrue(cap._turns[self.zone]["stopped"])
+
+    def test_reply_after_a_stop_does_not_replay_the_source(self):
+        # THE BUG. The capture below says "playing" -- the stale reading that caused the replay.
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        run(cap, ctx, {"mode": "pause"})
+        ha.calls = []
+        ha.set_states(self._stale_capture_states())
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertFalse(r["metadata"]["replayed"])
+        self.assertFalse(self._replayed_source(ha))
+
+    def test_the_confirmation_is_still_spoken(self):
+        # Suppressing the replay must not cost the user the confirmation -- that is the whole reason
+        # this fix exists rather than simply silencing the stop branch.
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        run(cap, ctx, {"mode": "pause"})
+        ha.set_states(self._stale_capture_states())
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["said"])
+        self.assertTrue(r["metadata"]["reply_started"])
+
+    def test_pause_remembers_the_source_so_resume_can_bring_it_back(self):
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        run(cap, ctx, {"mode": "pause"})
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "resume"})
+        self.assertTrue(r["metadata"]["resumed"])
+        self.assertEqual(r["metadata"]["uri"], self.source)
+        self.assertTrue(self._replayed_source(ha))
+
+    def test_a_later_turn_replays_normally(self):
+        # The mark is scoped to the turn that stopped playback: an ordinary question afterwards must
+        # still get its music back after the reply.
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha)
+        run(cap, ctx, {"mode": "duck"})
+        run(cap, ctx, {"mode": "pause"})
+        run(cap, ctx, {"mode": "restore"})                   # turn ends
+        cap._turns.clear()                                   # ... and a fresh turn begins
+        run(cap, ctx, {"mode": "duck"})
+        ha.calls = []
+        ha.set_states(self._stale_capture_states())
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["replayed"])
+        self.assertTrue(self._replayed_source(ha))
+
+    def test_flag_off_restores_the_resurrecting_behaviour(self):
+        class NoSkip(OwnershipSettings):
+            say_skip_replay_on_stop = False
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.36, self.source)); ctx = self._ctx(ha, NoSkip())
+        run(cap, ctx, {"mode": "duck"})
+        run(cap, ctx, {"mode": "pause"})
+        ha.calls = []
+        ha.set_states(self._stale_capture_states())
+        r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["metadata"]["replayed"])           # the pre-fix behaviour, on demand
+
+    def test_note_stopped_does_not_invent_a_turn(self):
+        # Same reasoning as note_playback: a pause from a non-satellite caller has no reply coming,
+        # and opening a phantom turn here would suppress a genuine reply later.
+        cap = self._cap()
+        ctx = self._ctx(FakeHA())
+        cap.note_stopped(self.zone)
+        self.assertNotIn(self.zone, cap._turns)
+        self.assertFalse(cap.interaction_in_flight(ctx, self.zone))
+
+    def test_pause_is_a_valid_mode(self):
+        cap = interaction.InteractionCapability()
+        ctx = self._ctx(FakeHA())
+        resolved = cap.resolve(ctx, {"mode": "pause"})
+        self.assertIsNone(cap.validate(ctx, resolved))
+
+
 class HumanVolumeChangeDuringTurnTest(unittest.TestCase):
     """REGRESSION GUARD. The old user_override check did two jobs: the false positive that caused the
     ratchet, AND honouring a genuine human volume change mid-turn. Making _say the single writer
