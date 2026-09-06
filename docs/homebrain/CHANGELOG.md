@@ -3,6 +3,36 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — INF-09 exporter bootstrapped to the host (deployment only; NOT yet run)
+
+> Gate 1 of INF-09. Two files placed by hand and digest-verified. **The exporter has not been
+> executed — no probe, no export, no Home Assistant access, no restart or reload.** Gate 2 (the first
+> `--probe-only`) is a separate approval.
+
+- **Why by hand:** the manifest-based resolver deploy does not exist yet, and `tools/` had never been
+  deployed at all (`snapshot.py` is repo-only). Both destination directories were created first —
+  `mkdir -p ~/mass-resolver/tools ~/ha-state` — because `scp` into a missing directory fails.
+- **Deployed artefacts and their recorded identity.** `sha256`, computed on both sides with
+  `tr -d '\r'` applied (mandatory: files authored from the Windows checkout carry CRLF, and a naive
+  digest never matches), from branch `homebrain/inf-09-ha-export-plan` at `6801ce7`:
+
+  ```
+  63d0a92ba1ad3deba62af959f547bf231487c500189820e67a383a1935fcd593  tools/ha_export.py
+  c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched on both files.** Until the
+  manifest-based deploy subsumes this, that pair is the only recorded identity these artefacts have.
+- **Host verification:** `python3 -V` → **3.5.2**; `python3 -m py_compile tools/ha_export.py` →
+  `COMPILE_OK` (compiles to bytecode, does not execute); `MANIFEST.json` parses. Both directories
+  contained exactly the one expected file and nothing else.
+- **The manifest is seeded, not confirmed.** It names 5 scripts, 1 automation, 2 pipelines, 6
+  satellite selects, `exposure_assistants: ["conversation"]` and `include_preferred_pipeline: true`,
+  drawn from resources observed on 2026-09-06. Several were only ever seen as entity ids. If a name
+  is wrong the first probe exits 5 — which is the designed way to find out.
+- **Re-copy the manifest whenever it changes in the repo.** A stale host copy silently exports a
+  different surface from the one under review.
+
 ## 2026-09-06 — Two voice defects fixed in live config: STT returning nothing, and "play russian songs" resolving to the wrong station
 
 > **Live HA config only — none of this is in the repo**, so this entry is the record. Three changes:
