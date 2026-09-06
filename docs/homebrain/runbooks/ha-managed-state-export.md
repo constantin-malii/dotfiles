@@ -26,7 +26,7 @@ Everything named in `docs/homebrain/ha/MANIFEST.json`, and nothing else:
 | Automations, incl. conversation sentence triggers | The `play_favorite` handles, the pause/stop routing, volume phrasings. |
 | Assist pipelines | Which agent, STT, TTS and wake word each pipeline uses. |
 | Satellite `select.*` settings | `finished_speaking_detection`, wake words, sensitivity, pipeline assignment. |
-| Conversation exposure | Which entities the assistant can see. Security-relevant. |
+| Conversation exposure | Which entities each **declared** assistant can see. Security-relevant. |
 | HA version | Recorded in `meta.json`; the version the export was valid for. |
 
 ## 2. What is NOT captured
@@ -35,6 +35,12 @@ Helper entities, dashboards, integrations and config entries, `.storage` interna
 recorder database, add-ons, and **the instance itself**. Anything outside `MANIFEST.json` is
 **unmanaged** — the run summary lists unmanaged scripts and automations so the manifest can be
 extended deliberately, but it is never exported silently.
+
+**Two singleton surfaces are declared explicitly**, so nothing is captured merely because
+HA returned it: `exposure_assistants` filters conversation exposure to the assistants you
+name (undeclared ones are reported as unmanaged), and `include_preferred_pipeline` gates
+`pipelines/_preferred.json`. The preferred pipeline is a separate global setting, so it is
+**not** gated on the `pipelines` list -- `pipelines: []` still captures it if declared.
 
 Increment 1 handles satellite **`select`** entities only. The `switch.*` settings (wake sound,
 mute sound) have a different attribute shape and are not yet modelled.
@@ -55,9 +61,10 @@ for f in mass-resolver/tools/ha_export.py ha/MANIFEST.json; do
   echo "$(tr -d '\r' < $f | sha256sum | cut -c1-16)  $f"
 done
 
-# 2. copy both
+# 2. create BOTH remote directories FIRST -- tools/ has never been deployed, so it does not
+#    exist yet and scp into a missing directory fails.
+ssh costea@192.168.1.68 'mkdir -p ~/mass-resolver/tools ~/ha-state'
 scp mass-resolver/tools/ha_export.py costea@192.168.1.68:mass-resolver/tools/
-ssh costea@192.168.1.68 'mkdir -p ~/ha-state'
 scp ha/MANIFEST.json costea@192.168.1.68:ha-state/
 
 # 3. recompute on the host and COMPARE EXPLICITLY — abort on any mismatch
@@ -113,10 +120,10 @@ git -C <repo> add -N docs/homebrain/ha && git -C <repo> diff docs/homebrain/ha
 | 0 | Success | Review the diff. |
 | 1 | Usage / environment | Bad args, or the token file is unreadable. |
 | 2 | Transport or auth | HA unreachable. Run the §2 health check in `quick-connect…`. |
-| 3 | **Capability probe failed** | An endpoint is gone or changed shape — see §9. |
-| 4 | **Schema probe failed** | An unknown envelope key appeared — see §9. |
+| 3 | **Capability probe failed** | An endpoint is gone or changed shape — see §8. |
+| 4 | **Schema probe failed** | An unknown envelope key appeared — see §8. |
 | 5 | Managed resource missing | A manifest entry no longer exists in HA (or, with `--strict-inventory`, an unmanaged resource exists). |
-| 6 | **Secret detected** | Nothing was written. See §10. |
+| 6 | **Secret detected** | Nothing was written. See §9. |
 | 7 | Partial failure | Nothing was written. Re-run; if it persists, capture the message. |
 
 Nothing is written before every check has passed. A failure leaves the previous export
@@ -130,7 +137,7 @@ Nothing is written before every check has passed. A failure leaves the previous 
   the model picks, or with what arguments. Treat it as a behaviour change, not a doc tweak.
 - **A `state` change on a satellite select is a setting change** (`finished_speaking_detection`,
   a wake word, the assigned pipeline).
-- **An `exposure/conversation.json` change is security-relevant** — the assistant just gained or
+- **An `exposure/assistants.json` change is security-relevant** — the assistant just gained or
   lost sight of an entity.
 - **A file that disappeared** means the resource left the manifest, or was deleted in HA.
 - Runtime metadata (`last_changed`, `context`) is stripped and there is no timestamp in the

@@ -90,8 +90,11 @@ EXPOSURE_ENTRY = frozenset(("should_expose",))
 # treatment: an unknown wrapper key would otherwise be dropped while reporting success.
 PIPELINE_LIST_ENVELOPE = frozenset(("pipelines", "preferred_pipeline"))
 
-MANIFEST_COLLECTIONS = ("scripts", "automations", "pipelines", "satellite_entities")
-MANIFEST_KEYS = frozenset(MANIFEST_COLLECTIONS + ("ha_version_expected", "_note"))
+MANIFEST_COLLECTIONS = ("scripts", "automations", "pipelines", "satellite_entities",
+                        "exposure_assistants")
+MANIFEST_FLAGS = ("include_preferred_pipeline",)
+MANIFEST_KEYS = frozenset(MANIFEST_COLLECTIONS + MANIFEST_FLAGS
+                          + ("ha_version_expected", "_note"))
 
 
 def validate_manifest(manifest):
@@ -116,6 +119,13 @@ def validate_manifest(manifest):
         if dupes:
             raise ExportError(EXIT_USAGE,
                               "manifest %r has duplicate entries: %s" % (key, ", ".join(dupes)))
+    for key in MANIFEST_FLAGS:
+        # Singleton surfaces are declared too: "everything declared, nothing implicit".
+        if key not in manifest:
+            raise ExportError(EXIT_USAGE,
+                              "manifest is missing %r -- declare true or false explicitly" % key)
+        if not isinstance(manifest[key], bool):
+            raise ExportError(EXIT_USAGE, "manifest %r must be true or false" % key)
     expected = manifest.get("ha_version_expected")
     if expected is not None and not isinstance(expected, str):
         raise ExportError(EXIT_USAGE, "manifest 'ha_version_expected' must be a string")
@@ -288,17 +298,22 @@ def normalize_select_state(payload):
     return out
 
 
-def normalize_exposure(payload):
-    """{entity_id: {assistant: {"should_expose": bool}}} -> sorted, flags only."""
+def normalize_exposure(payload, assistants):
+    """{entity_id: {assistant: {"should_expose": bool}}} -> sorted, flags only, filtered to the
+    DECLARED assistants. HA returns every assistant it knows about; exporting all of them would
+    be an implicit surface the manifest never claimed."""
+    wanted = set(assistants or [])
     out = {}
     for entity_id in sorted((payload or {}).keys()):
-        assistants = payload[entity_id] or {}
         row = {}
-        for assistant in sorted(assistants.keys()):
-            entry = assistants[assistant] or {}
+        for assistant in sorted((payload[entity_id] or {}).keys()):
+            if assistant not in wanted:
+                continue
+            entry = (payload[entity_id] or {})[assistant] or {}
             check_envelope("exposure[%s][%s]" % (entity_id, assistant), entry, EXPOSURE_ENTRY)
             row[assistant] = bool(entry.get("should_expose"))
-        out[entity_id] = row
+        if row:
+            out[entity_id] = row
     return {"exposed_entities": out}
 
 
@@ -561,9 +576,14 @@ def collect(client, manifest):
         raise ExportError(EXIT_MISSING, "managed pipelines absent from Home Assistant",
                           ["pipeline:" + p for p in absent])
 
+    seen_assistants = set()
+    for assistants in (raw["exposure"] or {}).values():
+        seen_assistants.update((assistants or {}).keys())
     unmanaged = {
         "scripts": sorted(script_ids - set(manifest.get("scripts", []))),
         "automations": sorted(automation_ids - set(manifest.get("automations", []))),
+        "exposure_assistants": sorted(
+            seen_assistants - set(manifest.get("exposure_assistants") or [])),
     }
     return raw, unmanaged
 
@@ -590,11 +610,14 @@ def build_canonical(raw, manifest):
         if pipeline.get("id") not in wanted:
             continue
         files["pipelines/%s.json" % pipeline.get("id")] = render(normalize_pipeline(pipeline))
-    if "preferred_pipeline" in pipelines:
+    # A separate global setting, so it is NOT gated on the pipelines list -- but it is still
+    # declared, not implicit.
+    if manifest.get("include_preferred_pipeline") and "preferred_pipeline" in pipelines:
         files["pipelines/_preferred.json"] = render(
             {"preferred_pipeline": pipelines.get("preferred_pipeline")})
 
-    files["exposure/conversation.json"] = render(normalize_exposure(raw.get("exposure")))
+    files["exposure/assistants.json"] = render(
+        normalize_exposure(raw.get("exposure"), manifest.get("exposure_assistants")))
     return files
 
 
@@ -804,7 +827,7 @@ def main(argv=None):
         sys.stdout.write("HA %s  %s\n" % (summary.get("ha_version"),
                                           "PROBE OK (nothing written)" if args.probe_only
                                           else "exported %d files" % len(summary.get("files", []))))
-        for section in ("scripts", "automations"):
+        for section in ("scripts", "automations", "exposure_assistants"):
             extra = summary["unmanaged"].get(section) or []
             if extra:
                 sys.stdout.write("  unmanaged %s: %s\n" % (section, ", ".join(extra)))

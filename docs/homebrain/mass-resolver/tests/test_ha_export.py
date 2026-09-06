@@ -81,12 +81,15 @@ PIPELINES = {
 }
 
 EXPOSURE = {
-    "script.play_radio": {"conversation": {"should_expose": True}},
+    "script.play_radio": {"conversation": {"should_expose": True},
+                          "cloud.alexa": {"should_expose": True}},
     "media_player.ceiling_speakers": {"conversation": {"should_expose": False}},
 }
 
 MANIFEST = {
     "ha_version_expected": "2026.6.4",
+    "include_preferred_pipeline": True,
+    "exposure_assistants": ["conversation"],
     "scripts": ["play_radio"],
     "automations": ["voice_ceiling_speakers"],
     "pipelines": ["01kxygpr39jas5hgsf28cph108"],
@@ -384,7 +387,7 @@ class NormalizationTest(ExportCase):
 
     def test_exposure_is_sorted_and_flags_only(self):
         self.run_export()
-        blob = self.read_out()["exposure/conversation.json"]
+        blob = self.read_out()["exposure/assistants.json"]
         written = json.loads(blob.decode("utf-8"))
         self.assertEqual(written["exposed_entities"]["script.play_radio"], {"conversation": True})
         # Assert the SERIALIZED order: comparing sorted(keys) to sorted(keys) is a tautology, and
@@ -636,6 +639,72 @@ class ManifestValidationTest(ExportCase):
         with self.assertRaises(ha_export.ExportError) as caught:
             self.run_export(manifest=manifest)
         self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+
+class DeclaredSingletonsTest(ExportCase):
+    """Everything declared, nothing implicit. HA returns every assistant it knows about and a
+    global preferred_pipeline; neither may be exported just because it came back."""
+
+    def test_exposure_is_filtered_to_declared_assistants(self):
+        self.run_export()
+        written = json.loads(self.read_out()["exposure/assistants.json"].decode("utf-8"))
+        entry = written["exposed_entities"]["script.play_radio"]
+        self.assertEqual(entry, {"conversation": True})
+        self.assertNotIn("cloud.alexa", entry, "an undeclared assistant was exported")
+
+    def test_undeclared_assistants_are_reported_as_unmanaged(self):
+        summary = self.run_export()
+        self.assertEqual(summary["unmanaged"]["exposure_assistants"], ["cloud.alexa"])
+
+    def test_empty_assistant_list_exports_no_exposure_rows(self):
+        manifest = dict(MANIFEST)
+        manifest["exposure_assistants"] = []
+        self.run_export(manifest=manifest)
+        written = json.loads(self.read_out()["exposure/assistants.json"].decode("utf-8"))
+        self.assertEqual(written["exposed_entities"], {})
+
+    def test_missing_assistant_declaration_is_a_usage_error(self):
+        manifest = dict(MANIFEST)
+        del manifest["exposure_assistants"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=manifest)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+    def test_preferred_pipeline_capture_enabled(self):
+        self.run_export()
+        written = json.loads(self.read_out()["pipelines/_preferred.json"].decode("utf-8"))
+        self.assertEqual(written["preferred_pipeline"], "01kxygpr39jas5hgsf28cph108")
+
+    def test_preferred_pipeline_capture_disabled(self):
+        manifest = dict(MANIFEST)
+        manifest["include_preferred_pipeline"] = False
+        self.run_export(manifest=manifest)
+        self.assertNotIn("pipelines/_preferred.json", self.read_out())
+
+    def test_preferred_capture_is_independent_of_the_pipelines_list(self):
+        # It is a separate global setting: pipelines: [] must not suppress it.
+        manifest = dict(MANIFEST)
+        manifest["pipelines"] = []
+        self.run_export(manifest=manifest)
+        written = self.read_out()
+        self.assertIn("pipelines/_preferred.json", written)
+        self.assertFalse([k for k in written if k.startswith("pipelines/")
+                          and not k.endswith("_preferred.json")])
+
+    def test_missing_preferred_flag_is_a_usage_error(self):
+        manifest = dict(MANIFEST)
+        del manifest["include_preferred_pipeline"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=manifest)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+    def test_non_boolean_preferred_flag_is_a_usage_error(self):
+        for bad in ("true", 1, None, []):
+            manifest = dict(MANIFEST)
+            manifest["include_preferred_pipeline"] = bad
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(manifest=manifest)
+            self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
 
 
 class VersionPinTest(ExportCase):

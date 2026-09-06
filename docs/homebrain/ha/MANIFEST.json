@@ -15,6 +15,10 @@
     "01kxygpr39jas5hgsf28cph108",
     "01kz45tkgbnsn57gpyj25vyfd0"
   ],
+  "include_preferred_pipeline": true,
+  "exposure_assistants": [
+    "conversation"
+  ],
   "satellite_entities": [
     "select.respeaker_living_room_assistant",
     "select.respeaker_living_room_assistant_2",
