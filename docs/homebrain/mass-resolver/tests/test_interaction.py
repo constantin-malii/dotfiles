@@ -1116,6 +1116,45 @@ class FreshPlaybackSkipTest(unittest.TestCase):
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertTrue(r["metadata"]["said"])
 
+    def test_duck_after_playback_started_does_not_attenuate_it(self):
+        # THE BLIP (2026-09-06). The reply is skipped because this turn started playback, so the duck
+        # that was making room for it only quiets the station until the restore lands seconds later.
+        # Shaped exactly like the live turn: the zone is IDLE when the turn opens (the log shows two
+        # `no-op (not_playing)` ducks), the station starts, and only then does a duck arrive.
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        ha.set_states([idle_state(), playing(0.36)])
+        run(cap, ctx, {"mode": "duck"})                     # turn opens over an idle zone -> no-op
+        cap.note_playback(ctx, self.zone, "library://radio/17")
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "duck"})                 # the duck that arrives AFTER the play
+        self.assertFalse(r["metadata"]["ducked"])
+        self.assertEqual(r["metadata"]["reason"], "fresh_playback")
+        self.assertEqual(ha.calls, [])                      # the station's volume is never touched
+        self.assertNotIn(self.zone, cap._snaps)             # and no snapshot/dead-man is left behind
+
+    def test_duck_flag_off_restores_the_blip(self):
+        class NoDuckSkip(OwnershipSettings):
+            duck_skip_on_fresh_playback = False
+        cap = self._cap()
+        ha = FakeHA(); ctx = self._ctx(ha)
+        ctx.settings = NoDuckSkip()
+        ha.set_states([idle_state(), playing(0.36)])
+        run(cap, ctx, {"mode": "duck"})
+        cap.note_playback(ctx, self.zone, "library://radio/17")
+        ha.calls = []
+        r = run(cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["metadata"]["ducked"])            # the pre-fix behaviour, on demand
+        self.assertEqual(r["metadata"]["to"], 0.15)         # ... attenuating the fresh station
+
+    def test_duck_before_any_playback_still_ducks(self):
+        # Guard rail: the ordinary case -- a question asked over music -- must still duck.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36)); ctx = self._ctx(ha)
+        r = run(cap, ctx, {"mode": "duck"})
+        self.assertTrue(r["metadata"]["ducked"])
+        self.assertEqual(r["metadata"]["to"], 0.15)
+
     def test_note_playback_does_not_invent_a_turn(self):
         # A play from a non-satellite caller (phone / ChatGPT text) must NOT open a phantom turn:
         # that would suppress that caller's announce for the turn window and would skip a genuine

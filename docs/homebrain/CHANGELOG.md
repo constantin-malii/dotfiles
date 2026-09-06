@@ -3,6 +3,42 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — Starting a station ducked it for seconds: the fresh-playback guard covered the reply but never the duck
+
+> Resolver code + tests. Found from an operator report that a requested station "starts playing
+> something else briefly, then stops, then a few seconds later the correct radio starts."
+
+- **Symptom:** "play russian songs" — audio starts, seems to stop, then comes back properly several
+  seconds later. Reproduced in the log on two different stations in the same minute.
+- **Evidence** (`resolver.log`, the "russian songs" turn):
+
+  ```
+  10:37:32,323 RADIO PLAY ACCEPTED 'Радио Родных Дорог' uri=library://radio/17
+  10:37:33,605 DUCK req=240ce63a 0.36 -> 0.15
+  10:37:33,609 SAY  req=187ea1d5 SKIPPED: this turn started library://radio/17
+  10:37:38,584 RESTORE req=848e2355 -> 0.36
+  ```
+
+  The station is ducked to 0.15 **1.3 s after it starts** and stays there **5.0 s**. Jazz at
+  `10:38:21` did the same for 2.7 s.
+- **Root cause:** the duck is making room for a reply that the very next line proves is skipped.
+  `say_skip_on_fresh_playback` (decision (e), 2026-08) taught `_say` that a media command is
+  confirmed by the action — but the guard was only ever applied to the **say** half. `_duck` can test
+  the identical condition (`turn["playback"]`) and never did, so every media command paid for a reply
+  that was never going to be spoken.
+- **Fix:** `_duck` returns `ducked=False reason=fresh_playback` when this turn already started
+  playback. No volume write, and no snapshot/dead-man timer left behind for the later restore to
+  unwind. Kill switch: `duck_skip_on_fresh_playback`.
+- **Tests:** 365 local (362 before), including a flag-off test that reproduces the blip on demand and
+  a guard rail that an ordinary question over music still ducks. The fixture is shaped like the live
+  turn — zone **idle** when the turn opens, which is what the two `no-op (not_playing)` ducks show;
+  an earlier version of the test opened over a playing zone and asserted the wrong thing.
+- **Not yet explained:** the operator described the blip as *"something else"* playing, not merely the
+  requested station going quiet. The duck fully accounts for the start/stop/restart shape and the
+  timing, but if a foreign fragment is genuinely audible, the likeliest remaining candidate is the
+  previous reply clip still buffered in the Squeezelite queue when `play_media` replaces it. Needs a
+  listening check after this fix; do not assume it is closed.
+
 ## 2026-09-05 — "Stop the music" was undone by its own spoken confirmation: the reply replayed the stream the stop had just paused
 
 > Resolver code + tests + the HA voice automation. **The interim mitigation is LIVE; the resolver fix
