@@ -136,6 +136,11 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   **Use the resolver instead:** `interaction` mode **`say_text`** resolves text via HA
   `/api/tts_get_url` and plays the clip with `play_media` — the proven audible route, inheriting duck,
   restore, replay and the reply-started guard.
+- ⚠️ **"Stop"/"pause" on the ceiling is currently SILENT by design** (2026-09-05). Those two branches
+  of `automation.voice_ceiling_speakers` speak nothing, because a spoken confirmation made `_say`
+  replay the stream the stop had just paused — the reply undid the command. Once resolver mode
+  **`pause`** is deployed, repoint the branches at `rest_command.resolver_command`
+  (`params: {mode: pause}`) and the confirmation can safely come back. See CHANGELOG 2026-09-05.
 - ✅ **A1 + A2a self-healing** — HA↔MA connection drops intermittently (internal Docker DNS); these auto-reload the config entry to recover (validated).
 - ✅ **YTM auth + search** — after refreshing the cookie via the **incognito method** (extract from a private window, close it without logging out). Search resolves `ytmusic://` URIs for track/artist/album/playlist. Artist/album/playlist queries reliable; multi-word **track-name** queries often return 0 (use simpler terms or artist).
 

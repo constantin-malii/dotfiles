@@ -3,6 +3,56 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-05 — "Stop the music" was undone by its own spoken confirmation: the reply replayed the stream the stop had just paused
+
+> Resolver code + tests + the HA voice automation. **The interim mitigation is LIVE; the resolver fix
+> is committed but NOT yet deployed.** `automation.voice_ceiling_speakers` lives only on the live
+> system — this entry records its shape, the repo does not hold its YAML.
+
+- **Symptom:** "Stop the music" (and "pause the music") answered *"Stopped."* while the radio kept
+  playing. Reproduced three times — `17:57:37`, `17:57:57`, `18:03:00` — the last one *after* a
+  resolver restart, which ruled out a stale process.
+- **`resolver.log` looked innocent, and that was the clue.** The whole stop turn was two lines:
+
+  ```
+  18:03:00,220 INFO TURN start req=3ecfd695 zone=media_player.ceiling_speakers (duck requested)
+  18:03:00,230 INFO DUCK  req=3ecfd695 zone=media_player.ceiling_speakers 0.36 -> 0.15
+  ```
+
+  No `MEDIA`, no `PAUSE` — because **stop never went through the resolver.** It is a sentence trigger
+  on `automation.voice_ceiling_speakers`, whose `stop` branch called `media_player.media_pause`
+  directly. Confirmed from the automation's own config and `last_triggered=2026-09-06T00:03:08.558Z`.
+- **Root cause — a race that cannot be won on timing.** The pause is issued at `18:03:08.558`;
+  `_say` captures the zone at `18:03:08.586`, **28 ms later**, before HA has propagated `paused`:
+
+  ```python
+  was_playing = before.get("state") == "playing"        # stale reading: "playing"
+  ...
+  if was_playing and source_id and not superseded():    # step 9
+      music_assistant.play_media(media_id=source_id)    # the resurrection
+  ```
+
+  and the turn ends `replayed=True`. **The confirmation restarted the stream it was confirming.**
+- **The guard for the opposite direction already existed.** `say_skip_on_fresh_playback` stops a reply
+  from replacing a stream the same turn just STARTED, by reading `turn["playback"]` — which only the
+  resolver ever sets. A pause issued straight from HA leaves no trace in the turn, so the mirror case
+  had no guard at all. That asymmetry is the real defect: **`resume` routed through the resolver,
+  `pause`/`stop` did not**, and the resolver owns the duck/replay state machine.
+- **Interim mitigation (LIVE, applied 18:14).** The `pause` and `stop` branches lost their
+  `set_conversation_response`, leaving a bare `media_player.media_pause`. With no reply, `_say` never
+  runs and nothing replays. Cost: no spoken confirmation — the music stopping *is* the confirmation.
+  Backup: `~/mass-resolver/.bak/automation-voice_ceiling_speakers-20260905-181421.json`.
+- **Proper fix (COMMITTED, NOT YET DEPLOYED).** New `interaction` mode **`pause`**: it remembers the
+  current source (so `resume` can bring the station back), marks the turn via `note_stopped()`, then
+  issues the pause. `_say` then trusts the turn's recorded intent over its own capture and skips the
+  replay — **while still speaking the confirmation.** Mirror of `note_playback`, including its
+  "never invent a turn" rule for non-satellite callers. Kill switch: `say_skip_replay_on_stop`.
+- **Tests:** 362 local (354 before). The regression proof is a pair, not a single assertion: the same
+  stale `playing` capture with `say_skip_replay_on_stop` on vs off produces opposite outcomes.
+- **To finish, in this order:** deploy the resolver modules → operator-run
+  `sudo systemctl restart mass-resolver` → repoint the automation's `pause`/`stop` branches at
+  `rest_command.resolver_command` with `params: {mode: pause}` and restore their spoken responses.
+
 ## 2026-09-05 — Voice timers are now audible AND repeat until dismissed: resolver `say_text` (text → clip → `play_media`) · `tts.speak` on the ceiling PROVEN BROKEN · 2 self-inflicted defects found and fixed
 
 > Resolver code + a new HA automation. Deployed and **operator-eared**. Corrects two `ONBOARDING.md`
