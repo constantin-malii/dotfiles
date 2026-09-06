@@ -4,3 +4,8 @@ shell/*.bash_profile text eol=lf
 shell/*.gitconfig text eol=lf
 shell/starship.toml text eol=lf
 *.sh              text eol=lf
+
+# INF-09 exporter output — must be LF so repo and host compare byte-identically.
+# Scoped to the export dir on purpose: a global *.json would renormalize mass-resolver
+# config and force an unrelated re-deploy.
+docs/homebrain/ha/**/*.json text eol=lf
