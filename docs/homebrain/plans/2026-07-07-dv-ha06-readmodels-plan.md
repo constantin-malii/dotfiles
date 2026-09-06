@@ -1,5 +1,11 @@
 # DV-01 / DV-02 / HA-06 — Household Read-Models — Implementation Plan
 
+> **Status (added when this landed on `main`, 2026-09-06): written 2026-07-07, never started.**
+> Two statements below were true on the day of writing and are NOT current: the working branch named
+> in the header no longer exists (this plan was landed from it and it was then deleted), and the
+> BACKLOG live gate said FREE at the time — **re-check the gate before starting.** The parent designs
+> and the resolver constraints below have been re-verified as still accurate.
+
 > **Plan only — do NOT implement. Stop at each marked gate for explicit approval.**
 > Parent designs (delivered, on `main`): [HA-06 device-health](../2026-07-06-ha-06-device-health-readmodel-design.md) ·
 > [DV-01/DV-02 status read-models](../2026-07-06-dv-01-02-household-status-readmodels-design.md) ·
