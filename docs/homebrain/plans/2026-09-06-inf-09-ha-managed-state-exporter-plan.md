@@ -78,22 +78,42 @@ Fail-closed means exit non-zero **and leave the output tree untouched**. Never a
 | Location | `~/ha-state/raw/<UTC-timestamp>/` on the **host** | `docs/homebrain/ha/` in Git |
 | Permissions | dir `0700`, files `0600` | normal repo files |
 | Git | **Never.** Not in the repo, not copied to the dev machine | Committed after human review |
-| Purpose | Rollback reference + post-hoc forensics | Diffable change control |
+| Purpose | **Forensic / source snapshot** — the unfiltered bytes a canonical file was derived from | Diffable change control |
 
 Raw never leaves the host. Only the sanitized tree is transferred, and only after review. Raw
 retention is bounded (keep N most recent, default 10) so it cannot grow without limit.
 
 ## 4. Normalization rules
 
-**Positive allowlists per resource type.** Anything not named is dropped. Unknown keys fail closed by
-default (exit 4); with `--allow-unknown-fields` they are omitted from canonical output **and
-enumerated in the run summary and the raw snapshot**, so the omission is visible rather than silent.
+**Two tiers, because "allowlist everything" and "capture behaviour losslessly" cannot both be true.**
+HA's action grammar is open-ended and extends every release; a fixed exhaustive key allowlist over
+`sequence` or `selector` would either reject valid automations or silently discard behaviour. Both
+outcomes are unacceptable, so the boundary is explicit:
 
-- **Script** — `alias`, `description`, `mode`, `icon`, `fields` (per field: `name`, `description`,
-  `required`, `selector`, `example`, `default`), `sequence`.
-- **Automation** — `id`, `alias`, `description`, `mode`, `triggers`/`trigger`,
-  `conditions`/`condition`, `actions`/`action`. *(Both singular and plural spellings are accepted;
-  2026.6.4 was observed emitting the plural forms.)*
+| Tier | What | Rule |
+|---|---|---|
+| **Envelope** | The resource's own top-level keys, and the metadata keys of each `fields.<name>` | **Strict positive allowlist.** An unknown key is a fail-closed error (exit 4). |
+| **Behavioural subtree** | `sequence`, `triggers`/`trigger`, `conditions`/`condition`, `actions`/`action`, every `choose` branch, `selector`, and any service `data` within them | **Preserved losslessly.** No allowlist, nothing dropped, arbitrary nesting accepted. |
+
+Inside a preserved subtree: **mapping keys are sorted** (JSON/YAML object key order is not semantic
+in HA, so sorting is safe and makes diffs stable), and **list order is preserved verbatim** (it *is*
+semantic — see the ordering rule below). Secret scanning traverses the **entire** preserved subtree,
+not just the envelope, so losslessness never becomes a leak path.
+
+This is why there is **no `--allow-unknown-fields` flag**. With behavioural subtrees lossless, an
+unknown key can only appear on an envelope — a small, stable, well-understood surface where a new key
+genuinely means HA changed something we should look at. Silently omitting it and noting it in a
+summary would make the export *incomplete while reporting success*, which is precisely the property
+fail-closed exists to prevent. An unknown envelope key requires a human to inspect it and update the
+allowlist in code. Given that the two most valuable endpoints are undocumented, that is the whole
+point, not an inconvenience.
+
+- **Script** — envelope: `alias`, `description`, `mode`, `icon`, `fields`; per field: `name`,
+  `description`, `required`, `example`, `default`. Subtrees (lossless): `sequence`, and each field's
+  `selector`.
+- **Automation** — envelope: `id`, `alias`, `description`, `mode`. Subtrees (lossless):
+  `triggers`/`trigger`, `conditions`/`condition`, `actions`/`action`. *(Both singular and plural
+  spellings are accepted; 2026.6.4 was observed emitting the plural forms.)*
 - **Satellite select entity** — `entity_id`, `state`, `attributes.options`,
   `attributes.friendly_name`. **Dropped:** `last_changed`, `last_updated`, `last_reported`,
   `context`. These are pure runtime churn and would produce a diff on every single export.
@@ -113,12 +133,18 @@ not inferred.
 and entity names are Cyrillic in this system; escaping them to `\uXXXX` would make every diff
 unreadable.
 
-**`.gitattributes` must gain `*.json text eol=lf` — verified, not conditional.** The repo's
-`.gitattributes` currently normalizes only `shell/*` and `*.sh`; there is **no rule for `.json` or
-`.py`**. Files authored from this Windows checkout therefore acquire CRLF, which is precisely why
-every repo↔host comparison in this system has to pipe through `tr -d '\r'` before hashing. Without
-the rule, the exporter's own output would be CRLF locally and LF on the host, and the drift detection
-this whole increment exists to provide would report false differences against itself.
+**`.gitattributes` must gain `docs/homebrain/ha/**/*.json text eol=lf` — verified, not conditional,
+and deliberately scoped.** The repo's `.gitattributes` currently normalizes only `shell/*` and
+`*.sh`; there is **no rule for `.json` or `.py`**. Files authored from this Windows checkout
+therefore acquire CRLF, which is precisely why every repo↔host comparison in this system has to pipe
+through `tr -d '\r'` before hashing. Without the rule, the exporter's own output would be CRLF
+locally and LF on the host, and the drift detection this whole increment exists to provide would
+report false differences against itself.
+
+The rule is scoped to the export directory rather than a global `*.json` **on purpose**: a global
+rule would also change the working-tree line endings of `mass-resolver/radio.json`, `config.json` and
+`news.json`, producing an unrelated renormalization diff and a host re-deploy inside an increment
+that is supposed to touch nothing live.
 
 > **Separate, larger observation — not part of this increment.** The same missing rule applies to
 > `*.py`, and is the root cause of the CRLF hazard documented for resolver deploys. Adding
@@ -130,15 +156,34 @@ this whole increment exists to provide would report false differences against it
 nothing changed, destroying the signal the files exist to provide. Timestamps live in the raw
 snapshot. `meta.json` records `ha_version` and `exporter_version` only.
 
-**Secret detection**, run on the rendered sanitized bytes before anything is written:
+**Secret detection — path-aware, not entropy-based.** A blanket "≥20 chars of hex/base64 is a
+secret" rule is unusable here and would fire on real data on the first run: Assist pipeline IDs are
+**ULIDs** (`01kxygpr39jas5hgsf28cph108`, 26 chars, alphanumeric), RadioBrowser station IDs are
+**UUIDs**, and device/registry identifiers look the same. An export that cannot capture a pipeline ID
+captures nothing useful.
+
+Detection runs over the **complete preserved payload** — envelope *and* every behavioural subtree —
+before anything is written, in this order:
 
 1. **Literal match** against the actual on-host secrets (`.ha_token`, `.http_secret`, `.ma_token`),
-   read into memory and **never printed or logged**. This is the strongest check available and is
-   possible only because the exporter runs on the host.
-2. **Pattern match** — `Bearer\s+\S+`, JWT shape, `password`/`api_key`/`token`/`secret`/`cookie` as a
-   key with a non-empty scalar value, and long high-entropy strings (≥20 chars of hex/base64).
-3. Any hit → **exit 6, nothing written**, and the summary names the resource and JSON path but
-   **never the value**.
+   read into memory and **never printed or logged**. The strongest check available, and possible only
+   because the exporter runs on the host. No exemption can suppress this rule.
+2. **Sensitive key names** — a mapping key matching
+   `password|passwd|token|api_?key|secret|cookie|authorization|credential|private_key|client_secret`
+   with a non-empty scalar value.
+3. **Value shapes that are secrets regardless of key** — `Bearer\s+\S+`, JWT
+   (`eyJ`-prefixed, three dot-separated base64url segments), PEM `-----BEGIN … PRIVATE KEY-----`, and
+   credentials embedded in a URL (`scheme://user:password@host`).
+4. **Entropy heuristic, narrowly scoped.** Applied *only* to values that are not at an exempt
+   identifier path and do not match a known identifier shape (UUID, ULID, 32-char hex digest).
+
+**Exempt identifier paths** (rule 4 only — rules 1–3 always apply): `id`, `unique_id`, `entity_id`,
+`device_id`, `pipeline_id`, `preferred_pipeline`, `wake_word_id`, `wake_word_entity`, `agent_id`,
+`conversation_engine`, `stt_engine`, `tts_engine`, `tts_voice`, `uri`, `media_id`, `item_id`,
+`media_content_id`.
+
+Any hit → **exit 6, nothing written**. The summary names the resource and the JSON path, and
+**never the value**.
 
 ## 5. Repository layout, manifest, CLI, exit codes
 
@@ -165,7 +210,7 @@ for the day we want the manifest to be exhaustive.
 
 ```
 python3 ha_export.py --manifest <path> --out <dir> [--raw-dir <dir>]
-                     [--probe-only] [--allow-unknown-fields] [--strict-inventory]
+                     [--probe-only] [--strict-inventory]
                      [--keep-raw N] [--summary-json]
 ```
 
@@ -180,8 +225,47 @@ python3 ha_export.py --manifest <path> --out <dir> [--raw-dir <dir>]
 | 6 | Secret detected — nothing written |
 | 7 | Partial API failure — some resources failed; nothing written |
 
-**Atomicity:** everything is built in a temp dir and moved into `--out` only when every resource
-succeeds and the secret scan passes. There is no such thing as a half-written export.
+### 5.1 Transaction, promotion and crash semantics
+
+The earlier draft claimed both "nothing is captured on failure" and "raw responses are retained",
+and implied one atomic operation spanning two roots. Neither was coherent. The precise definition:
+
+**"Atomic" means: the canonical tree is never partially replaced.** It explicitly does *not* mean a
+single transaction across the raw and canonical roots — they are different filesystems' worth of
+different concerns and are promoted **independently**.
+
+| Phase | Action | On failure |
+|---|---|---|
+| 1 | Probes (§2) | Nothing written anywhere. Exit 2/3/4. |
+| 2 | Fetch every managed resource **into memory** | Nothing written. Exit 5/7. |
+| 3 | Normalize + render canonical bytes in memory | Nothing written. Exit 4. |
+| 4 | Secret scan over raw payloads **and** canonical bytes | Nothing written. Exit 6. |
+| 5 | Write both trees to temp dirs, each on the **same filesystem** as its final parent — `<raw-dir>/.tmp-<pid>/` at `0700`, `<out>/../.tmp-ha-export-<pid>/` | Delete **both** temp trees; previous outputs untouched. |
+| 6 | Promote raw: `rename` temp → `<raw-dir>/<UTC-ts>/` (a **new** directory; never replaces) | Delete both temp trees. |
+| 7 | Promote canonical: `rename <out>` → `<out>.prev-<ts>`, `rename` temp → `<out>`, then delete `.prev` | See crash window below. |
+
+Nothing whatsoever is written before phase 5 — so a probe, fetch, schema or secret failure leaves the
+filesystem exactly as it was, including any previous successful export.
+
+**Raw is promoted first, deliberately.** It is additive and harmless, and if canonical promotion then
+fails you still hold the source snapshot that explains why. The converse — canonical output with no
+raw to justify it — is the worse state.
+
+**Replacing a non-empty `--out`:** the swap in phase 7 replaces the tree wholesale rather than merging
+into it. That is what gives deterministic **deletion** handling: a resource removed from the manifest
+disappears from the canonical tree instead of lingering as a stale file that no export would ever
+touch again.
+
+**Crash window:** phase 7 is two renames, so a crash between them leaves `<out>` absent and
+`<out>.prev-<ts>` present. This is detectable and recoverable, not corrupting — on startup the tool
+checks for an orphaned `<out>.prev-*` with no `<out>` and restores it, reporting that it did so. The
+runbook documents the one-line manual equivalent. A single-rename design is not available because
+`<out>` is a directory that must be replaced, not a file.
+
+**Permissions:** raw dirs `0700`, raw files `0600`, applied at creation via `os.makedirs(mode=…)` plus
+explicit `os.chmod`, not left to umask. POSIX only — the assertion tests are
+`skipUnless(os.name == 'posix')`, since the dev machine is Windows and cannot enforce these modes;
+the host run is the one that proves it.
 
 ## 6. Approaches considered
 
@@ -222,22 +306,48 @@ normalize/scan/render functions over recorded JSON — the network layer is inje
 Runs in the existing suite on both Pythons.
 
 - **Deterministic output** — normalize the same fixture twice; assert byte-identical, including key
-  order, indentation, and a run with `PYTHONHASHSEED` varied.
-- **Redaction / secret scan** — a fixture with a bearer token in a script `sequence` → exit 6, output
-  dir untouched, message names the JSON path and **not** the value.
-- **Unknown / changed schema** — a fixture with an added key → exit 4 by default; with
-  `--allow-unknown-fields`, key omitted from output *and* listed in the summary.
-- **Missing resource** — manifest names an automation HA does not return → exit 5.
-- **Partial API failure** — one source raises mid-run → exit 7, **nothing written** (asserts
-  atomicity, not just the code).
+  order and indentation. Hash-order independence is tested by **launching separate interpreters**
+  (`subprocess.check_output([sys.executable, …], env={"PYTHONHASHSEED": seed})` over several seeds)
+  and comparing bytes across processes. Setting `PYTHONHASHSEED` inside the running interpreter tests
+  nothing — the seed is fixed at startup.
+- **Secret scan — must FAIL** — a bearer token in a script `sequence`; a JWT; a `password:` key; a
+  PEM block; credentials in a URL; and the literal on-host token value. Each → exit 6, output dir
+  untouched, message names the JSON path and **not** the value.
+- **Secret scan — must PASS** — a fixture carrying a pipeline **ULID**
+  (`01kxygpr39jas5hgsf28cph108`), a RadioBrowser **UUID**, a 32-hex device id, `entity_id`s and
+  `media_content_id`s. These are real shapes from this system and a naive entropy rule rejects all of
+  them; this test is what keeps the exporter usable at all.
+- **Envelope vs subtree** — an unknown key on a resource **envelope** → exit 4. A novel, deeply
+  nested, never-seen-before action inside `sequence` → **preserved byte-for-byte**, and a secret
+  buried at its deepest level is still **caught** (losslessness must not become a leak path).
+- **Missing resource** — manifest names an automation HA does not return → exit 5. With
+  `--strict-inventory`, an unmanaged resource present in HA → exit 5; without it, summary only.
+- **Partial API failure** — one source raises mid-run → exit 7, **nothing written**.
+- **Failure leaves prior state intact** — run a successful export, then a failing one; assert the
+  previous canonical tree is **byte-identical** afterwards and that no `.tmp-*` residue survives, for
+  each of exits 2/3/4/5/6/7.
+- **Interrupted promotion** — simulate a crash between the two renames of phase 7; assert the orphan
+  `<out>.prev-*` is detected and restored on the next run, and that the recovery is reported.
+- **Deletion handling** — remove a resource from the manifest, re-export, assert its file is **gone**
+  from the canonical tree rather than left stale.
+- **Permissions** (`skipUnless(os.name == 'posix')`) — raw dirs `0700`, raw files `0600`.
 - **Stable normalization** — Cyrillic names survive unescaped; runtime metadata (`last_changed`,
-  `context`) is stripped; `sequence` and `choose` order is **preserved**; `options` and the exposure
-  list are **sorted**. The order-preservation case is the one that would silently corrupt behaviour,
-  so it gets an explicit test per resource type.
+  `context`) is stripped; `sequence` and `choose` **list order is preserved** while mapping keys
+  within them are sorted; `options` and the exposure list are **sorted**. The order-preservation case
+  is the one that would silently corrupt behaviour, so it gets an explicit test per resource type.
 
 ## 8. First live export — approval-gated
 
-1. Deploy `ha_export.py` to the host (`tools/` is not currently deployed). **Gate: approval.**
+1. **Bootstrap deployment of `ha_export.py`. Gate: approval.** The manifest-based resolver deploy does
+   not exist yet, and `tools/` has never been deployed at all — `snapshot.py` is repo-only — so this
+   is a one-time hand deployment and must be verifiable rather than assumed:
+   - compute `sha256` of the local file with `tr -d '\r'` applied (mandatory — see the CRLF note);
+   - `scp` it to `~/mass-resolver/tools/`;
+   - recompute on the host the same way and **compare the two digests explicitly**; abort on any
+     mismatch rather than proceeding;
+   - `python3 -m py_compile` it on 3.5.2;
+   - record the digest and the date in the `CHANGELOG.md` entry, so the deployed artefact has a
+     recorded identity until the manifest deploy subsumes it.
 2. `--probe-only`. Read-only, writes nothing. Confirms every endpoint exists and every shape is
    known on 2026.6.4. **If this fails, stop** — the plan's §11 assumptions were wrong and the
    allowlists need revising before anything is captured.
@@ -302,6 +412,16 @@ turn each into a checked fact before any code depends on it.
 - **Second risk:** list ordering. Sorting a `sequence` would produce a clean-looking diff that
   encodes a behavioural change. This is called out in §4 and gets dedicated tests in §7 because it is
   the failure that would be hardest to notice in review.
+- **Residual risk introduced by the identifier exemptions (§4).** Exempting identifier paths from the
+  entropy heuristic means a secret *stored at one of those paths* — say, a token pasted into a
+  `media_id` — escapes rule 4. Rules 1–3 still apply and the literal on-host match is never exempt,
+  so a real HomeBrain token is still caught; an unrelated third-party secret in that position would
+  not be. That is a deliberate trade: the alternative rejects every pipeline ULID and station UUID
+  and the exporter never runs at all. Worth revisiting if the exempt list grows.
+- **Residual risk in the promotion crash window (§5.1).** Two renames cannot be collapsed into one
+  for a directory, so a crash between them is possible. It is recoverable and self-detecting rather
+  than corrupting, but it is a real state the tool must handle on startup, and the test for it
+  simulates the crash rather than assuming it cannot happen.
 - **Scope honesty:** this tracks a hand-picked surface. Everything outside `MANIFEST.json` remains
   untracked, and the runbook must say so plainly rather than implying HA is "in Git".
 - **Not disaster recovery.** Stated three times on purpose.
