@@ -576,9 +576,23 @@ def collect(client, manifest):
         raise ExportError(EXIT_MISSING, "managed pipelines absent from Home Assistant",
                           ["pipeline:" + p for p in absent])
 
+    # Declared singletons get the same declared-vs-returned check. Without it, capture that was
+    # explicitly asked for could vanish while the run still exited 0. Key PRESENCE is what
+    # matters here -- a null preferred_pipeline is a real answer ("none is preferred").
+    if (manifest.get("include_preferred_pipeline")
+            and "preferred_pipeline" not in (raw["pipelines"] or {})):
+        raise ExportError(EXIT_MISSING,
+                          "include_preferred_pipeline is declared but the pipeline list has no "
+                          "preferred_pipeline key", ["pipelines.preferred_pipeline"])
+
     seen_assistants = set()
     for assistants in (raw["exposure"] or {}).values():
         seen_assistants.update((assistants or {}).keys())
+    absent_assistants = sorted(set(manifest.get("exposure_assistants") or []) - seen_assistants)
+    if absent_assistants:
+        raise ExportError(EXIT_MISSING,
+                          "managed exposure assistants absent from Home Assistant",
+                          ["assistant:" + a for a in absent_assistants])
     unmanaged = {
         "scripts": sorted(script_ids - set(manifest.get("scripts", []))),
         "automations": sorted(automation_ids - set(manifest.get("automations", []))),

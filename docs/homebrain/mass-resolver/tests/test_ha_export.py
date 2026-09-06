@@ -670,6 +670,42 @@ class DeclaredSingletonsTest(ExportCase):
             self.run_export(manifest=manifest)
         self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
 
+    def test_declared_assistant_absent_from_ha_is_missing_not_empty(self):
+        # Declared "conversation", HA returns only cloud.alexa: the export must NOT exit 0 with an
+        # empty exposure file. Same declared-vs-returned check as managed pipelines.
+        exposure = {"script.play_radio": {"cloud.alexa": {"should_expose": True}}}
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(exposure=exposure))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_declared_preferred_pipeline_key_absent_is_missing_not_omitted(self):
+        # include_preferred_pipeline is true but the wrapper has no such key: capture that was
+        # explicitly asked for must not silently vanish behind exit 0.
+        pipelines = json.loads(json.dumps(PIPELINES))
+        del pipelines["preferred_pipeline"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(pipelines=pipelines))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_null_preferred_pipeline_is_a_real_answer_not_a_missing_one(self):
+        # "no pipeline is preferred" is a legitimate state; presence of the KEY is what is checked.
+        pipelines = json.loads(json.dumps(PIPELINES))
+        pipelines["preferred_pipeline"] = None
+        self.run_export(FakeClient(pipelines=pipelines))
+        written = json.loads(self.read_out()["pipelines/_preferred.json"].decode("utf-8"))
+        self.assertIsNone(written["preferred_pipeline"])
+
+    def test_absent_preferred_key_is_fine_when_capture_is_disabled(self):
+        pipelines = json.loads(json.dumps(PIPELINES))
+        del pipelines["preferred_pipeline"]
+        manifest = dict(MANIFEST)
+        manifest["include_preferred_pipeline"] = False
+        summary = self.run_export(FakeClient(pipelines=pipelines), manifest=manifest)
+        self.assertTrue(summary["written"])
+        self.assertNotIn("pipelines/_preferred.json", self.read_out())
+
     def test_preferred_pipeline_capture_enabled(self):
         self.run_export()
         written = json.loads(self.read_out()["pipelines/_preferred.json"].decode("utf-8"))
