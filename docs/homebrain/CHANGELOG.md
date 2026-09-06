@@ -3,6 +3,118 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — Two voice defects fixed in live config: STT returning nothing, and "play russian songs" resolving to the wrong station
+
+> **Live HA config only — none of this is in the repo**, so this entry is the record. Three changes:
+> a satellite setting, a tool-schema rewording, and a new sentence trigger. No resolver code, no
+> restart. Backups in `~/mass-resolver/.bak/` (`script-play_radio-*`,
+> `automation-voice_ceiling_speakers-20260906-110846.json`).
+
+**1. `finished_speaking_detection` `aggressive` → `default` — speech was not being transcribed at all.**
+
+- **Symptom:** "play russian songs" did nothing. `resolver.log` showed a turn that ducked and
+  restored with no command in between, and the ceiling never switched.
+- **Diagnosis came from the pipeline trace, not the resolver log** (as §4 of ONBOARDING says it must):
+
+  ```
+  ts=2026-09-06T16:48:50  events: run-start,stt-start,stt-vad-start,stt-vad-end,error,run-end
+  agent: ''   STT: ''   REPLY: ''
+  ```
+
+  No `stt-end`, no agent, no intent — the speech was never transcribed, so nothing downstream ran.
+  Second occurrence the same hour (`16:15:18`, identical shape).
+- **`aggressive` was set on 2026-09-05 as a false-wake mitigation, was measured then NOT to shorten
+  captures, and was recorded at the time as the prime suspect for exactly this failure.** It ends the
+  capture the moment it thinks you stopped, so a pause mid-phrase cuts it before enough speech is
+  captured. Reverted to `default`; STT has worked on every turn since.
+- **Lesson:** a mitigation that was measured to do nothing should have been reverted then, not left
+  in place. It cost a day of confusing symptoms attributed to other layers.
+
+**2 + 3. "play russian songs" played Радио Родных Дорог, not Радио Русские Песни.**
+
+- **Cause:** the model was sending `country='Russia'` and dropping "songs". `russian songs` has been
+  a favourite handle all along (`say_as`, added 2026-09-05) — the resolver would have matched it
+  exactly; the phrase just never reached it intact.
+- **First fix, insufficient on its own: the tool schema was steering it wrong.** `script.play_radio`
+  offered *"Country or nationality, e.g. Romania or **Russian**"* as the `country` example, while
+  `station` said only *"Station name (optional)."* Reworded: `station` now lists all 17 handles and
+  states that `russian songs` and `russian radio` are two different stations; `country` no longer
+  uses "Russian" as its example. **The model still chose `country`** on the next attempt
+  (`11:02:48 target='Russia'`) — it can see `station` and uses it routinely (`'101 SMOOTH JAZZ'`,
+  `'hit fm'`, `'noroc'` all appear in the log), but "russian **songs**" reads as a nationality to it.
+  The rewording was kept: it is still an improvement for phrasings outside the 17.
+- **Second fix, decisive: take the model out of the loop.** `favorites.resolve_alias` matches on a
+  substring, not whole-string equality, so the *entire sentence* resolves correctly — verified
+  offline before changing anything:
+
+  ```
+  play russian songs             -> Радио Русские Песни
+  play the russian songs station -> Радио Русские Песни
+  jazz                           -> jazz            (genre path untouched)
+  romanian radio                 -> romanian radio  (country path untouched)
+  ```
+
+  So a new `play_favorite` conversation trigger on `automation.voice_ceiling_speakers` carries 34
+  sentences (`play [the] X` / `put on [the] X` for each of the 17 handles) and hands
+  `trigger.sentence` verbatim to `script.play_radio`. With `prefer_local=True` this wins before the
+  LLM is consulted. The 17 favourites are now deterministic and skip the model round-trip entirely.
+- **Verified live:**
+
+  ```
+  11:13:02  radio mode=play target='Play Russian songs.' candidates=1
+  11:13:04  RADIO PLAY ACCEPTED 'Радио Русские Песни' uri=library://radio/4
+  11:13:12  RADIO CONFIRM 'Радио Русские Песни' is playing
+  ```
+
+  Three independent signals: the sentence arrives **verbatim** (so the trigger fired, not the model),
+  `candidates=1` instead of 5 (exact alias hit, not a country shortlist), and `cid` moved
+  `library://radio/17` → `library://radio/4`.
+
+## 2026-09-06 — Starting a station ducked it for seconds: the fresh-playback guard covered the reply but never the duck
+
+> Resolver code + tests. Found from an operator report that a requested station "starts playing
+> something else briefly, then stops, then a few seconds later the correct radio starts."
+
+- **Symptom:** "play russian songs" — audio starts, seems to stop, then comes back properly several
+  seconds later. Reproduced in the log on two different stations in the same minute.
+- **Evidence** (`resolver.log`, the "russian songs" turn):
+
+  ```
+  10:37:32,323 RADIO PLAY ACCEPTED 'Радио Родных Дорог' uri=library://radio/17
+  10:37:33,605 DUCK req=240ce63a 0.36 -> 0.15
+  10:37:33,609 SAY  req=187ea1d5 SKIPPED: this turn started library://radio/17
+  10:37:38,584 RESTORE req=848e2355 -> 0.36
+  ```
+
+  The station is ducked to 0.15 **1.3 s after it starts** and stays there **5.0 s**. Jazz at
+  `10:38:21` did the same for 2.7 s.
+- **Root cause:** the duck is making room for a reply that the very next line proves is skipped.
+  `say_skip_on_fresh_playback` (decision (e), 2026-08) taught `_say` that a media command is
+  confirmed by the action — but the guard was only ever applied to the **say** half. `_duck` can test
+  the identical condition (`turn["playback"]`) and never did, so every media command paid for a reply
+  that was never going to be spoken.
+- **Fix:** `_duck` returns `ducked=False reason=fresh_playback` when this turn already started
+  playback. No volume write, and no snapshot/dead-man timer left behind for the later restore to
+  unwind. Kill switch: `duck_skip_on_fresh_playback`.
+- **Tests:** 365 local (362 before), including a flag-off test that reproduces the blip on demand and
+  a guard rail that an ordinary question over music still ducks. The fixture is shaped like the live
+  turn — zone **idle** when the turn opens, which is what the two `no-op (not_playing)` ducks show;
+  an earlier version of the test opened over a playing zone and asserted the wrong thing.
+- **Verified live** on the turn that finally switched stations:
+  `11:13:04 DUCK skipped: this turn started library://radio/4 (the reply is skipped too, so there is
+  nothing to duck under)`.
+- **The "something else" half of the report is explained, and it was not a defect.** 101 SMOOTH JAZZ
+  is a Live365 stream that serves advertisements — the ceiling was observed reporting
+  `title=Live365 - Advertisement  artist=Advert:`. The suspected buffered-reply-clip fragment was
+  never real; no change was made for it.
+- **A residual remains, deliberately not fixed.** The guard suppresses a *second* duck but does not
+  release the *first*. When a turn opens over playing music, the turn-start duck (correct: the
+  operator is speaking over music) survives until the restore, so a newly started station plays at
+  0.15 for several seconds: `10:54:53 DUCK 0.36 -> 0.15` … `10:55:00 station starts` …
+  `10:55:06 RESTORE -> 0.36`. The complete fix is for `note_playback` to restore the baseline
+  immediately when a turn starts media and no reply is in flight. Offered and declined as good
+  enough for now — **the six seconds are still there.**
+
 ## 2026-09-05 — "Stop the music" was undone by its own spoken confirmation: the reply replayed the stream the stop had just paused
 
 > Resolver code + tests + the HA voice automation. **The interim mitigation is LIVE; the resolver fix

@@ -141,6 +141,15 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
   replay the stream the stop had just paused — the reply undid the command. Once resolver mode
   **`pause`** is deployed, repoint the branches at `rest_command.resolver_command`
   (`params: {mode: pause}`) and the confirmation can safely come back. See CHANGELOG 2026-09-05.
+- ✅ **The 17 radio favourites are sentence-triggered, not model-routed** (2026-09-06). `play [the] X`
+  / `put on [the] X` for each `say_as` handle is a `play_favorite` conversation trigger on
+  `automation.voice_ceiling_speakers`, handing `trigger.sentence` verbatim to `script.play_radio`;
+  `resolve_alias` matches on a substring so the whole sentence resolves. With `prefer_local=True`
+  this beats the LLM, which had been turning "play russian songs" into `country='Russia'`. Anything
+  outside the 17 still goes through the model. **Live config only — not in the repo.**
+- ⚠️ **Keep `finished_speaking_detection` on `default`.** `aggressive` ends the capture too early and
+  produces runs that die at `stt-vad-end → error` with an empty transcript, so nothing reaches the
+  resolver and the failure looks like a downstream bug. See CHANGELOG 2026-09-06.
 - ✅ **A1 + A2a self-healing** — HA↔MA connection drops intermittently (internal Docker DNS); these auto-reload the config entry to recover (validated).
 - ✅ **YTM auth + search** — after refreshing the cookie via the **incognito method** (extract from a private window, close it without logging out). Search resolves `ytmusic://` URIs for track/artist/album/playlist. Artist/album/playlist queries reliable; multi-word **track-name** queries often return 0 (use simpler terms or artist).
 

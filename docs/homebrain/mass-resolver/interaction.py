@@ -92,6 +92,20 @@ class InteractionCapability(capability.Capability):
                 LOG.info("DUCK req=%s zone=%s skipped: reply active (say owns volume)", rid, zone)
                 return cr.ok(self.name, rid, "Reply in progress.", spoken_text=None,
                              metadata={"ducked": False, "reason": "reply_active", "zone": zone})
+            # Decision (e), duck half. If this turn already STARTED playback, the reply this duck is
+            # making room for will be skipped by _say for that exact reason -- so the duck attenuates
+            # the station the same turn just started, and nothing un-ducks it until the restore lands
+            # seconds later. Live evidence 2026-09-06: "play russian songs" started library://radio/17
+            # at 10:37:32.3, was ducked to 0.15 at 10:37:33.6, and only came back at 10:37:38.6 --
+            # heard as the station starting, stopping, then starting again.
+            # NOTE: read _turns directly; _lock is already held here and is not reentrant.
+            if bool(getattr(ctx.settings, "duck_skip_on_fresh_playback", True)):
+                started = (self._turns.get(zone) or {}).get("playback")
+                if started:
+                    LOG.info("DUCK req=%s zone=%s skipped: this turn started %s (the reply is skipped "
+                             "too, so there is nothing to duck under)", rid, zone, started)
+                    return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
+                                 metadata={"ducked": False, "reason": "fresh_playback", "zone": zone})
             state = ctx.ha.get_entity_state(zone) or {}
             player_state = state.get("state")
             vol = (state.get("attributes") or {}).get("volume_level")
