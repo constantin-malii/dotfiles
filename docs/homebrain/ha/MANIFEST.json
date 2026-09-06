@@ -1,0 +1,26 @@
+{
+  "_note": "Hand-maintained declaration of the HA resources under change control (INF-09). Seeded from resources directly observed on 2026-09-06 and NOT yet confirmed by a live probe. Run ha_export.py --probe-only first: a name that is wrong exits 5, and the run summary lists unmanaged scripts/automations so this file can be extended deliberately rather than guessed.",
+  "ha_version_expected": "2026.6.4",
+  "scripts": [
+    "play_radio",
+    "find_stations",
+    "media_status",
+    "ceiling_stop",
+    "ceiling_pause"
+  ],
+  "automations": [
+    "voice_ceiling_speakers"
+  ],
+  "pipelines": [
+    "01kxygpr39jas5hgsf28cph108",
+    "01kz45tkgbnsn57gpyj25vyfd0"
+  ],
+  "satellite_entities": [
+    "select.respeaker_living_room_assistant",
+    "select.respeaker_living_room_assistant_2",
+    "select.respeaker_living_room_finished_speaking_detection",
+    "select.respeaker_living_room_wake_word",
+    "select.respeaker_living_room_wake_word_2",
+    "select.respeaker_living_room_wake_word_sensitivity"
+  ]
+}
