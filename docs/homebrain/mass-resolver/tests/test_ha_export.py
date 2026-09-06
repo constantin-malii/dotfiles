@@ -384,10 +384,14 @@ class NormalizationTest(ExportCase):
 
     def test_exposure_is_sorted_and_flags_only(self):
         self.run_export()
-        written = json.loads(self.read_out()["exposure/conversation.json"].decode("utf-8"))
-        entities = written["exposed_entities"]
-        self.assertEqual(sorted(entities.keys()), list(sorted(entities.keys())))
-        self.assertEqual(entities["script.play_radio"], {"conversation": True})
+        blob = self.read_out()["exposure/conversation.json"]
+        written = json.loads(blob.decode("utf-8"))
+        self.assertEqual(written["exposed_entities"]["script.play_radio"], {"conversation": True})
+        # Assert the SERIALIZED order: comparing sorted(keys) to sorted(keys) is a tautology, and
+        # the ordering guarantee is about the bytes on disk, not about a dict we just sorted.
+        text = blob.decode("utf-8")
+        self.assertLess(text.index("media_player.ceiling_speakers"),
+                        text.index("script.play_radio"))
 
 
 # --------------------------------------------------------------------------- failure modes
@@ -571,12 +575,155 @@ class PromotionTest(ExportCase):
         self.assertEqual(os.stat(one).st_mode & 0o777, 0o600)
 
 
+class ManifestValidationTest(ExportCase):
+    """The manifest declares what we own. A mistake in it must never silently change the export
+    surface -- an empty pipelines list once meant "export every pipeline HA has"."""
+
+    def test_empty_pipeline_list_exports_no_pipelines(self):
+        manifest = dict(MANIFEST)
+        manifest["pipelines"] = []
+        self.run_export(manifest=manifest)
+        written = self.read_out()
+        self.assertFalse([k for k in written if k.startswith("pipelines/") and
+                          not k.endswith("_preferred.json")],
+                         "an empty declaration must export NO pipelines")
+
+    def test_empty_script_list_exports_no_scripts(self):
+        manifest = dict(MANIFEST)
+        manifest["scripts"] = []
+        self.run_export(manifest=manifest)
+        self.assertFalse([k for k in self.read_out() if k.startswith("scripts/")])
+
+    def test_missing_collection_is_a_usage_error(self):
+        # A missing key is NOT the same as an empty list; guessing either way is wrong.
+        for key in ha_export.MANIFEST_COLLECTIONS:
+            manifest = dict(MANIFEST)
+            del manifest[key]
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(manifest=manifest)
+            self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, key)
+
+    def test_unknown_manifest_key_is_a_usage_error(self):
+        manifest = dict(MANIFEST)
+        manifest["piplines"] = []                       # a plausible typo
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=manifest)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+    def test_malformed_collections_are_usage_errors(self):
+        for bad in ("play_radio", {"a": 1}, [1, 2], [None]):
+            manifest = dict(MANIFEST)
+            manifest["scripts"] = bad
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(manifest=manifest)
+            self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
+
+    def test_duplicate_entries_are_a_usage_error(self):
+        manifest = dict(MANIFEST)
+        manifest["scripts"] = ["play_radio", "play_radio"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=manifest)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+    def test_non_object_manifest_is_a_usage_error(self):
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=["scripts"])
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+    def test_bad_version_pin_type_is_a_usage_error(self):
+        manifest = dict(MANIFEST)
+        manifest["ha_version_expected"] = 2026
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(manifest=manifest)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
+
+
+class VersionPinTest(ExportCase):
+    def test_matching_version_produces_no_warning(self):
+        summary = self.run_export()
+        self.assertNotIn("version_warning", summary)
+
+    def test_mismatched_version_warns_without_failing(self):
+        summary = self.run_export(FakeClient(version="2099.1.0"))
+        self.assertIn("version_warning", summary)
+        self.assertIn("2099.1.0", summary["version_warning"])
+        self.assertIn("2026.6.4", summary["version_warning"])
+        self.assertTrue(summary["written"], "a version drift is a warning, not a failure")
+
+    def test_no_pin_declared_means_no_warning(self):
+        manifest = dict(MANIFEST)
+        del manifest["ha_version_expected"]
+        summary = self.run_export(FakeClient(version="2099.1.0"), manifest=manifest)
+        self.assertNotIn("version_warning", summary)
+
+
+class ProbeWritesNothingTest(ExportCase):
+    def test_probe_does_not_repair_an_orphaned_previous_tree(self):
+        # "probe writes nothing" is a contract, and orphan recovery was violating it.
+        self.run_export(stamp="20260101T000000Z")
+        prev = ha_export.prev_dir_for(self.out, "20260102T000000Z")
+        os.rename(self.out, prev)
+
+        summary = self.run_export(probe_only=True)
+        self.assertFalse(os.path.exists(self.out), "probe restored the tree; it must not")
+        self.assertTrue(os.path.exists(prev))
+        self.assertEqual(summary["orphan_detected"], os.path.basename(prev))
+
+    def test_a_real_run_afterwards_still_repairs_it(self):
+        self.run_export(stamp="20260101T000000Z")
+        before = self.read_out()
+        prev = ha_export.prev_dir_for(self.out, "20260102T000000Z")
+        os.rename(self.out, prev)
+        self.run_export(probe_only=True)
+        summary = self.run_export(stamp="20260103T000000Z")
+        self.assertIn("recovered", summary["recovered"])
+        self.assertEqual(sorted(before.keys()), sorted(self.read_out().keys()))
+
+    def test_probe_creates_no_raw_directory(self):
+        self.run_export(probe_only=True)
+        self.assertFalse(os.path.isdir(self.raw))
+
+
+class PipelineWrapperTest(ExportCase):
+    def test_unknown_wrapper_key_fails_closed(self):
+        pipelines = json.loads(json.dumps(PIPELINES))
+        pipelines["some_new_wrapper_key"] = True
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(pipelines=pipelines))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_non_object_wrapper_fails_closed(self):
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(pipelines=[{"id": "x"}]))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
+
+
+class RawDirHardeningTest(ExportCase):
+    @unittest.skipUnless(os.name == "posix", "POSIX modes; the dev machine is Windows")
+    def test_pre_existing_permissive_raw_dir_is_hardened(self):
+        os.makedirs(self.raw)
+        os.chmod(self.raw, 0o777)
+        self.run_export(stamp="20260101T000000Z")
+        self.assertEqual(os.stat(self.raw).st_mode & 0o777, 0o700)
+
+
 class ExitCodeTest(unittest.TestCase):
     def test_codes_are_distinct(self):
         codes = [ha_export.EXIT_OK, ha_export.EXIT_USAGE, ha_export.EXIT_TRANSPORT,
                  ha_export.EXIT_CAPABILITY, ha_export.EXIT_SCHEMA, ha_export.EXIT_MISSING,
                  ha_export.EXIT_SECRET, ha_export.EXIT_PARTIAL]
         self.assertEqual(len(set(codes)), len(codes))
+
+    def test_usage_errors_do_not_return_the_transport_code(self):
+        # argparse exits 2 by default, which collided with EXIT_TRANSPORT -- a bad command line
+        # would have been indistinguishable from "Home Assistant was unreachable".
+        proc = subprocess.Popen(
+            [sys.executable, os.path.join(_TOOLS, "ha_export.py")],   # no required args
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc.communicate()
+        self.assertEqual(proc.returncode, ha_export.EXIT_USAGE)
+        self.assertNotEqual(proc.returncode, ha_export.EXIT_TRANSPORT)
 
     def test_no_allow_unknown_fields_escape_hatch(self):
         # Removed deliberately: an export that omits data while reporting success is worse than

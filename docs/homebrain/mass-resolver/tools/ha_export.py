@@ -86,6 +86,40 @@ SELECT_ATTRS = frozenset(("options", "friendly_name", "icon", "device_class", "e
 
 EXPOSURE_ENTRY = frozenset(("should_expose",))
 
+# The WS wrapper around the pipeline list is itself an envelope and gets the same strict
+# treatment: an unknown wrapper key would otherwise be dropped while reporting success.
+PIPELINE_LIST_ENVELOPE = frozenset(("pipelines", "preferred_pipeline"))
+
+MANIFEST_COLLECTIONS = ("scripts", "automations", "pipelines", "satellite_entities")
+MANIFEST_KEYS = frozenset(MANIFEST_COLLECTIONS + ("ha_version_expected", "_note"))
+
+
+def validate_manifest(manifest):
+    """The manifest declares what we own, so a mistake in it must not silently widen or narrow
+    the export. A MISSING collection is a usage error; an EMPTY one means "export none of these"
+    and is honoured literally -- the two are deliberately not the same thing."""
+    if not isinstance(manifest, dict):
+        raise ExportError(EXIT_USAGE, "manifest must be a JSON object")
+    unknown = sorted(k for k in manifest.keys() if k not in MANIFEST_KEYS)
+    if unknown:
+        raise ExportError(EXIT_USAGE, "manifest has unknown key(s): %s" % ", ".join(unknown))
+    for key in MANIFEST_COLLECTIONS:
+        if key not in manifest:
+            raise ExportError(
+                EXIT_USAGE,
+                "manifest is missing %r -- declare [] to export none of them; a missing key is "
+                "not the same as an empty list" % key)
+        value = manifest[key]
+        if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
+            raise ExportError(EXIT_USAGE, "manifest %r must be a list of strings" % key)
+        dupes = sorted(set(v for v in value if value.count(v) > 1))
+        if dupes:
+            raise ExportError(EXIT_USAGE,
+                              "manifest %r has duplicate entries: %s" % (key, ", ".join(dupes)))
+    expected = manifest.get("ha_version_expected")
+    if expected is not None and not isinstance(expected, str):
+        raise ExportError(EXIT_USAGE, "manifest 'ha_version_expected' must be a string")
+
 
 # --------------------------------------------------------------------------- secret detection
 #
@@ -324,9 +358,9 @@ def prev_dir_for(out_dir, stamp):
     return os.path.join(parent, os.path.basename(os.path.abspath(out_dir)) + ".prev-" + stamp)
 
 
-def recover_orphan(out_dir):
-    """A crash between the two renames of promote_canonical leaves <out>.prev-* with no <out>.
-    Detectable and recoverable, not corrupting. Returns a message, or None."""
+def find_orphan(out_dir):
+    """Detect an interrupted promotion WITHOUT touching anything: <out>.prev-* with no <out>.
+    Split out from recover_orphan so --probe-only can report it and still write nothing."""
     abs_out = os.path.abspath(out_dir)
     if os.path.exists(abs_out):
         return None
@@ -335,10 +369,18 @@ def recover_orphan(out_dir):
         return None
     prefix = os.path.basename(abs_out) + ".prev-"
     orphans = sorted(n for n in os.listdir(parent) if n.startswith(prefix))
-    if not orphans:
+    return orphans[-1] if orphans else None
+
+
+def recover_orphan(out_dir):
+    """Repair what find_orphan detects. Returns a message, or None. Never called under
+    --probe-only: probing must not mutate the filesystem."""
+    newest = find_orphan(out_dir)
+    if not newest:
         return None
-    newest = orphans[-1]
-    os.rename(os.path.join(parent, newest), abs_out)
+    abs_out = os.path.abspath(out_dir)
+    parent = os.path.dirname(abs_out) or "."
+    rename_retry(os.path.join(parent, newest), abs_out)
     return ("recovered interrupted promotion: restored %s -> %s"
             % (newest, os.path.basename(abs_out)))
 
@@ -507,6 +549,7 @@ def collect(client, manifest):
         raw["satellite"][entity_id] = states_by_entity[entity_id]
 
     raw["pipelines"] = _ws_result(client, "assist_pipeline/pipeline/list")
+    check_envelope("assist_pipeline/pipeline/list", raw["pipelines"], PIPELINE_LIST_ENVELOPE)
     raw["exposure"] = _ws_result(client, "homeassistant/expose_entity/list")
 
     # Pipelines are fetched as a list rather than addressed by id, so a manifest id that does not
@@ -540,9 +583,11 @@ def build_canonical(raw, manifest):
             normalize_select_state(raw["satellite"][entity_id]))
 
     pipelines = raw.get("pipelines") or {}
-    wanted = manifest.get("pipelines")
+    # Always filter against the DECLARED set. An empty list means "export no pipelines"; it
+    # must never fall through to exporting every pipeline HA happens to have.
+    wanted = set(manifest.get("pipelines") or [])
     for pipeline in (pipelines.get("pipelines") or []):
-        if wanted and pipeline.get("id") not in wanted:
+        if pipeline.get("id") not in wanted:
             continue
         files["pipelines/%s.json" % pipeline.get("id")] = render(normalize_pipeline(pipeline))
     if "preferred_pipeline" in pipelines:
@@ -589,13 +634,29 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
     summary = {"stamp": stamp, "written": False, "recovered": None,
                "unmanaged": {}, "pruned_raw": []}
 
-    recovered = recover_orphan(out_dir)
-    if recovered:
-        summary["recovered"] = recovered
+    validate_manifest(manifest)
+
+    if probe_only:
+        # "probe writes nothing" is a contract. Report the orphan; do NOT repair it here.
+        orphan = find_orphan(out_dir)
+        if orphan:
+            summary["orphan_detected"] = orphan
+    else:
+        recovered = recover_orphan(out_dir)
+        if recovered:
+            summary["recovered"] = recovered
 
     raw, unmanaged = collect(client, manifest)                  # phases 1-2 (memory only)
     summary["unmanaged"] = unmanaged
     summary["ha_version"] = raw.get("ha_version")
+    expected = manifest.get("ha_version_expected")
+    actual = raw.get("ha_version")
+    if expected and actual and expected != actual:
+        # A warning, not a failure -- but the undocumented routes are version-coupled, so this
+        # is the explanation to reach for first when a probe starts failing.
+        summary["version_warning"] = (
+            "HA is %s but the manifest expects %s; the script/automation config routes are "
+            "version-coupled -- re-probe and review the allowlists" % (actual, expected))
     if strict_inventory:
         extra = sorted(["script." + n for n in unmanaged["scripts"]]
                        + ["automation:" + n for n in unmanaged["automations"]])
@@ -627,7 +688,7 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
         os.makedirs(parent)
     if not os.path.isdir(raw_dir):
         os.makedirs(raw_dir)
-        set_mode(raw_dir, 0o700)
+    set_mode(raw_dir, 0o700)          # harden even if it already existed, and was permissive
 
     tmp_raw = os.path.join(raw_dir, ".tmp-%d-%s" % (os.getpid(), stamp))
     tmp_out = os.path.join(parent, ".tmp-ha-export-%d-%s" % (os.getpid(), stamp))
@@ -665,8 +726,19 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
 
 # --------------------------------------------------------------------------- cli
 
+class UsageParser(argparse.ArgumentParser):
+    """argparse exits 2 on a usage error, which collides with EXIT_TRANSPORT. Exit code 2 is
+    reserved exclusively for "Home Assistant was unreachable" -- a bad command line must not be
+    indistinguishable from a network failure in a script or a runbook."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        sys.stderr.write("%s: error: %s\n" % (self.prog, message))
+        sys.exit(EXIT_USAGE)
+
+
 def build_parser():
-    parser = argparse.ArgumentParser(
+    parser = UsageParser(
         description="Read-only Home Assistant managed-state exporter (INF-09). "
                     "Never writes to Home Assistant.")
     parser.add_argument("--manifest", required=True)
@@ -724,6 +796,11 @@ def main(argv=None):
     else:
         if summary.get("recovered"):
             sys.stdout.write(summary["recovered"] + "\n")
+        if summary.get("orphan_detected"):
+            sys.stdout.write("WARNING: interrupted promotion detected (%s); a non-probe run "
+                             "will restore it\n" % summary["orphan_detected"])
+        if summary.get("version_warning"):
+            sys.stdout.write("WARNING: " + summary["version_warning"] + "\n")
         sys.stdout.write("HA %s  %s\n" % (summary.get("ha_version"),
                                           "PROBE OK (nothing written)" if args.probe_only
                                           else "exported %d files" % len(summary.get("files", []))))

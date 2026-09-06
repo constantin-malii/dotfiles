@@ -9,8 +9,12 @@
 > It does **not** replace encrypted off-host Home Assistant backups, and must never be described
 > as doing so. Losing the HA volume is a *backup* problem; this tool would not restore it.
 >
-> **Read-only.** The exporter never writes to Home Assistant — no apply, import or restore exists
-> in this increment. It is safe to run at any time; it does not claim the live gate.
+> **Read-only against Home Assistant.** No apply, import or restore exists in this increment, and
+> an export never claims the live gate or needs a restart. It does write to the LOCAL filesystem
+> (§6), so it is not a no-op on the host.
+>
+> **The first deployment and the first probe are approval-gated** (§3). Once bootstrapped, routine
+> probes and exports need no further approval.
 
 ## 1. What is captured
 
@@ -35,7 +39,42 @@ extended deliberately, but it is never exported silently.
 Increment 1 handles satellite **`select`** entities only. The `switch.*` settings (wake sound,
 mute sound) have a different attribute shape and are not yet modelled.
 
-## 3. Run a probe (read-only, writes nothing)
+## 3. Bootstrap (first time only — APPROVAL-GATED)
+
+The manifest-based resolver deploy does not exist yet and `tools/` has never been deployed, so both
+files are placed by hand and **verified by digest on both sides**. Every `sha256` is computed with
+`tr -d '\r'` applied: files authored from the Windows checkout carry CRLF, and a naive digest never
+matches.
+
+**Gate: explicit approval before any of this runs.**
+
+```bash
+# 1. local digests (repo side)
+cd <repo>/docs/homebrain
+for f in mass-resolver/tools/ha_export.py ha/MANIFEST.json; do
+  echo "$(tr -d '\r' < $f | sha256sum | cut -c1-16)  $f"
+done
+
+# 2. copy both
+scp mass-resolver/tools/ha_export.py costea@192.168.1.68:mass-resolver/tools/
+ssh costea@192.168.1.68 'mkdir -p ~/ha-state'
+scp ha/MANIFEST.json costea@192.168.1.68:ha-state/
+
+# 3. recompute on the host and COMPARE EXPLICITLY — abort on any mismatch
+ssh costea@192.168.1.68 '
+  echo "$(tr -d "\r" < ~/mass-resolver/tools/ha_export.py | sha256sum | cut -c1-16)  ha_export.py"
+  echo "$(tr -d "\r" < ~/ha-state/MANIFEST.json | sha256sum | cut -c1-16)  MANIFEST.json"
+  python3 -m py_compile ~/mass-resolver/tools/ha_export.py && echo COMPILE_OK'
+```
+
+Record both digests and the date in `CHANGELOG.md`: until the manifest-based deploy subsumes this,
+that entry is the only recorded identity the deployed artefacts have.
+
+**The manifest is the deployed contract, not a scratch file.** It is seeded from resources observed
+on 2026-09-06 and has never been confirmed against a live instance. Re-copy it whenever it changes in
+the repo — a stale host copy silently exports a different surface from the one under review.
+
+## 4. Run a probe (read-only, writes nothing)
 
 Always the first thing after an HA upgrade.
 
@@ -47,7 +86,7 @@ python3 ~/mass-resolver/tools/ha_export.py \
 It fetches and validates **every** managed resource, then stops without writing. A clean run means
 every endpoint exists and every response shape is understood.
 
-## 4. Run an export
+## 5. Run an export
 
 ```bash
 python3 ~/mass-resolver/tools/ha_export.py \
@@ -67,23 +106,23 @@ git -C <repo> add -N docs/homebrain/ha && git -C <repo> diff docs/homebrain/ha
 
 **Read the diff before committing.** An export that has not been read should not be committed.
 
-## 5. Exit codes
+## 6. Exit codes
 
 | Code | Meaning | What to do |
 |---|---|---|
 | 0 | Success | Review the diff. |
 | 1 | Usage / environment | Bad args, or the token file is unreadable. |
 | 2 | Transport or auth | HA unreachable. Run the §2 health check in `quick-connect…`. |
-| 3 | **Capability probe failed** | An endpoint is gone or changed shape — see §7. |
-| 4 | **Schema probe failed** | An unknown envelope key appeared — see §7. |
+| 3 | **Capability probe failed** | An endpoint is gone or changed shape — see §9. |
+| 4 | **Schema probe failed** | An unknown envelope key appeared — see §9. |
 | 5 | Managed resource missing | A manifest entry no longer exists in HA (or, with `--strict-inventory`, an unmanaged resource exists). |
-| 6 | **Secret detected** | Nothing was written. See §8. |
+| 6 | **Secret detected** | Nothing was written. See §10. |
 | 7 | Partial failure | Nothing was written. Re-run; if it persists, capture the message. |
 
 Nothing is written before every check has passed. A failure leaves the previous export
 **byte-identical** — the tool is safe to re-run.
 
-## 6. How to read a diff
+## 7. How to read a diff
 
 - **A change inside `sequence`, `actions`, `triggers` or `conditions` is BEHAVIOUR.** Review it the
   way you would review code. List order is preserved precisely so these diffs are honest.
@@ -97,7 +136,7 @@ Nothing is written before every check has passed. A failure leaves the previous 
 - Runtime metadata (`last_changed`, `context`) is stripped and there is no timestamp in the
   canonical files, so **any diff at all is a real change**. That is the whole point.
 
-## 7. When a probe fails after an HA upgrade
+## 8. When a probe fails after an HA upgrade
 
 Expected eventually. Two of the sources — `/api/config/script/config/<object_id>` and
 `/api/config/automation/config/<id>` — are **undocumented frontend routes**, not part of HA's
@@ -111,7 +150,7 @@ public REST API. They are version-coupled by nature.
 **There is deliberately no runtime override.** An export that omits data while reporting success is
 worse than one that refuses to run, so the fix is always a code change a human made on purpose.
 
-## 8. If a secret is detected (exit 6)
+## 9. If a secret is detected (exit 6)
 
 The message names the resource and the JSON path — **never the value**. It means a managed script or
 automation embeds something secret-shaped. Fix the resource (move the secret to `secrets.yaml` or a
@@ -122,7 +161,7 @@ Detection is path-aware, not entropy-first: pipeline IDs are ULIDs, station IDs 
 naive entropy rule flags all of them. Identifier paths are exempt from the entropy heuristic **only**
 — a literal match against the real on-host tokens is never exempt.
 
-## 9. Recovery: interrupted promotion
+## 10. Recovery: interrupted promotion
 
 Replacing a directory takes two renames, so a crash between them can leave `<out>` missing and
 `<out>.prev-<stamp>` present. The next run **detects and restores it automatically** and says so.
@@ -132,7 +171,7 @@ Manual equivalent:
 mv ~/ha-state/managed.prev-<stamp> ~/ha-state/managed
 ```
 
-## 10. Safety
+## 11. Safety
 
 - Read-only against HA. No apply path exists.
 - Secrets are read into memory for the literal-match rule and are **never printed, logged or
