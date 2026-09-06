@@ -7,6 +7,36 @@ def norm_name(s):
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+# Verbose RadioBrowser names often carry a trailing bitrate/quality token
+# (e.g. "Hit FM (UKraine) - 128kb/s", "Rock 320kbps", "Radio X [128k]", "Jazz 44.1kHz").
+# tidy_name() strips those cruft suffixes for presentation only. Conservative: it removes
+# ONLY a trailing <number><bitrate-unit> token (optionally bracketed) plus trailing
+# separators; it never touches real tokens like "HD"/"HQ" or station numbers without a unit
+# (".977 Country", "Radio 538"). Empty result falls back to the normalized original.
+_QUAL_RE = re.compile(
+    r"""\s*                       # leading whitespace
+        [\-|:•·(\[]?\s*  # optional separator or opening bracket
+        \d+(?:\.\d+)?\s*          # a number (e.g. 128, 44.1)
+        (?:kbps|kbit/s|kbit|kb/s|khz|kb|k)   # bitrate/quality unit (longest first)
+        \s*[)\]]?\s*$             # optional closing bracket + trailing whitespace
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_TRAIL_SEP_RE = re.compile(r"[\s\-|:•·]+$")
+
+
+def tidy_name(name):
+    n = norm_name(name)
+    if not n:
+        return n
+    cur = n
+    prev = None
+    while cur != prev:                 # strip possibly-repeated trailing quality tokens
+        prev = cur
+        cur = _TRAIL_SEP_RE.sub("", _QUAL_RE.sub("", cur)).strip()
+    return cur or n
+
+
 def station_from_item(item):
     if not item or item.get("media_type") != "radio" or item.get("item_id") == "back":
         return None
