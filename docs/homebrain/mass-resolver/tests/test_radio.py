@@ -449,3 +449,57 @@ class EmptyFavouritesListingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class RadioBrowserNameTidyTest(unittest.TestCase):
+    """MR-05. RadioBrowser names carry bitrate/quality cruft ("Hit FM (UKraine) - 128kb/s"), which is
+    noise in chat and worse read aloud. Tidying is PRESENTATION-ONLY: matching and dedupe already ran
+    on the raw names in resolve(), and the logs keep the raw name, so "it played the wrong station"
+    stays diagnosable."""
+
+    def _run(self, params, ma):
+        cap = radio.RadioCapability()
+        ctx = FakeCtx(ma)
+        resolved = cap.resolve(ctx, params)
+        self.assertIsNone(cap.validate(ctx, resolved))
+        return cap.execute(ctx, resolved, "rid")
+
+    def test_disp_tidies_radiobrowser_but_never_a_favorite(self):
+        cruft = "Hit FM (UKraine) - 128kb/s"
+        self.assertEqual(radio._disp({"name": cruft, "source": "radiobrowser"}), "Hit FM (UKraine)")
+        # A curated favorite is hand-named -- left exactly alone even when it looks like cruft.
+        # This is not hypothetical: that string IS a favorite's real name in radio.json.
+        self.assertEqual(radio._disp({"name": cruft, "source": "favorite"}), cruft)
+
+    def test_spoken_prefers_the_handle(self):
+        self.assertEqual(radio._spoken({"name": u"Радио", "say_as": "native roads",
+                                        "source": "favorite"}), "native roads")
+
+    def test_spoken_falls_back_to_the_tidied_name(self):
+        self.assertEqual(radio._spoken({"name": "Rock 320kbps", "source": "radiobrowser"}), "Rock")
+
+    def test_neither_helper_returns_none(self):
+        # Both feed ", ".join() on the live path, where a None raises TypeError mid-turn.
+        for bad in ({}, None, {"name": None, "source": "radiobrowser"}):
+            self.assertEqual(radio._disp(bad), "")
+            self.assertEqual(radio._spoken(bad), "")
+
+    def test_play_reports_the_tidied_name(self):
+        ma = FakeMA(browse=[rb_item("u9", "Pop Station 128kb/s")])
+        res = self._run({"mode": "play", "genre": "pop"}, ma)
+        self.assertEqual(res["metadata"]["station"], "Pop Station")
+        self.assertIn("Playing Pop Station.", res["chat_text"])
+
+    def test_play_still_uses_the_raw_uri(self):
+        # Guard: tidying must not touch resolution. The URI is what actually plays.
+        ma = FakeMA(browse=[rb_item("u9", "Pop Station 128kb/s")])
+        res = self._run({"mode": "play", "genre": "pop"}, ma)
+        self.assertEqual(res["metadata"]["uri"], "radiobrowser://radio/u9")
+        self.assertEqual(ma.played[0][1], "radiobrowser://radio/u9")
+
+    def test_find_tidies_both_chat_and_spoken(self):
+        ma = FakeMA(browse=[rb_item("u9", "Pop Station 128kb/s")])
+        res = self._run({"mode": "find", "genre": "pop"}, ma)
+        self.assertIn("Pop Station", res["chat_text"])
+        self.assertNotIn("128", res["chat_text"])
+        self.assertNotIn("128", res["spoken_text"])

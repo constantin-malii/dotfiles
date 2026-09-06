@@ -56,6 +56,25 @@ def _candidates(ma, radio_cfg, params, cap):
     return [], ""
 
 
+def _disp(station):
+    """Presentation name for chat text and metadata. RadioBrowser names carry bitrate/quality cruft
+    ("Hit FM (UKraine) - 128kb/s"); curated favorites are hand-named and are left exactly alone.
+    Matching and dedupe already ran on the RAW names in `resolve`, so this is UX-only and cannot
+    change which station is chosen -- and the logs below deliberately keep the raw name, so a report
+    of "it played the wrong thing" is still diagnosable."""
+    st = station or {}
+    name = st.get("name") or ""
+    return rb.tidy_name(name) if st.get("source") == "radiobrowser" else name
+
+
+def _spoken(station):
+    """What to SAY: the short handle when the station has one -- a Cyrillic name is unusable aloud,
+    Piper mangles it and the user cannot say it back -- else the tidied display name. Never None:
+    this feeds ", ".join() on the live path."""
+    handle = (station or {}).get("say_as")
+    return handle if handle else _disp(station)
+
+
 class RadioCapability(capability.Capability):
     name = "radio"
 
@@ -156,7 +175,7 @@ class RadioCapability(capability.Capability):
                     return cr.ok(self.name, rid, spoken, spoken_text=spoken,
                                  metadata={"stations": [], "mode": "find", "label": label})
                 cap = resolved.get("favorites_speak") or 5
-                names = [favorites.spoken_name(s) for s in cands[:cap]]
+                names = [_spoken(s) for s in cands[:cap]]
                 joined = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
                 if total <= cap:
                     spoken = "You have %d favourites: %s." % (total, joined)
@@ -167,10 +186,10 @@ class RadioCapability(capability.Capability):
 
             if mode == "find":
                 picked = cands[:find_speak]
-                names = [s["name"] for s in picked]
+                names = [_disp(s) for s in picked]
                 # SPEAK the handles: a Cyrillic station name is unusable aloud (Piper mangles it and
                 # the user cannot say it back). The chat text keeps the real names.
-                said = [favorites.spoken_name(s) for s in picked]
+                said = [_spoken(s) for s in picked]
                 if len(names) == 1:
                     spoken = "I found " + said[0] + "."
                     chat = "Here are some stations: " + names[0] + "."
@@ -182,12 +201,13 @@ class RadioCapability(capability.Capability):
 
             # mode == play
             chosen = cands[0]
-            md = {"uri": chosen["uri"], "station": chosen["name"], "source": chosen["source"], "mode": "play"}
+            disp = _disp(chosen)                 # presentation only; logs below keep the raw name
+            md = {"uri": chosen["uri"], "station": disp, "source": chosen["source"], "mode": "play"}
             if resolved["dry_run"]:
                 LOG.info("[DRY-RUN] req=%s WOULD PLAY radio %r uri=%s source=%s",
                          rid, chosen["name"], chosen["uri"], chosen["source"])
                 md["played"] = False
-                return cr.ok(self.name, rid, "Would play " + chosen["name"] + ".",
+                return cr.ok(self.name, rid, "Would play " + disp + ".",
                              spoken_text=None, metadata=md)
             pr = ma.play(ctx.settings.queue_id, chosen["uri"])
             if (not pr) or ("error_code" in pr):
@@ -200,15 +220,15 @@ class RadioCapability(capability.Capability):
                           chosen["name"], chosen["uri"])
                 md["played"] = False
                 return cr.err(self.name, rid, "play_failed", "play failed",
-                              "I found " + chosen["name"] + ", but couldn't start it.",
-                              spoken_text="I found " + chosen["name"] + ", but couldn't start it.",
+                              "I found " + disp + ", but couldn't start it.",
+                              spoken_text="I found " + disp + ", but couldn't start it.",
                               metadata=md)
             # "accepted", not "playing" -- MA returning without an error_code says nothing about audio.
             LOG.info("req=%s RADIO PLAY ACCEPTED by MA %r uri=%s source=%s (confirming shortly)",
                      rid, chosen["name"], chosen["uri"], chosen["source"])
             self._confirm_play_later(ctx, rid, chosen["name"], chosen["uri"])
             md["played"] = True
-            return cr.ok(self.name, rid, "Playing " + chosen["name"] + ".",
+            return cr.ok(self.name, rid, "Playing " + disp + ".",
                          spoken_text=None, metadata=md)
         finally:
             ma.close()
