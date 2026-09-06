@@ -192,6 +192,28 @@ When each increment lands: (1) update this doc, (2) update the affected script *
 (3) re-sync the Instructions prompt below. Verify the live exposed set anytime with
 `mass-resolver/tools/snapshot.py`-style probes or the `homeassistant/expose_entity/list` WS command.
 
+### Exposure lockstep checklist (NL-02)
+
+**Rule:** the live OpenAI Conversation **Instructions** (system prompt) and this doc must never drift.
+Any change to the ChatGPT-exposed surface (exposing/un-exposing a tool, or changing a tool's routing)
+is a **single PR** that updates **all** of the following together — and the PR description records the
+exact exposure delta:
+
+1. **Live Instructions** (HA UI paste) — the actual runtime prompt (append-only edits preferred, to
+   avoid paste-truncation of a full replace).
+2. **"Currently exposed to ChatGPT" table** here — add/remove the entity row; keep the count + the
+   `verified <date>` line accurate.
+3. **"Routing rules"** here — add/adjust the routing bullet for the tool.
+4. **The embedded "ChatGPT Instructions prompt (FINAL)" block** below — it is the **source-of-truth
+   mirror of the live Instructions and must equal it** (including the `chat_text` verbatim-relay RULES
+   line). If you append to the live prompt, append the same text here.
+5. **Verify against reality:** run `homeassistant/expose_entity/list`, confirm the exposed set is exactly
+   the intended baseline ± the one entity, and that no `media_player.*` / MA entities leaked in.
+
+**Locks (`BACKLOG.md` §9):** this file is locked to the track currently changing exposure — at most one
+exposure change in flight at a time. Never mark a tool "active/exposed" here until it is both exposed
+*and* conversationally validated (tool actually called, relays `chat_text`, no fabrication).
+
 ---
 
 ## ChatGPT Instructions prompt (FINAL — apply to OpenAI Conversation → Instructions)
