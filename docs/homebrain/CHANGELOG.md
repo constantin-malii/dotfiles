@@ -3,6 +3,38 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — INF-09 exporter re-deployed after the pipeline-schema remediation (one file; still NOT run)
+
+> Gate 1, third pass. **Only `ha_export.py` copied; `MANIFEST.json` deliberately not recopied.** The
+> exporter has still never been executed — no probe, no export, no Home Assistant access, no restart.
+
+- **Why:** the second `--probe-only` exited 4 on an unknown pipeline envelope key. A read-only
+  structural probe recorded the complete 13-key pipeline schema (see the plan §11.2) rather than just
+  the one key the error named — which also proved no 14th key was waiting behind it. `language` was
+  added, all 13 fields preserved including nullable `tts_*`, and pipelines gained an unmanaged
+  reporting path.
+- **Pre-check before replacing anything:** the deployed digest was confirmed to still equal
+  `b9dc29781f325ca1…`, the value recorded at the previous deployment. No drift on the host.
+- **Digests**, `sha256` with `tr -d '\r'` on both sides, source commit
+  `e884f48c69913106aa27eb932765df0cab075629`:
+
+  ```
+  old (replaced)  b9dc29781f325ca1e16ab9dddc35209519adea5a4fde3d9757665f6115ee48e7  tools/ha_export.py
+  new (deployed)  25fc208e081028bf0ee4aa3ebf49094bce223bca4f95367a721c67aec430efb7  tools/ha_export.py
+  unchanged       c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched.**
+- **Backup:** `~/mass-resolver/.bak/20260906-192243/tools/ha_export.py`, digest verified identical to
+  the file it replaced. Rollback pointer.
+- **Host verification:** Python **3.5.2**, `py_compile` → `COMPILE_OK` (compiles, does not execute).
+  `~/ha-state/managed` and `~/ha-state/raw` both still absent.
+- **Operational note:** the first attempt at the combined pre-check-and-backup step died with a bare
+  exit 1 and no output — an SSH transport failure, not a host problem. **Nothing partial had
+  happened:** re-checking read-only showed the digest unchanged and no new backup directory created.
+  The step was then re-run split into smaller calls. Worth recording because a bare exit 1 from a
+  compound remote command tells you nothing about how far it got — verify state before retrying.
+
 ## 2026-09-06 — INF-09 exporter re-deployed after the exposure-shape remediation (one file; still NOT run)
 
 > Gate 1, second pass. **Only `ha_export.py` was copied; `MANIFEST.json` was deliberately not
