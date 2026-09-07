@@ -1003,6 +1003,20 @@ class PipelineWrapperTest(ExportCase):
             self.run_export(FakeClient(pipelines=[{"id": "x"}]))
         self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
 
+    def test_non_object_state_row_fails_closed(self):
+        # /api/states is the first payload the exporter touches. Without a row guard a non-dict
+        # row raised AttributeError and surfaced as exit 7 "unexpected", naming nothing.
+        for bad in ("not-an-object", 7, None, ["nested"]):
+            states = states_list()
+            states.insert(1, bad)
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(FakeClient(states=states))
+            self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA, repr(bad))
+            self.assertIn("/api/states[1]", caught.exception.message)
+            self.assertFalse(os.path.exists(self.out), "output written for %r" % bad)
+            self.assertFalse(os.path.isdir(self.raw), "raw written for %r" % bad)
+            self.assertEqual(self.residue(), [])
+
     def test_write_tree_path_escape_is_an_internal_error_not_a_usage_error(self):
         # Reachable only if validate_identifier has been bypassed or broken, so it is an internal
         # invariant violation. It must NOT surface as EXIT_USAGE: that would send an operator to

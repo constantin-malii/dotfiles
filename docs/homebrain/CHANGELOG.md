@@ -57,6 +57,12 @@ design live in the per-topic docs; this log is for discrete operational changes.
 - **Malformed payloads fail closed:** a non-object script `fields`, or a non-object pipeline row,
   now exits **4** naming the resource instead of raising `AttributeError` into the generic
   unexpected-error path.
+- **`/api/states` rows are guarded too** (added while drafting the PR, when the claim that this
+  already existed turned out to be false). The hardening had covered pipeline rows and script
+  `fields` but left the *first* payload the exporter touches unchecked, where a non-dict row raised
+  `AttributeError` and surfaced as exit 7 "unexpected" — naming nothing. It now exits **4** with the
+  offending index, `/api/states[<n>]`. Validation-only: no live re-export was needed, since the
+  change cannot alter the output of a well-formed response.
 
 **Review fixes applied on top**
 

@@ -573,7 +573,14 @@ def collect(client, manifest):
     script_ids = set()
     automation_ids = set()
     states_by_entity = {}
-    for state in states:
+    for index, state in enumerate(states):
+        # Row shape is checked here for the same reason pipeline rows are: without it a non-dict
+        # row raises AttributeError and surfaces as exit 7 "unexpected", which says nothing about
+        # what was wrong. /api/states is the FIRST payload the exporter touches, so an
+        # unrecognised shape here should name itself rather than crash three frames later.
+        if not isinstance(state, dict):
+            raise ExportError(EXIT_SCHEMA, "/api/states[%d]: expected an object, got %s"
+                              % (index, type(state).__name__))
         entity_id = state.get("entity_id") or ""
         states_by_entity[entity_id] = state
         if entity_id.startswith("script."):
