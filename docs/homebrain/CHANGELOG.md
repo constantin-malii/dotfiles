@@ -3,10 +3,45 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
-## 2026-09-06 — INF-09 exporter re-deployed after the pipeline-schema remediation (one file; still NOT run)
+## 2026-09-06 — INF-09 probe passes: the managed HA surface validates end to end (still no export)
 
-> Gate 1, third pass. **Only `ha_export.py` copied; `MANIFEST.json` deliberately not recopied.** The
-> exporter has still never been executed — no probe, no export, no Home Assistant access, no restart.
+> Third `--probe-only`, exit **0**. Read-only, wrote nothing. **No full export has ever run**; that
+> remains a separate gate.
+
+- **Result:** `HA 2026.6.4  PROBE OK (nothing written)`, empty stderr, `~/ha-state/managed` and
+  `~/ha-state/raw` both absent afterwards. No version warning (the instance matches the manifest
+  pin) and no exposure warning.
+- **Validated live:** both undocumented config routes for all 5 declared scripts and the 1 declared
+  automation; every resource envelope (scripts, automation, 2 pipelines, 6 satellite selects); the
+  pipeline-list wrapper; and the exposure wrapper with its boolean leaves. Plan assumptions #1–#4
+  are resolved — the two earlier probes each failed on one of them (#3 exposure shape → exit 5,
+  #2 pipeline `language` → exit 4).
+- **The secret scan executed and found nothing.** Stated precisely: that establishes only that
+  **nothing in the currently captured state tripped any detector**. It does not establish that a
+  managed resource cannot embed a secret, nor that a differently-shaped secret would be caught.
+- **Unmanaged resources reported** — present in HA, deliberately not exported, manifest
+  under-inclusive by design until extended:
+  - **11 scripts:** `ceiling_announce`, `ceiling_next`, `ceiling_play_music`, `ceiling_play_radio`,
+    `ceiling_previous`, `ceiling_resume`, `ceiling_set_volume`, `ceiling_volume_down`,
+    `ceiling_volume_up`, `news`, `play_music`
+  - **6 automations:** `1784146586`, `1784200731`, `lidarr_ma_sync`, `ma_auto_reload`,
+    `ma_health_probe`, `satellite_timer_announce`
+  - **3 pipelines**
+  Several matter to this workstream — `satellite_timer_announce` is the timer automation,
+  `ma_auto_reload`/`ma_health_probe` are the A1/A2a self-healing pair, and `news`/`play_music` are
+  exposed resolver tools. Whether to bring them under change control is a separate decision.
+- **Still unresolved:** satellite `select.*` id **stability** across a firmware or integration update
+  (they exist now; durability is a future-time property no probe can test), and total sanitized
+  output size (nothing has been written yet).
+
+## 2026-09-06 — INF-09 exporter re-deployed after the pipeline-schema remediation (one file; no invocation in this gate)
+
+> Gate 1, third pass. **Only `ha_export.py` copied; `MANIFEST.json` deliberately not recopied.**
+> **No exporter invocation occurred during this deployment gate** — no Home Assistant access, no
+> restart. (**Correction, applied 2026-09-06:** this entry originally read "the exporter has still
+> never been executed", which was false — two `--probe-only` runs had already happened by this
+> point. They wrote nothing, but they did run and did contact Home Assistant. **No full export has
+> ever run.**)
 
 - **Why:** the second `--probe-only` exited 4 on an unknown pipeline envelope key. A read-only
   structural probe recorded the complete 13-key pipeline schema (see the plan §11.2) rather than just
@@ -35,11 +70,14 @@ design live in the per-topic docs; this log is for discrete operational changes.
   The step was then re-run split into smaller calls. Worth recording because a bare exit 1 from a
   compound remote command tells you nothing about how far it got — verify state before retrying.
 
-## 2026-09-06 — INF-09 exporter re-deployed after the exposure-shape remediation (one file; still NOT run)
+## 2026-09-06 — INF-09 exporter re-deployed after the exposure-shape remediation (one file; no invocation in this gate)
 
 > Gate 1, second pass. **Only `ha_export.py` was copied; `MANIFEST.json` was deliberately not
-> recopied** because it is unchanged. The exporter has still never been executed — no probe, no
-> export, no Home Assistant access, no restart or reload.
+> recopied** because it is unchanged. **No exporter invocation occurred during this deployment
+> gate** — no Home Assistant access, no restart or reload. (**Correction, applied 2026-09-06:** this
+> entry originally read "the exporter has still never been executed", which was false — one
+> `--probe-only` run had already happened, exiting 5. It wrote nothing, but it ran and contacted
+> Home Assistant. **No full export has ever run.**)
 
 - **Why:** the first `--probe-only` exited 5 claiming the declared exposure assistant was absent.
   A read-only structural probe established the live shape and proved the exporter, not the manifest,
