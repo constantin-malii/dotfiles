@@ -3,6 +3,31 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — INF-09 expanded probe passes: all 34 collection entries validate, nothing unmanaged remains
+
+> Single `--probe-only`, exit **0**, read-only, wrote nothing. No `--strict-inventory`.
+> **No full export at the expanded scope yet** — that is a separate gate.
+
+- **Result:** `HA 2026.6.4  PROBE OK (nothing written)`, empty stderr, and — new — **no unmanaged
+  lines at all**. Every one of the four discoverable inventories is now fully declared.
+- **What this validated for the first time:** the **20 newly managed** envelopes (11 scripts, 6
+  automations, 3 pipelines) through `check_envelope`, and the secret scan across the whole expanded
+  surface rather than the original 6 resources. The schema pre-recording predicted every key would
+  already be inside the allowlists, and the probe confirms it: **no exit 4**.
+- **Secret scan: no findings across all 34 entries.** Stated precisely: that establishes only that
+  **nothing in the currently captured state tripped any detector**. `lidarr_ma_sync` and
+  `ma_health_probe` were the resources most likely to carry an API key or webhook URL; neither did.
+- **`cloud.alexa` does not exist on this instance — it is a TEST FIXTURE, not live data.** The
+  Gate 3 structural probe recorded exactly **one** assistant key in the live exposure response
+  (`conversation`, across 14 entities). `cloud.alexa` appears only in `test_ha_export.py`, where it
+  was added deliberately so the assistant-filtering and strict-mode isolation tests would have a
+  second assistant to filter *out*. Consequence: there are **no unmanaged exposure assistants**
+  live, and `--strict-inventory` would now pass cleanly on all four inventories.
+- **Post-conditions verified:** `~/ha-state/managed` and `~/ha-state/raw` still absent; the
+  2026-09-06 staging trees byte-identical (`staging-managed` 17 files / 21,114 bytes, mtime still
+  `2026-09-06 20:04`; `staging-raw` 1 run dir / 15 files); no `.tmp-*` residue; both deployed
+  digests unchanged (`4113f173…`, `25fc208e…`).
+
 ## 2026-09-07 — INF-09 expanded manifest deployed (manifest only; exporter untouched, not invoked)
 
 > Gate 1, manifest-only. **`ha_export.py` was neither rebuilt nor recopied** — the read-only schema
