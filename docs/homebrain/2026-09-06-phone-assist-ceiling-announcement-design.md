@@ -104,7 +104,7 @@
 >    its "accepted trade-off" are **withdrawn** (§9.4, §9.6, D10), and pinned by new
 >    non-announcement-supersession regression tests.
 > 2. **The blocking `rest_command` timeout was unaddressed** — a real live failure
->    (`CHANGELOG.md:903`), and rev 1's 370 s theoretical budget made it worse. New §6.5 derives every
+>    (`CHANGELOG.md:1328`), and rev 1's 370 s theoretical budget made it worse. New §6.5 derives every
 >    budget from the bounded message size and states the required HA timeout and how a timeout reaches
 >    the phone.
 > 3. **`precondition_failed` is not a valid error code** — `command_result.py:2` would raise
@@ -197,7 +197,7 @@ is not a candidate route. `reply_volume` is **`0.70`** in `config.json`; the `co
 
 ### 3.2 The chime is the only genuinely unproven piece
 
-`CHANGELOG.md:246-252` already diagnosed this, and that diagnosis is why the chime is designed as a
+`CHANGELOG.md:671-677` already diagnosed this, and that diagnosis is why the chime is designed as a
 `haconn` addition rather than a config string:
 
 - MA **rejects** `media-source://` URIs: `HomeAssistantError: Only URLs are supported for
@@ -218,7 +218,7 @@ the signed URL** — that is the whole content of the spike in §12.
 
 This is why microphone muting is a reliability requirement and not decoration:
 
-- `CHANGELOG.md:229-232` — the timer announcement played on the ceiling was transcribed back as
+- `CHANGELOG.md:651-657` — the timer announcement played on the ceiling was transcribed back as
   *"The pipeline is finished."* / *"The point is finished."* (pipeline traces, 21:05 and 21:14), and
   the resulting self-wake **sustained the announcement loop** until the fix required
   `assist_satellite` idle in the `while` condition.
@@ -413,7 +413,7 @@ it:
 1. The announcement rest_command (§5 step 4) with **`response_variable: r`** and
    **`continue_on_error: true`**.
    The `continue_on_error` is what makes a timeout observable rather than fatal — without it the
-   automation aborts and sets no response at all, which is exactly how `CHANGELOG.md:903` describes
+   automation aborts and sets no response at all, which is exactly how `CHANGELOG.md:1328` describes
    the current satellite reply automation failing quietly.
 2. A `choose` on the outcome, each branch ending in `set_conversation_response`:
    - `r` undefined, or no `content` → the rest_command failed or **timed out**:
@@ -519,7 +519,7 @@ All six are optional. Absent, `_say` behaves exactly as it does today.
 ### 6.5 Timeout budget — the blocking `rest_command` is the constraint
 
 `/command` is **synchronous**: HA's `rest_command` blocks for the whole of `_say`. This is already a
-known live failure, not a hypothetical — `CHANGELOG.md:903` records *"The occasional `interaction …
+known live failure, not a hypothetical — `CHANGELOG.md:1328` records *"The occasional `interaction …
 timed out` is the HA `rest_command` timeout on a blocking long `_say`, absorbed by
 `continue_on_error: true`."* A two-clip announcement makes it worse, and an earlier draft of this
 design made it much worse by inheriting `say_reply_timeout_ms` (180 s) for **both** clips: a
@@ -530,7 +530,7 @@ rather than from the knowledge agent's worst case.
 
 **Precondition: wall-clock deadlines.** Rev 2 derived a budget and then admitted in the same
 paragraph that it was not a bound, because `_say`'s poll loops *"bound themselves by accumulated
-sleep rather than wall clock"* (`CHANGELOG.md:903`). A loop that counts only its own `sleep()` calls
+sleep rather than wall clock"* (`CHANGELOG.md:1328`). A loop that counts only its own `sleep()` calls
 does not count the `get_entity_state` round-trip between them, so its real duration is unbounded in
 principle and simply unknown in practice. Deriving a timeout from such a figure is arithmetic, not
 engineering.
@@ -1295,7 +1295,7 @@ alternative would be making the retries synchronous and adding them to the turn 
 | 20a | any point | superseded by a **non-announcement** turn (satellite reply, `say_text`) | no restore, no replay, **but the mic IS unmuted** — the lease is still ours because only `_announce` writes `_mic` (§9.1/§9.6 rows 3–4). Rev 3's blanket "no unmute" on this row contradicted its own correction. | `ok`, `superseded: true`, `mic.restored: true` |
 | 21 | `finally` | mic restore raises | log `error`; dead-man reconciles | result unchanged |
 | 22 | process | resolver dies mid-turn | mic stays muted until the operator toggles it (§9.5) | — |
-| 23 | **HA transport** | `rest_command` **times out** while `/command` still blocks (`CHANGELOG.md:903`) | `continue_on_error: true` keeps the automation alive; `r` is undefined | §5.2 branch 1 — "I couldn't reach the announcer." The announcement may still be playing; the resolver log is the authority. |
+| 23 | **HA transport** | `rest_command` **times out** while `/command` still blocks (`CHANGELOG.md:1328`) | `continue_on_error: true` keeps the automation alive; `r` is undefined | §5.2 branch 1 — "I couldn't reach the announcer." The announcement may still be playing; the resolver log is the authority. |
 | 24 | **HA transport** | resolver unreachable / `/command` unbound (the cold-boot bind race, `ONBOARDING.md` §7) | as #23 | as #23 |
 
 Rows 11, 17, 18 and 19 are existing `_say` behaviour, listed so the table is a complete account of an
@@ -1730,9 +1730,8 @@ Each gate ends in a state that is safe to stop at.
 completion, as `S1b-1′` did.
 
 **Worktree discipline.** `CLAUDE.md` requires every repository change in an isolated worktree off
-`origin/main`, integrated by PR. G2 and G5 follow that. (This design document itself was written
-directly in the working tree at the operator's explicit instruction, and is left uncommitted for them
-to place.)
+`origin/main`, integrated by PR. G2 and G5 follow that. (This design document itself is committed as
+`259c730` on the `homebrain/an-01-design` branch and is being integrated by PR.)
 
 ### 13.1 Rollback, per gate
 
