@@ -181,8 +181,13 @@ Resolves **D3, D4, D5**. Step 2 is the only audible action in G1.
 
 ```json
 {"id": 1, "type": "media_source/resolve_media",
- "media_content_id": "media-source://media_source/local/./timer_chime.wav"}
+ "media_content_id": "media-source://media_source/local/timer_chime.wav"}
 ```
+
+> **Executed 2026-09-07. The `./` form shown in `CHANGELOG.md:249` was the blocker** — it yields a
+> signature HA cannot validate against its own returned URL (see Task 8’s trap note). The corrected
+> URI above is what passed.
+
 
 Record the **shape** of `result.url` — relative or absolute, whether it carries a signature
 parameter, and the signature's stated or observed lifetime. **Record the shape, never the signature
@@ -346,9 +351,9 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 |---|---|---|
 | **D1** exact mic-mute entity ID | **SETTLED 2026-09-07 (AN-2).** `switch.respeaker_living_room_microphone_mute` — available, `off` at baseline. Goes into `config.json`'s `announce_mic_mute_entity`; the `config.py` default stays `""`. | done — Task 9 |
 | **D2** does muting suppress wake detection | **PASSES 2026-09-07 (AN-2).** With the mic muted 19:12:36→19:1x the operator said the wake word twice plus a full sentence: **zero** new pipeline runs on slot 1 (`01kxygpr39jas5hgsf28cph108`) **or** slot 2. **Positive control:** once unmuted, the operator's *"what time is it"* produced a run at 19:19:43 with `STT='What time is it?'`, so the zero is real suppression and not a broken capture path. Corroborated by the device's own LED ring turning **red** while muted — the firmware knows, so the wake engine is gated at the device rather than the audio merely dropped downstream. | done |
-| **D3** `resolve_media` URL shape + signature TTL | | Task 8 |
-| **D4** does MA fetch a signed URL | | Task 2 go/no-go → Task 12's chime clip |
-| **D5** echoed `media_content_id` (query preserved?) | | Task 12 (`match_key`) |
+| **D3** `resolve_media` URL shape + signature TTL | **SETTLED 2026-09-07 (AN-1).** `media_source/resolve_media` returns `mime_type: audio/x-wav` and a **relative** path signed with a single `authSig` query parameter: `/media/local/timer_chime.wav?authSig=…`. Task 8's absolutisation against the internal base is therefore required, as designed. **TTL is not the constraint** — a correctly-signed URL fetched fine at +12 s, and a wrongly-signed one was 401 immediately. | done — Task 8 |
+| **D4** does MA fetch a signed URL | **PASSES 2026-09-07 (AN-1), after a root cause was found and fixed.** First attempt failed: `play_media` → HTTP 500, MA logged *“Unable to retrieve info”* then *“No playable items found”*, and HA's ban log showed MA's ffmpeg (`Lavf/61.7.100`) getting **401** on the signed URL. **Root cause: the `./` in the media_content_id.** HA signs the *un-normalised* path but returns a *normalised* URL, so the signature cannot validate against the URL it is attached to. Proven both ways: with `./`, the returned URL 401s but the **same signature** succeeds when `./` is re-inserted into the request path; without `./`, the returned URL fetches 200 and re-inserting `./` 401s. With the corrected URI: `play_media` → HTTP 200, `playing` at **0.16 s**, audible ~6.5 s, and the **operator heard the two-note bell on the ceiling speakers** — criterion (d) satisfied by ear, which is the only way it can be. | done |
+| **D5** echoed `media_content_id` (query preserved?) | **SETTLED 2026-09-07 (AN-1) — the query IS preserved, which refutes §8.2's assumption.** MA echoes `builtin://track/http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=…`. Two consequences: (a) the chime's `match_key` can be the **full URI**, identical to TTS clips, so §8.2's path-only special case is **unnecessary** — a simplification; (b) the wrapper is **`builtin://track/`**, not the `builtin://radio/` that `interaction.py`'s existing comment documents for TTS clips, so MA wraps by media type and nothing in the code anticipated `track`. | done — simplifies Task 12 |
 | **D6** mute feedback sound audible | **NO AUDIBLE FEEDBACK OBSERVED 2026-09-07 (AN-2) — confirmed on a second run with the output path verified.** Two runs, and the sequence matters. **Run 1** (mute `16:07:30`, unmute `16:07:38`): nothing heard, but the reSpeaker's audio output had not been independently verified, so a negative was indistinguishable from “nothing could play” — recording it as measured was premature. **Run 2** (mute `16:13:45`, unmute `16:13:54`), after the operator tested and confirmed the connected speakers: again nothing heard at either transition. With the output path proven, the negative is now a measurement rather than an assumption. Both runs: output at 50%, `switch.…_mute_unmute_sound` left `on`, `switch.…_wake_sound` left `on`, no config changed, two writes per run to the mic-mute switch only. Confound noted in both: the ceiling was `playing` at `volume_level=0.1`. **Consequence: none** — `mute_unmute_sound` can stay `on`, so an announcement will not open with a satellite chirp layered under the ceiling chime. | done — Task 27 note only |
 | **D8** `params` payload shape | **SETTLED 2026-09-07:** `intent`/`params` are top-level `data:` keys, `params` structured, **no `payload:` wrapper**. Task 26 corrected. | done |
 | **D13a** the live `rest_command` `timeout` | **INFORMATIONAL / UNRESOLVED — does not block.** AN-01 ships a **dedicated** `rest_command.resolver_command_announce` with `timeout: 200`, so the existing command's timeout is never inherited and never changed. Its value would only matter if the shared shape were chosen, which it is not. Record it if convenient; do not wait for it. | not blocking |
@@ -363,8 +368,8 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 
 | If | Then, before G2 |
 |---|---|
-| **D4/D2 no-go** (MA won't fetch the chime) | Task 12 keeps the clip-loop code and tests, but `config.json` ships `announce_chime_uri: ""` and a non-empty `announce_prefix`; Task 9's default flips. Two-clip tests still run against a synthetic URI. |
-| **D5 shows the query is stripped** | Task 12's chime `match_key` is the path only — as designed. **If the path is stripped too**, the chime clip needs a different confirmation strategy: **stop and return to design.** |
+| ~~**D4/D2 no-go** (MA won't fetch the chime)~~ | **NOT TRIGGERED.** D4 passed once the `./` was removed, so the chime ships enabled and no fallback applies. The rule is kept for the record: had it fired, Task 12 would have kept the clip-loop code and tests while `config.json` shipped `announce_chime_uri: ""` with a non-empty `announce_prefix`. |
+| ~~**D5 shows the query is stripped**~~ | **NOT TRIGGERED — the opposite happened.** The query is **preserved**, so the chime's `match_key` is the **full URI**, exactly like a TTS clip, and §8.2's path-only special case is dropped as unnecessary. Task 12's `match_keys` plumbing is still built (it costs nothing and keeps per-clip matching explicit), but no clip needs a divergent key. |
 | **D1 found** | Task 9 sets `announce_mic_mute_entity` to the real ID in `config.json`; the `config.py` default stays `""`. |
 | **D1 not found** | `announce_mic_mute_entity` stays `""`, so nothing can announce (§10 row 7). Not shippable — return to Task 3. |
 | **D2 no-go** (muting doesn't stop the wake word) | **Return to design.** §9 reopens; do not proceed to G2 with a fail-safe that does not fail safe. |
@@ -405,7 +410,7 @@ git commit -m "docs(homebrain): record AN-01 G1/G1b discovery results (D1-D6, D8
 ```
 
 - [ ] **Step 5: Confirm the gate.** D8 and D12 are settled; **D13b passes by inference and D13a is
-  informational**, so neither blocks. **AN-2 is complete: D1, D2, D6 and D14 are all recorded.** What remains is **D3, D4 and D5** from the AN-1 chime spike — the one that needs a quiet house, because its go criterion is the operator *hearing* the chime. Formally, the confirmation line is still *"Checkpoint A complete; D1–D6, D8, D12–D14
+  informational**, so neither blocks. **AN-2 complete** (D1, D2, D6, D14) and **AN-1 complete** (D3, D4, D5) as of 2026-09-07, the latter including the operator hearing the chime on the ceiling. **Every discovery Checkpoint A gates on is now recorded, so G2 may begin.** The confirmation line: *"Checkpoint A complete; D1–D6, D8, D12–D14
   session. State explicitly: *"Checkpoint A complete; D1–D6, D8, D12–D14
   recorded; reconciliations applied; G2 may begin."* Do not start Task 5 without that statement.
 
@@ -768,10 +773,10 @@ class ResolveMediaSourceTest(unittest.TestCase):
         self.ha = haconn.HA("192.168.122.10", 8123, "tok")
 
     def test_sends_the_resolve_command_and_returns_an_absolute_url(self):
-        url = self.ha.resolve_media_source("media-source://media_source/local/./timer_chime.wav")
+        url = self.ha.resolve_media_source("media-source://media_source/local/timer_chime.wav")
         self.assertEqual(url, "http://192.168.122.10:8123" + self.SIGNED)
         self.assertIn({"id": 1, "type": "media_source/resolve_media",
-                       "media_content_id": "media-source://media_source/local/./timer_chime.wav"},
+                       "media_content_id": "media-source://media_source/local/timer_chime.wav"},
                       self.sent)
 
     def test_authenticates_before_resolving(self):
@@ -834,6 +839,15 @@ class ResolveMediaSourceTest(unittest.TestCase):
 
 Run: `python tests/test_haconn.py ResolveMediaSourceTest -v`
 Expected: FAIL — `AttributeError: 'HA' object has no attribute 'resolve_media_source'` on all 10.
+
+> **⚠ The `./` trap — measured at AN-1, 2026-09-07.** A media_content_id containing a `./`
+> segment produces a **signature that cannot validate**: HA signs the *un-normalised* path
+> (`/media/local/./timer_chime.wav`) but returns a *normalised* URL
+> (`/media/local/timer_chime.wav?authSig=…`). Fetching the returned URL gives **401**; re-inserting
+> `./` into the request path makes the **same signature** succeed. This cost the project two days and
+> was misdiagnosed in `CHANGELOG.md:246-252` as “MA cannot fetch HA's media files, which need
+> auth”. **Never construct or accept a media_content_id with a `./` segment**, and if a future
+> resolve 401s, check for path normalisation before anything else.
 
 - [ ] **Step 3: Implement.** Add to `haconn.py` after `tts_get_url`, and add `import wsutil` if the
   module-level import is not already present (it is — `haconn.py:6`):
@@ -930,8 +944,11 @@ class AnnounceTunablesTest(unittest.TestCase):
         self.assertEqual(s.announce_volume, 0.80)
         self.assertEqual(s.announce_prefix, "")
         self.assertEqual(s.announce_max_prefix_chars, 40)
+        # AN-1 2026-09-07: the './' form 401s -- HA signs the un-normalised path and returns a
+        # normalised URL, so the signature cannot validate. The default MUST NOT contain './'.
         self.assertEqual(s.announce_chime_uri,
-                         "media-source://media_source/local/./timer_chime.wav")
+                         "media-source://media_source/local/timer_chime.wav")
+        self.assertNotIn("/./", s.announce_chime_uri)
         self.assertEqual(s.announce_mic_mute_entity, "")
         self.assertTrue(s.announce_require_mic_mute)
         self.assertEqual(s.announce_mic_confirm_timeout_ms, 2000)
@@ -996,7 +1013,7 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'announce
         self.announce_prefix = cfg.get("announce_prefix", "")
         self.announce_max_prefix_chars = int(cfg.get("announce_max_prefix_chars", 40))
         self.announce_chime_uri = cfg.get(
-            "announce_chime_uri", "media-source://media_source/local/./timer_chime.wav")
+            "announce_chime_uri", "media-source://media_source/local/timer_chime.wav")   # NO "./" -- see AN-1 / D4
         # Empty until the spike establishes the real entity id (D1). Empty means announcements
         # refuse, per announce_require_mic_mute.
         self.announce_mic_mute_entity = cfg.get("announce_mic_mute_entity", "")
@@ -1028,7 +1045,7 @@ Expected: FAIL — `AttributeError: 'Settings' object has no attribute 'announce
 ```json
   "announce_volume": 0.80,
   "announce_prefix": "",
-  "announce_chime_uri": "media-source://media_source/local/./timer_chime.wav",
+  "announce_chime_uri": "media-source://media_source/local/timer_chime.wav",
   "announce_mic_mute_entity": "<D1: the exact switch entity id from Checkpoint A>",
   "announce_require_mic_mute": true,
   "announce_mic_confirm_timeout_ms": 2000,
@@ -1074,7 +1091,7 @@ git commit -m "feat(resolver): add announce mode tunables"
     announce_volume = 0.80
     announce_prefix = ""
     announce_max_prefix_chars = 40
-    announce_chime_uri = "media-source://media_source/local/./timer_chime.wav"
+    announce_chime_uri = "media-source://media_source/local/timer_chime.wav"   # NO "./" -- AN-1/D4
     announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
     announce_require_mic_mute = True
     announce_mic_confirm_timeout_ms = 2000
@@ -1435,6 +1452,29 @@ git commit -m "refactor(resolver): extract the per-clip play/poll body out of _s
   `["volume_override"]`, `["deadline_from_now"]`, and a `metadata["clips"]` list of
   `{"clip", "started", "issued"}`. Task 15 consumes them.
 
+> **⚠ Two AN-1 findings that change this task (2026-09-07).**
+>
+> **1. The query is PRESERVED, so no divergent match key is needed.** MA echoes
+> `builtin://track/http://…/timer_chime.wav?authSig=…`. §8.2 assumed the query would be stripped and
+> specified a path-only key for the chime; that assumption is refuted. **Every clip's `match_key` is
+> its full normalised URI**, exactly as `say`/`say_text` already do. Keep the `match_keys` plumbing —
+> it costs nothing and keeps matching explicit per clip — but no clip needs a different rule. Note
+> also the wrapper is **`builtin://track/`**, not the `builtin://radio/` that `interaction.py`'s
+> comment documents for TTS clips; MA wraps by media type.
+>
+> **2. The echoed `media_content_id` CONTAINS A LIVE BEARER CREDENTIAL.** The `authSig` is inside the
+> cid that HA reports and `_play_clip_and_wait` reads on every poll. `_say`'s finish-poll currently
+> logs `cid[:60]`, which for this URL stops just short of the signature — **luck, not design**: a
+> shorter host or path would write a working credential into `resolver.log`. This task must add an
+> explicit redaction helper (strip `authSig=…` and any `sig`/`token` parameter) and use it in **every**
+> log line that touches a cid. Do not rely on truncation.
+>
+> **3. `_is_reply_uri` does not recognise the chime.** It excludes `tts_proxy` and
+> `builtin://radio/http`; the chime arrives as `builtin://track/http://…`, matching neither. If
+> anything calls `remember_source` with it, a spent chime whose signature will expire becomes the
+> zone's “last real source” and `resume` will try to replay it. Extend `_is_reply_uri` to
+> exclude a `/media/local/` chime as well, and add a test.
+
 - [ ] **Step 1: Write the failing tests.**
 
 ```python
@@ -1512,7 +1552,9 @@ class ClipSequenceTest(unittest.TestCase):
         self.assertTrue(r["metadata"]["replayed"])
         self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 3)   # 2 clips + replay
 
-    def test_the_chime_match_key_strips_the_query_and_the_tts_key_does_not(self):
+    def test_the_chime_match_key_is_the_full_uri_query_included(self):
+        # AN-1 measured the query as PRESERVED in MA's echo, refuting the design's assumption
+        # that it would be stripped. No divergent key is needed.
         cap = self._cap(); ha = FakeHA(playing(0.36)); ha.set_states(self._states())
         r = self._two_clip(cap, ha)
         clips = r["metadata"]["clips"]
@@ -4161,6 +4203,15 @@ it would be a second clip fighting the announcement it confirms.
   dead-man dies with the process (§9.5) — recovery is to toggle the switch in the HA UI. (b) If the
   ceiling is silent and `paused` after a failed announcement, both the clip play and its replay
   failed (§8.3a); recovery is *"resume"* (`interaction` mode `resume`), not a resolver restart.
+
+- [ ] **Step 7a: `CHANGELOG.md` — correct the 2026-09-05 chime misdiagnosis.** That entry
+  concludes *“MA rejects `media-source://` URIs … and cannot fetch HA's media files, which need
+  auth (`/media/local/... -> 401`)”*, and records the asset **with a `./`**. AN-1 showed the 401 was
+  a **path-normalisation bug in the signed URL**, not an auth requirement: a correctly-formed signed
+  URL fetches unauthenticated and returns `audio/vnd.wave`. **Append a dated correction rather than
+  rewriting the original** — the original is an accurate record of what was known then, and the
+  §3.6 precedent for `BACKLOG.md` applies here too. Also correct §3.2 and §12 of the design doc,
+  which quote the `./` form.
 
 - [ ] **Step 8a: The design doc — correct the §5 step 3 normalisation claim.** It states HA
   normalises trigger text by lower-casing and stripping punctuation, so the resolver receives
