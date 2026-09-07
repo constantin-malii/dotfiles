@@ -267,9 +267,10 @@ gave G1b an exit criterion it could not achieve read-only; the write is Task 25.
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: **D8** (the exact `params` payload shape the existing rest_command uses) and **D13** (its
-  current timeout, plus the recorded decision: dedicated command vs. raised shared timeout). Tasks 15
-  (result shape) and 25 (the write) consume these.
+- Produces: **D8** (the caller's `params` shape — settled 2026-09-07), **D13a** (the current
+  timeout), **D13b** (the `payload:` body template — a stop gate), and the recorded shape decision:
+  dedicated command vs. raised shared timeout. Tasks 15 (result shape), 25 (the write) and 26 (the
+  caller) consume these.
 
 - [ ] **Step 1: Read the definition.** With the operator, open the live `configuration.yaml` (or the
   packages fragment holding `rest_command:`) and record verbatim: the `url`, the header names
@@ -286,7 +287,39 @@ gave G1b an exit criterion it could not achieve read-only; the write is Task 25.
      script, including the five ChatGPT-exposed ones. Only if (1) proves awkward, and the latency
      exposure must be written down.
 
+- [ ] **Step 3c: 🛑 The operator reads the `rest_command:` block — this owns D13 and blocks
+  Checkpoint A.** No agent can do this: `rest_command` is YAML-only, has no config entry, no API to
+  dump it, and `ONBOARDING.md:63` records that there is no VM shell. Open `configuration.yaml` (or
+  the `rest_command:` package file) via File Editor, a Terminal add-on, or a local editor, and record
+  two things verbatim:
+
+  - **D13a** — `resolver_command`'s current `timeout:`.
+  - **D13b** — its `payload:` **body template**, character for character.
+
+  Then classify D13b:
+
+  | Body template | Meaning | Consequence |
+  |---|---|---|
+  | `params` emitted through `\| to_json` / `\| tojson` | serialised to JSON properly | **Go.** Task 26's structured form is correct. |
+  | `{{ params }}` — raw interpolation | Python `dict` repr, **single quotes**, **not valid JSON** | 🛑 **Checkpoint A cannot pass.** Return to design: either the shared body template changes (it has five live callers) or `mode=announce` needs a different transport. Do **not** start G2 assuming this can be patched later. |
+  | anything else | unknown | 🛑 **Stop** and report the literal template. |
+
+  **Record the header *name* and the `!secret` *name* only** — never the key, the token, or a full
+  URL with credentials in it.
+
 - [ ] **Step 4: Release the live lane** in `BACKLOG.md:306` back to FREE.
+
+> **G1b outcome, 2026-09-07 (recorded — this part is done).**
+> **D8 settled** by reading `automation.satellite_timer_announce_on_ceiling` via
+> `/api/config/automation/config/satellite_timer_announce`: the caller passes `intent` and `params`
+> as **top-level `data:` keys**, `params` a structured mapping, **no `payload:` wrapper**. Task 26 is
+> corrected accordingly.
+> `GET /api/services` shows only **`rest_command.reload`** and **`rest_command.resolver_command`** —
+> no `resolver_command_announce`, so Task 25 creates it from scratch.
+> **D13 still OPEN, and it is two things:** the current `timeout`, *and* the `payload:` body
+> template. Neither is reachable without a YAML read (no config entry, no API, no VM shell). The
+> body template is now a **stop gate at G1b step 3c**, which blocks Checkpoint A, and is
+> re-checked at Task 25 step 3a before the write.
 
 ---
 
@@ -318,7 +351,9 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 | **D4** does MA fetch a signed URL | | Task 2 go/no-go → Task 12's chime clip |
 | **D5** echoed `media_content_id` (query preserved?) | | Task 12 (`match_key`) |
 | **D6** mute feedback sound audible | | Task 27 (documentation only) |
-| **D8** `params` payload shape | | Task 25, Task 26 |
+| **D8** `params` payload shape | **SETTLED 2026-09-07:** `intent`/`params` are top-level `data:` keys, `params` structured, **no `payload:` wrapper**. Task 26 corrected. | done |
+| **D13a** the live `rest_command` `timeout` | | **G1b step 3c** — blocks Checkpoint A |
+| **D13b** the live `payload:` **body template** — does it `\| to_json` the params, or interpolate raw? | | **G1b step 3c** — blocks Checkpoint A; **re-checked** at Task 25 step 3a |
 | **D12** source discriminator field | | Task 26 |
 | **D13** current shared timeout + chosen shape | | Task 25 |
 | **D14** does HA report `on` for an unreachable device | | Task 14; a no-go returns to design |
@@ -3883,24 +3918,48 @@ caller's timeout moves.
   `rest_command:` package file) to a timestamped file outside HA's config reload path, and record the
   path. This is G4a's rollback pointer.
 
-- [ ] **Step 3: Add the command**, using **D8**'s recorded payload shape. Shape below; substitute
-  D8's exact `url`, header names and `payload` template rather than inventing them:
+- [ ] **Step 3a: 🛑 Re-check D13b immediately before writing.** The primary read is
+  **G1b step 3c**, which gates Checkpoint A — so by the time this task runs D13b is already
+  classified **Go**. This step exists because the config is live and editable: re-read the `payload:`
+  template and confirm it still matches what Checkpoint A recorded. If it has changed, stop.
+
+  The classification, repeated so this task is self-contained:
+
+  | Body template | Meaning | Action |
+  |---|---|---|
+  | `{{ params \| to_json }}` (or `\| tojson`) | `params` is serialised to JSON properly | **Go.** Task 26's structured form is correct as written. |
+  | `{"intent": "{{ intent }}", "params": {{ params \| to_json }}}` | same, spelled out | **Go.** |
+  | `{{ params }}` — raw interpolation | Python's `dict` repr, which uses **single quotes** (`{'mode': 'announce'}`) and is **not valid JSON** | **🛑 STOP. Do not create the command.** The resolver's `/command` would reject or mis-parse the body. Report it and return to design: either the rest_command body needs fixing (a change to a template five live callers share) or `mode=announce` needs a different transport. |
+  | Anything else | unknown | **🛑 STOP** and report the literal template before proceeding. |
+
+  **Why this is a gate rather than a test-and-see:** a raw-interpolation failure would surface as an
+  announcement that silently does nothing, or a `400` from `/command`, at G4b — after the command
+  exists and the sentence triggers are live. Reading one line first is cheaper than debugging that,
+  which is why the primary read blocks Checkpoint A instead of sitting here.
+
+  **Note the existing five callers work today**, which is *evidence* that the template serialises
+  `params` correctly for `say_text` and `radio`/`music`/`news`/`media_status` — but it is not proof
+  for a nested mapping with a different key set, so read it rather than infer it.
+
+- [ ] **Step 3b: Add the command**, copying the verified `url`, header names and `payload` template
+  from `resolver_command` verbatim. Substitute the real values; do not invent them:
 
 ```yaml
 rest_command:
   # AN-01: a DEDICATED command so no existing caller inherits a 200s timeout (design 6.5).
   # /command is synchronous, so HA blocks for the whole announcement.
   resolver_command_announce:
-    url: <D8: the same url as resolver_command>
+    url: <the same url as resolver_command>
     method: POST
-    timeout: 200
+    timeout: 200                                # D13: resolver_command's own timeout is lower
     headers:
-      X-Resolver-Key: !secret resolver_key      # <D8: the exact header/secret name>
+      X-Resolver-Key: !secret <the exact secret name resolver_command uses>
       Content-Type: application/json
-    payload: <D8: the same payload template as resolver_command>
+    payload: <the SAME body template as resolver_command, verified at step 3a>
 ```
 
-**Never inline the key** — reference the existing `!secret`.
+**Never inline the key** — reference the existing `!secret`. **Never paste the template from
+memory** — copy it from the live file, because step 3a's whole point is that its exact text matters.
 
 - [ ] **Step 4: Reload.** Developer Tools → YAML → *Reload REST commands* (or restart HA if that
   reload is unavailable). Confirm `rest_command.resolver_command_announce` appears in the service
@@ -3953,10 +4012,10 @@ rest_command:
         sequence:
           - action: rest_command.resolver_command_announce
             data:
-              payload: >-
-                {"intent": "interaction",
-                 "params": {"mode": "announce",
-                            "text": {{ trigger.slots.message | to_json }}}}
+              intent: interaction
+              params:
+                mode: announce
+                text: "{{ trigger.slots.message }}"
             response_variable: r
             continue_on_error: true
           - choose:
@@ -3975,8 +4034,26 @@ rest_command:
               - set_conversation_response: "{{ r.content.chat_text }}"
 ```
 
-`| to_json` is load-bearing: a message containing a quote or a backslash would otherwise produce
-invalid JSON.
+**This is the confirmed shape, measured at G1b — not a guess.**
+`automation.satellite_timer_announce_on_ceiling` calls the rest_command with `intent` and `params` as
+**top-level `data:` keys**, and `params` as a **structured mapping**:
+
+```yaml
+action: rest_command.resolver_command
+continue_on_error: true
+data:
+  intent: interaction
+  params: {mode: say_text, text: "Your timer is finished."}
+```
+
+There is **no `payload:` wrapper**. An earlier draft of this plan wrapped everything in
+`payload: >- {"intent": …}` with a `| to_json` filter on the message; that was wrong and would not
+have worked, because no `payload` variable exists in the template namespace. Both are removed.
+
+**No `| to_json` is needed here, and adding one would be wrong.** The message stays a plain
+templated string inside a structured mapping; serialising it to JSON is the **rest_command's own
+body template's** job, one layer down. That is the part still unverified — see the D13b gate at
+**G1b step 3c**, which blocks Checkpoint A, and its re-check at Task 25 step 3a.
 
 **No spoken confirmation.** A text-only conversation response is not a dialogue — nothing is asked of
 the operator and no second turn happens. A *spoken* confirmation is forbidden (`ONBOARDING.md` §5):
@@ -4131,7 +4208,7 @@ Run against the design at `259c730`.
 | §13 gates G1–G5 | all phases | covered |
 | §13.1 rollback | Rollback section | covered |
 | §13.2 doc updates | 27 | covered |
-| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered; **D7, D9, D10, D11 are observational** — recorded at G4b/G3/after-use, no task implements them |
+| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered. **D8 is settled** (G1b, 2026-09-07). **D13 split into D13a** (timeout) **and D13b** (body template) — D13b is a **stop gate at G1b step 3c** (blocking Checkpoint A, re-checked at Task 25 step 3a), because a raw `{{ params }}` interpolation yields Python dict repr, not JSON. **D7, D9, D10, D11 are observational** — recorded at G4b/G3/after-use, no task implements them |
 
 **One gap, deliberate:** D7 (wildcard text normalisation), D9 (chime→speech gap), D10 (how often a
 non-announcement supersedes) and D11 (is 0.80 right by ear) are observations with no code
@@ -4147,7 +4224,8 @@ called out in Task 21's PR body. Success-path sequences are unchanged and pinned
 - No `TBD`, `TODO`, "implement later", or "add appropriate error handling".
 - Every code step carries real code.
 - **Three intentional substitution points**, each labelled and each blocked by Checkpoint A rather
-  than left vague: `<D1: the exact switch entity id>` (Task 9 step 4), `<D8: ...>` (Task 25 step 3),
+  than left vague: `<D1: the exact switch entity id>` (Task 9 step 4), the copy-from-live values in
+  Task 25 step 3b (gated by step 3a),
   `<D12 field>` (Task 26 step 3). Task 9 step 4 says explicitly: *do not leave the placeholder; if
   Checkpoint A did not produce D1, stop.*
 - **Every code snippet is directly usable as written.** An earlier draft carried two that were not:
