@@ -851,11 +851,15 @@ class PipelineSchemaTest(ExportCase):
         self.assertEqual(summary["unmanaged"]["pipelines"], [])
 
     def test_undeclared_pipeline_alone_triggers_strict_exit_5(self):
+        # TRUE isolation: declare cloud.alexa so the pipeline is the ONLY unmanaged resource.
+        # Asserting two entries would have let the pipeline entry disappear while the assistant
+        # entry kept the test green.
+        manifest = dict(MANIFEST)
+        manifest["exposure_assistants"] = ["conversation", "cloud.alexa"]
         with self.assertRaises(ha_export.ExportError) as caught:
-            self.run_export(self._with_undeclared(), strict_inventory=True)
+            self.run_export(self._with_undeclared(), strict_inventory=True, manifest=manifest)
         self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
-        self.assertEqual(caught.exception.detail,
-                         ["assistant:cloud.alexa", "pipeline:01zzzzzzzzzzzzzzzzzzzzzzzz"])
+        self.assertEqual(caught.exception.detail, ["pipeline:01zzzzzzzzzzzzzzzzzzzzzzzz"])
         self.assertFalse(os.path.exists(self.out))
         self.assertEqual(self.residue(), [])
 

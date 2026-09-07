@@ -33,10 +33,23 @@ Everything named in `docs/homebrain/ha/MANIFEST.json`, and nothing else:
 
 Helper entities, dashboards, integrations and config entries, `.storage` internals, secrets, the
 recorder database, add-ons, and **the instance itself**. Anything outside `MANIFEST.json` is
-**unmanaged** — the run summary lists unmanaged **scripts, automations, pipelines and exposure
-assistants** so the manifest can be extended deliberately, but nothing unmanaged is ever exported.
-Under `--strict-inventory` any of those four makes the run **exit 5** before anything is written,
-reported as `script.<id>` / `automation:<id>` / `pipeline:<id>` / `assistant:<name>`.
+**unmanaged** and is never exported.
+
+**Two different guarantees, worth keeping straight:**
+
+- **Everything you declare is checked to exist.** A manifest entry HA does not have → **exit 5**.
+  That includes satellite entities: a declared `select.*` that is gone fails the run.
+- **Unmanaged resources can only be *listed* where a discoverable inventory exists** — exactly four:
+  **scripts**, **automations**, **pipelines**, and **observed exposure assistants**. The run summary
+  lists those so the manifest can be extended deliberately, and `--strict-inventory` makes any of
+  them **exit 5** before anything is written, labelled `script.<id>` / `automation:<id>` /
+  `pipeline:<id>` / `assistant:<name>`. Strict mode is exhaustive over those four and no further.
+- **Satellite entities are not enumerated.** `/api/states` is the whole instance, and separating out
+  "the satellite's entities" needs a device or integration boundary — an `entity_id` prefix match is
+  a naming heuristic, not a boundary. So a satellite `select.*` you never declared will not be
+  reported. Add it to the manifest if you want it tracked.
+- **`preferred_pipeline` is a declared singleton** (`include_preferred_pipeline`), not a collection:
+  it is either declared and captured or not, and has no unmanaged notion.
 
 **Two singleton surfaces are declared explicitly**, so nothing is captured merely because
 HA returned it: `exposure_assistants` filters conversation exposure to the assistants you

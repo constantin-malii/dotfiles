@@ -205,8 +205,24 @@ docs/homebrain/runbooks/ha-managed-state-export.md
 `MANIFEST.json` is the managed-resource declaration — the analogue of a deploy manifest. It names
 `ha_version_expected` and the exact scripts, automations, pipelines, satellite entities and exposure
 assistants under change control. Resources present in HA but absent from the manifest are
-**unmanaged**: reported in the summary, never exported. `--strict-inventory` turns that into exit 5,
-for the day we want the manifest to be exhaustive.
+**unmanaged**: reported in the summary, never exported.
+
+**How far "unmanaged" reaches — the honest boundary, not a naming heuristic.** Two different
+guarantees apply, and conflating them would overstate what the tool knows:
+
+- **Every declared resource is verified to exist.** A manifest entry with no counterpart in HA is a
+  missing resource → **exit 5**. This holds for all four collections *and* for satellite entities:
+  a declared `select.*` that HA does not return fails the run.
+- **Enumerating what is *unmanaged* is only possible where a discoverable inventory exists.** That is
+  true for exactly four: **scripts** and **automations** (from `/api/states`), **pipelines** (from
+  the pipeline list), and **observed exposure assistants** (from the exposure response).
+  `--strict-inventory` is exhaustive over those four and no further.
+- **Satellite entities are deliberately excluded from unmanaged enumeration.** `/api/states` is the
+  whole instance; picking "the satellite's entities" out of it would need a defensible
+  device/integration boundary, and an `entity_id` prefix match is a naming heuristic, not a boundary.
+  Rather than pretend, the tool verifies the declared ones and stays silent about the rest.
+- **`preferred_pipeline` is a separately declared singleton** (`include_preferred_pipeline`), not a
+  collection, so it has no unmanaged notion at all — it is either declared and captured, or not.
 
 ```
 python3 ha_export.py --manifest <path> --out <dir> [--raw-dir <dir>]
