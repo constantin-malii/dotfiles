@@ -287,25 +287,24 @@ gave G1b an exit criterion it could not achieve read-only; the write is Task 25.
      script, including the five ChatGPT-exposed ones. Only if (1) proves awkward, and the latency
      exposure must be written down.
 
-- [ ] **Step 3c: 🛑 The operator reads the `rest_command:` block — this owns D13 and blocks
-  Checkpoint A.** No agent can do this: `rest_command` is YAML-only, has no config entry, no API to
-  dump it, and `ONBOARDING.md:63` records that there is no VM shell. Open `configuration.yaml` (or
-  the `rest_command:` package file) via File Editor, a Terminal add-on, or a local editor, and record
-  two things verbatim:
+- [ ] **Step 3c: D13 — resolved without reading the YAML (2026-09-07). No longer blocking.**
+  The `rest_command:` block cannot be read from an agent: it is YAML-only, has no config entry, no API
+  route, and `ONBOARDING.md:63` records there is no VM shell. `tools/ha_export.py` confirms this
+  independently — purpose-built to capture HA managed state, it exports automations, scripts,
+  pipelines and exposure, and **no rest_commands**, because no route exists.
 
-  - **D13a** — `resolver_command`'s current `timeout:`.
-  - **D13b** — its `payload:` **body template**, character for character.
+  **D13b passes by production evidence — inferred, not directly read:** nine live scripts call `rest_command.resolver_command` with top-level `intent`/`params`, `response_variable` and `continue_on_error`, passing `params` mappings of **0 to 5 keys** (`news` `{}`; `ceiling_set_volume` `{mode, volume}`; `find_stations` 3 keys; `play_radio` 5 keys with `\| default('', true)` templating). A raw `{{ params }}` interpolation would emit Python dict repr with single quotes, which `/command` cannot parse — so nine working callers rule that out. Announce's `{mode, text}` is structurally identical to `ceiling_set_volume`'s proven `{mode, volume}`. Source: the `tools/ha_export.py` baseline under `docs/homebrain/ha/scripts/`.
 
-  Then classify D13b:
+  **D13a is informational.** AN-01 ships a dedicated `resolver_command_announce` with `timeout: 200`,
+  so the existing timeout is neither inherited nor changed. Record it if the YAML is open anyway.
 
-  | Body template | Meaning | Consequence |
-  |---|---|---|
-  | `params` emitted through `\| to_json` / `\| tojson` | serialised to JSON properly | **Go.** Task 26's structured form is correct. |
-  | `{{ params }}` — raw interpolation | Python `dict` repr, **single quotes**, **not valid JSON** | 🛑 **Checkpoint A cannot pass.** Return to design: either the shared body template changes (it has five live callers) or `mode=announce` needs a different transport. Do **not** start G2 assuming this can be patched later. |
-  | anything else | unknown | 🛑 **Stop** and report the literal template. |
+  **The inference is not the final word.** Task 25 step 5's round trip through the new command is the
+  validation. If it fails, stop and return to design — do not patch forward on the assumption that a
+  template can be adjusted, because that template has five live callers.
 
-  **Record the header *name* and the `!secret` *name* only** — never the key, the token, or a full
-  URL with credentials in it.
+  *Optional, if convenient:* read the `payload:` line anyway and record it verbatim, which upgrades
+  D13b from inferred to read. Header *name* and `!secret` *name* only — never the key, the token, or a
+  full URL.
 
 - [ ] **Step 4: Release the live lane** in `BACKLOG.md:306` back to FREE.
 
@@ -352,11 +351,11 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 | **D5** echoed `media_content_id` (query preserved?) | | Task 12 (`match_key`) |
 | **D6** mute feedback sound audible | | Task 27 (documentation only) |
 | **D8** `params` payload shape | **SETTLED 2026-09-07:** `intent`/`params` are top-level `data:` keys, `params` structured, **no `payload:` wrapper**. Task 26 corrected. | done |
-| **D13a** the live `rest_command` `timeout` | | **G1b step 3c** — blocks Checkpoint A |
-| **D13b** the live `payload:` **body template** — does it `\| to_json` the params, or interpolate raw? | | **G1b step 3c** — blocks Checkpoint A; **re-checked** at Task 25 step 3a |
+| **D13a** the live `rest_command` `timeout` | **INFORMATIONAL / UNRESOLVED — does not block.** AN-01 ships a **dedicated** `rest_command.resolver_command_announce` with `timeout: 200`, so the existing command's timeout is never inherited and never changed. Its value would only matter if the shared shape were chosen, which it is not. Record it if convenient; do not wait for it. | not blocking |
+| **D13b** the live `payload:` **body template** | **PASSES BY PRODUCTION EVIDENCE — INFERRED, NOT DIRECTLY READ.** The template itself was never read: `rest_command` is YAML-only with no config entry, no API route, and no VM shell — confirmed independently by `tools/ha_export.py`, which captures automations, scripts, pipelines and exposure but no rest_commands. The inference: nine live scripts call `rest_command.resolver_command` with top-level `intent`/`params`, `response_variable` and `continue_on_error`, passing `params` mappings of **0 to 5 keys** (`news` `{}`; `ceiling_set_volume` `{mode, volume}`; `find_stations` 3 keys; `play_radio` 5 keys with `\| default('', true)` templating). A raw `{{ params }}` interpolation would emit Python dict repr with single quotes, which `/command` cannot parse — so nine working callers rule that out. Announce's `{mode, text}` is structurally identical to `ceiling_set_volume`'s proven `{mode, volume}`. Source: the `tools/ha_export.py` baseline under `docs/homebrain/ha/scripts/`. **The stop condition (raw interpolation) is ruled out.** Task 25's dedicated-command round trip (step 5) is the **final validation**, and until it passes this remains inferred. | not blocking; validated at Task 25 step 5 |
 | **D12** source discriminator field | **SETTLED 2026-09-07 (SPIKE-AN-3).** The discriminator is **`trigger.satellite_id`**. Observed, one probe sentence from three sources: phone `device_id=1542a2a3…` (SM-S948W-Costea) / `satellite_id=None`; satellite `device_id=b30ac5e3…` (reSpeaker Living Room) / `satellite_id=assist_satellite.respeaker_living_room_assist_satellite`; web Assist `device_id=None` / `satellite_id=None`. Stable over three phone repeats. `agent_id`, `user_id` and `details` carry nothing. Both candidate fields are present-and-null rather than absent on non-satellite sources, so `\| default(none)` is cheap defence, not load-bearing. **Chosen condition (recorded, NOT yet implemented):** `{{ trigger.satellite_id \| default(none) is none }}` — admits phone and web Assist, blocks satellite Assist, and avoids fragile Companion-device-id pinning, which would break on re-registration. | done — Task 26 carries it |
 | **D7** wildcard-slot normalisation | **UNRESOLVED BUT INFORMED 2026-09-07.** HA **preserves** capitalisation and punctuation in the received sentence: STT delivered `Run the source probe.` while typed input gave `run the source probe`. That **contradicts** the design's §5 step 3 claim that trigger text is lower-cased and stripped. **Do not assume `trigger.slots.message` and `trigger.sentence` normalise identically** — only `sentence` was observed, and a wildcard slot may differ. | still needs the **G4b** observation; design corrected at Task 27 step 8a |
-| **D13** current shared timeout + chosen shape | | Task 25 |
+| **D13** chosen shape | **DECIDED:** dedicated `resolver_command_announce`, `timeout: 200`. No existing caller's timeout moves. | Task 25 |
 | **D14** does HA report `on` for an unreachable device | | Task 14; a no-go returns to design |
 
 - [ ] **Step 2: Apply each reconciliation rule.** These are the only sanctioned plan edits at this
@@ -374,7 +373,7 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 | **D3 shows a very short TTL** | Confirm Task 15 resolves the chime **per announcement** (it does by design — never cached). No change; record the TTL. |
 | **Step-2 latency > 2 s** | Task 9 raises `announce_mic_confirm_timeout_ms` to the measured value + margin, and Task 20 re-checks the §6.5 budget arithmetic. |
 | **D12 no-go** | Task 26 ships without a source condition; Task 27 documents that announcements can also be triggered from the satellite. |
-| **D13 = shared shape chosen** | Task 25 raises the shared timeout and records the latency exposure for the five exposed scripts. |
+| **D13 disposition (accepted 2026-09-07)** | **D13b passes by inference, D13a is informational.** Neither blocks Checkpoint A or G2. The dedicated-command shape is decided, so Task 25 never touches the shared timeout and the five exposed scripts keep theirs. Task 25 step 5's round trip is the final validation of the D13b inference — **if it fails, stop and return to design rather than patching forward.** |
 
 - [ ] **Step 3: Update the design doc's status header** to note G1/G1b complete with the date, and
   which no-go fallbacks (if any) are now in force.
@@ -388,7 +387,9 @@ git add docs/homebrain/CHANGELOG.md docs/homebrain/BACKLOG.md \
 git commit -m "docs(homebrain): record AN-01 G1/G1b discovery results (D1-D6, D8, D12-D14)"
 ```
 
-- [ ] **Step 5: Confirm the gate.** State explicitly: *"Checkpoint A complete; D1–D6, D8, D12–D14
+- [ ] **Step 5: Confirm the gate.** D8 and D12 are settled; **D13b passes by inference and D13a is
+  informational**, so neither blocks. What remains is **D1–D6 and D14** from the attended AN-2/AN-1
+  session. State explicitly: *"Checkpoint A complete; D1–D6, D8, D12–D14
   recorded; reconciliations applied; G2 may begin."* Do not start Task 5 without that statement.
 
 ---
@@ -3919,12 +3920,12 @@ caller's timeout moves.
   `rest_command:` package file) to a timestamped file outside HA's config reload path, and record the
   path. This is G4a's rollback pointer.
 
-- [ ] **Step 3a: 🛑 Re-check D13b immediately before writing.** The primary read is
-  **G1b step 3c**, which gates Checkpoint A — so by the time this task runs D13b is already
-  classified **Go**. This step exists because the config is live and editable: re-read the `payload:`
-  template and confirm it still matches what Checkpoint A recorded. If it has changed, stop.
+- [ ] **Step 3a: Confirm D13b before writing — the inference gets checked here.** Checkpoint A
+  passed D13b **by inference from nine working callers, not by reading the template** (G1b step 3c).
+  The YAML is open in front of you for this task anyway, so read the `payload:` line now and classify
+  it. This is the cheapest moment to turn the inference into a fact.
 
-  The classification, repeated so this task is self-contained:
+  The classification:
 
   | Body template | Meaning | Action |
   |---|---|---|
@@ -4231,7 +4232,7 @@ Run against the design at `259c730`.
 | §13 gates G1–G5 | all phases | covered |
 | §13.1 rollback | Rollback section | covered |
 | §13.2 doc updates | 27 | covered |
-| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered. **D8 is settled** (G1b, 2026-09-07). **D13 split into D13a** (timeout) **and D13b** (body template) — D13b is a **stop gate at G1b step 3c** (blocking Checkpoint A, re-checked at Task 25 step 3a), because a raw `{{ params }}` interpolation yields Python dict repr, not JSON. **D12 is settled** (SPIKE-AN-3, 2026-09-07) and Task 26 carries the condition. **D7 is unresolved-but-informed** — HA preserves capitalisation/punctuation in `trigger.sentence`, contradicting the design's §5 step 3; the wildcard *slot* is still unobserved, so Task 26 step 4 records it and Task 27 step 8a corrects the design. **D9, D10, D11 remain observational** — recorded at G3/after-use, no task implements them |
+| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered. **D8 is settled** (G1b, 2026-09-07). **D13 split into D13a** (timeout — **informational**, since a dedicated command is used) **and D13b** (body template — **passes by production evidence, explicitly inferred rather than read**; nine live callers passing 0–5-key `params` mappings rule out raw interpolation, and Task 25 step 5's round trip is the final validation). **D12 is settled** (SPIKE-AN-3, 2026-09-07) and Task 26 carries the condition. **D7 is unresolved-but-informed** — HA preserves capitalisation/punctuation in `trigger.sentence`, contradicting the design's §5 step 3; the wildcard *slot* is still unobserved, so Task 26 step 4 records it and Task 27 step 8a corrects the design. **D9, D10, D11 remain observational** — recorded at G3/after-use, no task implements them |
 
 **One gap, deliberate:** D9 (chime→speech gap), D10 (how often a non-announcement supersedes) and
 D11 (is 0.80 right by ear) are observations with no code consequence. **D7 was in this group and has
