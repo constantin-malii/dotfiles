@@ -1,0 +1,46 @@
+{
+  "exposed_entities": {
+    "script.ceiling_next": {
+      "conversation": true
+    },
+    "script.ceiling_pause": {
+      "conversation": true
+    },
+    "script.ceiling_previous": {
+      "conversation": true
+    },
+    "script.ceiling_resume": {
+      "conversation": true
+    },
+    "script.ceiling_set_volume": {
+      "conversation": true
+    },
+    "script.ceiling_stop": {
+      "conversation": true
+    },
+    "script.ceiling_volume_down": {
+      "conversation": true
+    },
+    "script.ceiling_volume_up": {
+      "conversation": true
+    },
+    "script.find_stations": {
+      "conversation": true
+    },
+    "script.media_status": {
+      "conversation": true
+    },
+    "script.news": {
+      "conversation": true
+    },
+    "script.play_music": {
+      "conversation": true
+    },
+    "script.play_radio": {
+      "conversation": true
+    },
+    "weather.forecast_home": {
+      "conversation": true
+    }
+  }
+}

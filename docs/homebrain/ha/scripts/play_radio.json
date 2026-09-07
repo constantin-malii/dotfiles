@@ -1,0 +1,68 @@
+{
+  "alias": "Ceiling: Play Radio (resolver)",
+  "description": "Play a radio station on the ceiling speakers. PREFER the station field: if the user names a station in any form, pass their words verbatim as station and leave the other fields empty. Use country/language/genre ONLY for a category request with no station named ('play Romanian radio', 'play some jazz'). Favorites first, then RadioBrowser.",
+  "fields": {
+    "country": {
+      "description": "Country or nationality, e.g. Romania. Use ONLY when the user asked for a country's radio in general and named no station. Leave empty if station is set.",
+      "name": "Country",
+      "required": false,
+      "selector": {
+        "text": {}
+      }
+    },
+    "genre": {
+      "description": "Genre, e.g. jazz, news, country (optional).",
+      "name": "Genre",
+      "required": false,
+      "selector": {
+        "text": {}
+      }
+    },
+    "language": {
+      "description": "Language, e.g. Russian (optional).",
+      "name": "Language",
+      "required": false,
+      "selector": {
+        "text": {}
+      }
+    },
+    "station": {
+      "description": "Station name, VERBATIM as the user said it. These phrases are all station names, not countries or genres: mega hits, native roads, russian songs, russian radio, retro fm, smooth jazz, cafe del mar, classic fm, deep house, europa plus, hit fm, kiss fm, lux fm, nashe nine, nashe thirteen, radio romania, calm radio. Note 'russian songs' and 'russian radio' are two DIFFERENT stations -- never convert either into country=Russia.",
+      "name": "Station",
+      "required": false,
+      "selector": {
+        "text": {}
+      }
+    }
+  },
+  "icon": "mdi:radio",
+  "object_id": "play_radio",
+  "sequence": [
+    {
+      "action": "rest_command.resolver_command",
+      "continue_on_error": true,
+      "data": {
+        "intent": "radio",
+        "params": {
+          "country": "{{ country | default('', true) }}",
+          "genre": "{{ genre | default('', true) }}",
+          "language": "{{ language | default('', true) }}",
+          "mode": "play",
+          "station": "{{ station | default('', true) }}"
+        }
+      },
+      "response_variable": "r"
+    },
+    {
+      "variables": {
+        "resp": {
+          "chat_text": "{{ r.content.chat_text if (r is defined and r.content is defined and r.content.chat_text is defined) else 'Sorry, I could not reach the radio system.' }}"
+        }
+      }
+    },
+    {
+      "response_variable": "resp",
+      "stop": "done"
+    }
+  ]
+}

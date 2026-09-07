@@ -1,0 +1,28 @@
+{
+  "actions": [
+    {
+      "event": "mass_sync_request",
+      "event_data": {
+        "source": "lidarr"
+      }
+    }
+  ],
+  "alias": "Lidarr import -> MA sync",
+  "automation_id": "lidarr_ma_sync",
+  "conditions": [],
+  "description": "On Lidarr import webhook, fire mass_sync_request so the resolver refreshes the Music Assistant library.",
+  "id": "lidarr_ma_sync",
+  "max": 10,
+  "mode": "queued",
+  "triggers": [
+    {
+      "allowed_methods": [
+        "POST",
+        "PUT"
+      ],
+      "local_only": true,
+      "platform": "webhook",
+      "webhook_id": "lidarr_import"
+    }
+  ]
+}

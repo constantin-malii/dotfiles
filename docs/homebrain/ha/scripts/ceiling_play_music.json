@@ -1,0 +1,77 @@
+{
+  "alias": "Ceiling: Play Music",
+  "description": "Play music on the ceiling speakers from YouTube Music. Give a query (artist, album, playlist, song, or genre/mood) and optionally a media_type. Uses a play_media + media_play nudge so playback reliably starts.",
+  "fields": {
+    "media_type": {
+      "description": "One of track, artist, album, playlist. Omit (or 'genre') for a general search/mood.",
+      "name": "Media type",
+      "required": false,
+      "selector": {
+        "select": {
+          "custom_value": true,
+          "options": [
+            "track",
+            "artist",
+            "album",
+            "playlist",
+            "genre"
+          ]
+        }
+      }
+    },
+    "query": {
+      "description": "What to play: artist, album, playlist, song, or genre/mood (e.g. 'Pink Floyd', 'Focus-Costea', '90s rock', 'relaxing music').",
+      "name": "Query",
+      "required": true,
+      "selector": {
+        "text": {}
+      }
+    }
+  },
+  "icon": "mdi:music",
+  "mode": "single",
+  "object_id": "ceiling_play_music",
+  "sequence": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            "{{ (media_type | default('')) in ['track','artist','album','playlist','radio'] }}"
+          ],
+          "sequence": [
+            {
+              "action": "music_assistant.play_media",
+              "data": {
+                "media_id": "{{ query }}",
+                "media_type": "{{ media_type }}"
+              },
+              "target": {
+                "entity_id": "media_player.ceiling_speakers"
+              }
+            }
+          ]
+        }
+      ],
+      "default": [
+        {
+          "action": "music_assistant.play_media",
+          "data": {
+            "media_id": "{{ query }}"
+          },
+          "target": {
+            "entity_id": "media_player.ceiling_speakers"
+          }
+        }
+      ]
+    },
+    {
+      "delay": "00:00:03"
+    },
+    {
+      "action": "media_player.media_play",
+      "target": {
+        "entity_id": "media_player.ceiling_speakers"
+      }
+    }
+  ]
+}

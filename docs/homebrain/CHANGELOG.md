@@ -3,6 +3,56 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — INF-09 BASELINE established: the Home Assistant app-layer surface is now under version control
+
+> **The Home Assistant half of HomeBrain is no longer untracked.** 37 canonical JSON files,
+> **41,604 bytes**, committed under `docs/homebrain/ha/`. Every one is byte-identical to the reviewed
+> `staging-managed-expanded` tree, which was produced by a `--strict-inventory` export that exited 0.
+> **Raw snapshots were not copied and never will be**; the staging trees stay on the host.
+
+- **What is now diffable:** 16 scripts (including the `fields` descriptions that *are* the LLM tool
+  schema), 7 automations with their sentence triggers, 5 Assist pipelines plus `_preferred`, 6
+  satellite `select` settings, the conversation exposure set, and `meta.json` recording HA
+  **2026.6.4**. A live change to any of these now produces a reviewable diff instead of vanishing.
+- **`--strict-inventory` exited 0**, which is positive evidence rather than an absence of complaints:
+  strict mode fails on any undeclared member of the four discoverable inventories, so a clean run
+  confirms all 34 collection entries are declared.
+- **Reviewed before committing, not after.** All 37 files read — verbatim for the five largest and
+  the structural ones, per-file signature pass over the rest. All parse, **CR=0 everywhere**, trailing
+  LF everywhere, byte-identical to staging, and the exporter's own secret scanner returned **0
+  findings** across all 38 files.
+- **`1784146586` and `1784200731` are `S1a - Satellite Ceiling Duck/Restore` and `S1b-2 - Satellite
+  Reply on Ceiling`.** Opaque numeric ids that HA assigns to UI-created automations; the baseline
+  makes them legible. Their descriptions — and `satellite_timer_announce`'s, which records the 180 ms
+  wake-sound race and why its idle condition is load-bearing — are now version-controlled rather than
+  living only in this changelog.
+
+### Four findings the baseline surfaced immediately — recorded, deliberately NOT fixed
+
+1. **`play_radio` branch vs resolver default disagree.** The `play_radio` *branch* of
+   `automation.voice_ceiling_speakers` hardcodes `media_id: "Radio Paradise"` straight to
+   `music_assistant.play_media`, bypassing the resolver — while `radio.json` sets
+   `default_station: "101 SMOOTH JAZZ"`. So *"play the radio"* and the resolver's own default point at
+   different stations.
+2. **Two dead `tts.speak` paths.** `script.ceiling_announce` (its only step) and
+   `script.ceiling_play_radio` (step 2) both call `tts.speak`, which is recorded as *proven broken*
+   on this player (MA `play_announcement` needs correct state/elapsed reporting; Universal→Squeezelite
+   does not provide it). Neither script is exposed to the assistant, so nothing calls them — but they
+   are dead on arrival and the baseline now shows it.
+3. **Exposure surface is 14 entities** — 13 scripts plus `weather.forecast_home`, and **no
+   `media_player.*` entity is exposed.** That is exactly the assertion `assistant-capabilities.md`
+   §NL-02 step 5 asks an operator to verify by hand; it is now recorded as data. The three unexposed
+   scripts are `ceiling_announce`, `ceiling_play_music`, `ceiling_play_radio`, consistent with the
+   resolver routes having superseded them.
+4. **Pipeline `tts_voice` is captured for the first time:** `en_US-amy-low` on all three Living Room
+   pipelines, `null` on `Home Assistant` and `ChatGPT`. This is the missing datum for the open
+   "unify the assistant voice" item — the resolver's `say_text` passes an *engine* only and therefore
+   gets Piper's default, which this shows is not necessarily `amy-low`.
+
+> **Not a problem, recorded so nobody "fixes" it:** the `voice_ceiling_speakers` alias renders as
+> `Voice ? Ceiling Speakers` in a cp1252 console. The file is correct — it contains the UTF-8 em dash
+> (`e2 80 94`), no replacement characters, and decodes as strict UTF-8.
+
 ## 2026-09-07 — INF-09 strict expanded STAGING export: exit 0, 37 files, 41 KB (not yet the baseline)
 
 > Second staging export, at the full operational boundary and with **`--strict-inventory`**. Written

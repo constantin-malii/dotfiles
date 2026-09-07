@@ -1,0 +1,13 @@
+{
+  "entity_id": "select.respeaker_living_room_assistant_2",
+  "friendly_name": "reSpeaker Living Room Assistant 2",
+  "options": [
+    "ChatGPT",
+    "Home Assistant",
+    "Living Room ChatGPT",
+    "Living Room Knowledge",
+    "Living Room Voice",
+    "preferred"
+  ],
+  "state": "Living Room Knowledge"
+}

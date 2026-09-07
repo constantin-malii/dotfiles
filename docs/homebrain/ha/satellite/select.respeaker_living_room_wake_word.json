@@ -1,0 +1,12 @@
+{
+  "entity_id": "select.respeaker_living_room_wake_word",
+  "friendly_name": "reSpeaker Living Room Wake word",
+  "options": [
+    "Hey Jarvis",
+    "Hey Mycroft",
+    "Kenobi",
+    "Okay Nabu",
+    "no_wake_word"
+  ],
+  "state": "Okay Nabu"
+}

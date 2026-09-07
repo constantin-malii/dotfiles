@@ -1,0 +1,35 @@
+{
+  "actions": [
+    {
+      "delay": "00:02:00"
+    },
+    {
+      "action": "homeassistant.reload_config_entry",
+      "data": {
+        "entry_id": "01KVPNW1JFHJG30NANAPVARHY8"
+      }
+    }
+  ],
+  "alias": "MA: auto-reload integration after restart",
+  "automation_id": "ma_auto_reload",
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{{ this.attributes.last_triggered is none or (now() - this.attributes.last_triggered).total_seconds() > 600 }}"
+    }
+  ],
+  "description": "Reloads the Music Assistant config entry on HA start and ~120s after MA comes back from a restart, to work around the integration not auto-reconnecting. 10-min cooldown prevents reload-flap loops.",
+  "id": "ma_auto_reload",
+  "mode": "single",
+  "triggers": [
+    {
+      "event": "start",
+      "platform": "homeassistant"
+    },
+    {
+      "entity_id": "media_player.ceiling_speakers",
+      "from": "unavailable",
+      "platform": "state"
+    }
+  ]
+}

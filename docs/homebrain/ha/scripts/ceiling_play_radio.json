@@ -1,0 +1,38 @@
+{
+  "alias": "Ceiling: Play Radio",
+  "description": "Play an internet radio station on the ceiling speakers, with a spoken confirmation.",
+  "fields": {
+    "station": {
+      "description": "Radio station name (e.g. Radio Paradise). Optional.",
+      "name": "Station",
+      "required": false,
+      "selector": {
+        "text": {}
+      }
+    }
+  },
+  "icon": "mdi:radio",
+  "object_id": "ceiling_play_radio",
+  "sequence": [
+    {
+      "action": "music_assistant.play_media",
+      "data": {
+        "media_id": "{{ station | default('Radio Paradise', true) }}",
+        "media_type": "radio"
+      },
+      "target": {
+        "entity_id": "media_player.ceiling_speakers"
+      }
+    },
+    {
+      "action": "tts.speak",
+      "data": {
+        "media_player_entity_id": "media_player.ceiling_speakers",
+        "message": "Playing {{ station | default('Radio Paradise', true) }}."
+      },
+      "target": {
+        "entity_id": "tts.piper"
+      }
+    }
+  ]
+}

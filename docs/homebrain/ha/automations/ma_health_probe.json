@@ -1,0 +1,53 @@
+{
+  "actions": [
+    {
+      "action": "music_assistant.search",
+      "continue_on_error": true,
+      "data": {
+        "config_entry_id": "01KVPNW1JFHJG30NANAPVARHY8",
+        "limit": 1,
+        "media_type": [
+          "artist"
+        ],
+        "name": "ping"
+      },
+      "response_variable": "probe"
+    },
+    {
+      "if": [
+        {
+          "condition": "template",
+          "value_template": "{{ probe is undefined or probe is none or 'artists' not in probe }}"
+        }
+      ],
+      "then": [
+        {
+          "action": "system_log.write",
+          "data": {
+            "level": "warning",
+            "logger": "ma_health_probe",
+            "message": "HA<->MA health probe FAILED (no valid search response) -> reloading Music Assistant config entry"
+          }
+        },
+        {
+          "action": "homeassistant.reload_config_entry",
+          "data": {
+            "entry_id": "01KVPNW1JFHJG30NANAPVARHY8"
+          }
+        }
+      ]
+    }
+  ],
+  "alias": "MA: health probe auto-reload",
+  "automation_id": "ma_health_probe",
+  "description": "Every 3 min, actively probes the HA<->MA connection with a tiny search. If it errors/times out/returns no valid response, reloads the Music Assistant config entry (catches SILENT drops that A1 cannot). 3-min interval + mode single = debounce.",
+  "id": "ma_health_probe",
+  "max_exceeded": "silent",
+  "mode": "single",
+  "triggers": [
+    {
+      "minutes": "/3",
+      "platform": "time_pattern"
+    }
+  ]
+}
