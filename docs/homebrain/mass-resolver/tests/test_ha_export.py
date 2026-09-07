@@ -1003,6 +1003,24 @@ class PipelineWrapperTest(ExportCase):
             self.run_export(FakeClient(pipelines=[{"id": "x"}]))
         self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
 
+    def test_write_tree_path_escape_is_an_internal_error_not_a_usage_error(self):
+        # Reachable only if validate_identifier has been bypassed or broken, so it is an internal
+        # invariant violation. It must NOT surface as EXIT_USAGE: that would send an operator to
+        # check their command line for a bug in the exporter. A plain exception routes it down
+        # main()'s unexpected-error path instead.
+        for rel in ("../escape.json", "../../escape.json", "nested/../../escape.json"):
+            with self.assertRaises(Exception) as caught:
+                ha_export.write_tree(self.out, {rel: b"{}\n"})
+            self.assertNotIsInstance(caught.exception, ha_export.ExportError,
+                                     "%r reported as an ExportError" % rel)
+            self.assertIn("INTERNAL", str(caught.exception))
+        self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.out), "escape.json")))
+
+    def test_write_tree_accepts_ordinary_nested_paths(self):
+        # Guard rail: the containment check must not reject legitimate subdirectories.
+        ha_export.write_tree(self.out, {"a/b/c.json": b"{}\n"})
+        self.assertTrue(os.path.isfile(os.path.join(self.out, "a", "b", "c.json")))
+
     def test_non_object_pipeline_entry_fails_closed(self):
         pipelines = json.loads(json.dumps(PIPELINES))
         pipelines["pipelines"] = ["not-an-object"]

@@ -3,6 +3,52 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — INF-09 exporter hardened after a post-baseline code review (offline; NOT yet deployed)
+
+> Security and fail-closed hardening found by reviewing the committed exporter, plus the review
+> fixes applied on top. **Offline only — Home Assistant was not contacted and nothing was
+> deployed.** The repo and host exporters now disagree, so a redeploy and a fresh `--probe-only`
+> must precede the planned idempotent re-export.
+
+**Hardening (`a764ee8`)**
+
+- **Manifest entries are validated as safe identifiers.** They become *filenames* —
+  `scripts/<object_id>.json`, `satellite/<entity_id>.json`, `pipelines/<id>.json` — so a manifest
+  entry of `../outside` would have written outside the output tree. `.`/`..`/`/`/`\`/NUL/control
+  characters are now rejected with exit 1. This is the same lesson `url2pdf` already carries, where
+  state names are restricted *"precisely because the name becomes a filename, and a `..` in it would
+  write credentials outside that gitignore."*
+- **`_note` is validated at runtime**, not merely pinned by a repo test. The type hole the earlier
+  review identified is now closed by the tool refusing, rather than by the test suite knowing.
+- **`write_tree` contains every output path** under its root — defence in depth behind the
+  identifier check.
+- **Malformed payloads fail closed:** a non-object script `fields`, or a non-object pipeline row,
+  now exits **4** naming the resource instead of raising `AttributeError` into the generic
+  unexpected-error path.
+
+**Review fixes applied on top**
+
+- **Removed a duplicated pipeline-row check.** The same validation had been added in both
+  `collect()` and `build_canonical()`, with two different messages for one condition — the pattern
+  this workstream deliberately moved away from when exposure unwrapping was consolidated to a single
+  boundary. Row shape is now validated **once, at ingestion**, and the canonical builder trusts it.
+- **A path-containment failure is no longer `EXIT_USAGE`.** Every filename component has already
+  passed `validate_identifier` by the time anything is written, so an escape there is a broken
+  internal invariant, not something the operator typed. Reporting it as a usage error would send
+  someone to check their command line for a bug in the exporter. It now raises a plain exception
+  down `main()`'s unexpected-error path, with a regression test asserting it is **not** an
+  `ExportError`, plus a guard-rail test that ordinary nested paths still work.
+- **Documented a deliberate choice that was previously unstated:** pipeline row validation covers
+  **every** row, including pipelines the manifest does not manage. A malformed row we would not
+  export still means the endpoint returned a shape we do not understand, and a snapshot taken
+  against a half-understood response is not one to trust — so the whole export fails rather than
+  quietly skipping the row.
+
+**Verification:** exporter suite **114 tests**, full suite **490**, true exit status captured. The
+committed 37-file baseline is untouched by any of this. `ONBOARDING.md` now points at the runbook,
+the exporter, the manifest and the `ha/` baseline from both §5 and §14 — the runbook had been
+undiscoverable from the doc operators are told to read first.
+
 ## 2026-09-07 — INF-09 BASELINE established: the Home Assistant app-layer surface is now under version control
 
 > **The Home Assistant half of HomeBrain is no longer untracked.** 37 canonical JSON files,

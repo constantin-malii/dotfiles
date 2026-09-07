@@ -395,8 +395,13 @@ def write_tree(root, files, dir_mode=None, file_mode=None):
     root_prefix = root_abs if root_abs.endswith(os.sep) else root_abs + os.sep
     for rel in sorted(files.keys()):
         target = os.path.abspath(os.path.join(root_abs, rel.replace("/", os.sep)))
-        if target != root_abs and not os.path.normcase(target).startswith(os.path.normcase(root_prefix)):
-            raise ExportError(EXIT_USAGE, "output path escapes root: %r" % rel)
+        if not os.path.normcase(target).startswith(os.path.normcase(root_prefix)):
+            # NOT an ExportError/EXIT_USAGE. By the time we are writing, every filename component
+            # has already been through validate_identifier, so an escape here is a broken internal
+            # invariant, not something the operator typed. Reporting it as a usage error would
+            # send someone to check their command line for a bug in this file. Raising a plain
+            # exception routes it down main()'s unexpected-error path instead.
+            raise RuntimeError("INTERNAL: output path escapes root: %r" % rel)
         parent = os.path.dirname(target)
         if parent and not os.path.isdir(parent):
             os.makedirs(parent)
@@ -619,6 +624,13 @@ def collect(client, manifest):
 
     raw["pipelines"] = _ws_result(client, "assist_pipeline/pipeline/list")
     check_envelope("assist_pipeline/pipeline/list", raw["pipelines"], PIPELINE_LIST_ENVELOPE)
+    # Row shape is validated HERE, once, at ingestion -- build_canonical trusts it rather than
+    # re-checking, so there is a single place to keep correct.
+    #
+    # Deliberate: EVERY row is checked, including pipelines the manifest does not manage. A
+    # malformed row we do not export still means the endpoint returned a shape we do not
+    # understand, and a snapshot taken against a half-understood response is not one to trust.
+    # Fail the whole export rather than quietly skip the row.
     pipeline_rows = (raw["pipelines"] or {}).get("pipelines") or []
     for index, pipeline in enumerate(pipeline_rows):
         if not isinstance(pipeline, dict):
@@ -681,11 +693,10 @@ def build_canonical(raw, manifest):
     # Always filter against the DECLARED set. An empty list means "export no pipelines"; it
     # must never fall through to exporting every pipeline HA happens to have.
     wanted = set(manifest.get("pipelines") or [])
-    for index, pipeline in enumerate(pipelines.get("pipelines") or []):
-        if not isinstance(pipeline, dict):
-            raise ExportError(EXIT_SCHEMA,
-                              "pipeline[%d]: expected an object, got %s"
-                              % (index, type(pipeline).__name__))
+    for pipeline in (pipelines.get("pipelines") or []):
+        # Row shape was validated at ingestion in collect(); not re-checked here. One boundary,
+        # one place to keep correct -- the same reasoning that put exposure unwrapping in a
+        # single function rather than two.
         if pipeline.get("id") not in wanted:
             continue
         files["pipelines/%s.json" % pipeline.get("id")] = render(normalize_pipeline(pipeline))
