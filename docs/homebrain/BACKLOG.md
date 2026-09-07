@@ -303,7 +303,7 @@ Serialize edits to these conflict-and-truth magnets — at most one track edits 
 
 | Gate | Holder | Status |
 |---|---|---|
-| **host-live / HA-live / exposure** | *(none)* | **FREE** — released 2026-09-07. **AN-2 COMPLETE, all four go criteria passed.** D1 `switch.respeaker_living_room_microphone_mute`; **D2 PASS** (zero pipeline runs on either slot while muted, positive control once unmuted, LED ring turns red while muted); **D6** no audible feedback observed — **re-confirmed on a second run after the operator verified the connected speakers**, since run 1 was recorded before that verification; **D14 PASS** (HA marked the device unavailable 45s after a power unplug and never faked `on`, so the design 9.3 read-back is meaningful). Mic-mute confirm latency **255ms**, so the shipped 2000ms budget stands. Satellite powered, mute `off`, no config changed. **AN-1 NOT run** — D3/D4/D5 open; needs a quiet house because its go criterion is hearing the chime. Checkpoint A blocks only on those three. Prior: claimed for the D6 re-test.
+| **host-live / HA-live / exposure** | **`AN-01` SPIKE-AN-1** (branch `homebrain/an-01-implementation-plan`) | **CLAIMED 2026-09-07** — attended chime spike (D3/D4/D5): resolves `media-source://media_source/local/./timer_chime.wav` to a signed URL and plays it **once** on `media_player.ceiling_speakers`. The operator’s current source is captured first and replayed afterwards; **no volume is written**. **If interrupted:** the ceiling may hold a spent chime — replay the station, or say “resume”. Prior: FREE after AN-2 completed.
 
 **To claim the gate:** record the track ID + branch here in the claiming PR; release it on merge or
 abandonment. The first recommended tracks (§7) are all read-only/design/decision and **do not claim
