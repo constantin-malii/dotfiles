@@ -207,6 +207,19 @@ docs/homebrain/runbooks/ha-managed-state-export.md
 assistants under change control. Resources present in HA but absent from the manifest are
 **unmanaged**: reported in the summary, never exported.
 
+**Its scope is the complete HomeBrain operational boundary**, not "the resources someone touched
+recently" — the first seeded manifest used the latter and that was its weakness: it encoded the
+author's recent attention rather than what would hurt if it changed unnoticed. Validated live on
+2026-09-06 (HA 2026.6.4): **16 scripts, 7 automations, 5 pipelines, 6 satellite selects**, plus the
+two singleton declarations. All five pipelines are included — the two assigned to the satellite, the
+preferred instance default (behaviourally relevant to any entry point that pins nothing), the
+ChatGPT pipeline, and the superseded `Living Room Voice` (retained so a change to it stays visible).
+**One deliberate exception:** `lidarr_ma_sync` is not runtime behaviour but an operational /
+content-pipeline dependency — it maintains the library the runtime consumes and could not be
+reconstructed from resolver code — and the manifest's `_note` records that reasoning rather than
+leaving a future reader to guess why it is there. The committed manifest is schema-validated offline
+by the test suite, so a typo fails a test rather than becoming an exit 5 on the host.
+
 **How far "unmanaged" reaches — the honest boundary, not a naming heuristic.** Two different
 guarantees apply, and conflating them would overstate what the tool knows:
 

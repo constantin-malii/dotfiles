@@ -92,9 +92,17 @@ ssh costea@192.168.1.68 '
 Record both digests and the date in `CHANGELOG.md`: until the manifest-based deploy subsumes this,
 that entry is the only recorded identity the deployed artefacts have.
 
-**The manifest is the deployed contract, not a scratch file.** It is seeded from resources observed
-on 2026-09-06 and has never been confirmed against a live instance. Re-copy it whenever it changes in
-the repo — a stale host copy silently exports a different surface from the one under review.
+**The manifest is the deployed contract, not a scratch file.** Re-copy it whenever it changes in the
+repo — a stale host copy silently exports a different surface from the one under review.
+
+**Its scope is the complete HomeBrain operational boundary**, validated against the live instance on
+2026-09-06 (HA 2026.6.4): **16 scripts, 7 automations, 5 pipelines, 6 satellite selects**, plus the
+two singleton declarations. Not "the resources someone edited recently" — a partial manifest is worse
+than an obvious gap, because a clean diff over some resources reads as *"Home Assistant has not
+changed"*. One entry is a deliberate exception: **`lidarr_ma_sync` is not runtime behaviour**, it is
+an operational / content-pipeline dependency that maintains the music library the runtime consumes,
+and the manifest's own `_note` records that reasoning. `ha/MANIFEST.json` is schema-validated offline
+by `tests/test_ha_export.py`, so a typo in it fails the suite rather than surfacing as an exit 5 here.
 
 ## 4. Run a probe (read-only, writes nothing)
 

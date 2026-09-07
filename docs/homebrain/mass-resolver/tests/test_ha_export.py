@@ -998,6 +998,70 @@ class RawDirHardeningTest(ExportCase):
         self.assertEqual(os.stat(self.raw).st_mode & 0o777, 0o700)
 
 
+class RealRepositoryManifestTest(unittest.TestCase):
+    """Validates the ACTUAL committed manifest, not a fixture.
+
+    Every other test here drives a hand-built MANIFEST dict, so a typo in the production manifest
+    -- a misspelled script, a duplicate, a dropped singleton -- would sail through the whole suite
+    and only surface as an exit 5 on the host. This closes that gap offline."""
+
+    MANIFEST_PATH = os.path.join(os.path.dirname(_RESOLVER), "ha", "MANIFEST.json")
+
+    def setUp(self):
+        self.assertTrue(os.path.isfile(self.MANIFEST_PATH),
+                        "committed manifest missing at %s" % self.MANIFEST_PATH)
+        with open(self.MANIFEST_PATH, "rb") as handle:
+            self.raw = handle.read()
+        self.manifest = json.loads(self.raw.decode("utf-8"))
+
+    def test_it_passes_the_exporter_schema_validator(self):
+        # The same function the exporter runs first, so a bad manifest fails here not on the host.
+        ha_export.validate_manifest(self.manifest)
+
+    def test_declared_counts_match_the_live_inventory_recorded_2026_09_06(self):
+        expected = {"scripts": 16, "automations": 7, "pipelines": 5, "satellite_entities": 6}
+        for key, count in sorted(expected.items()):
+            values = self.manifest[key]
+            self.assertEqual(len(values), count, "%s: expected %d, got %d" % (key, count, len(values)))
+            self.assertEqual(len(set(values)), count, "%s contains duplicates" % key)
+
+    def test_singleton_declarations_are_unchanged(self):
+        self.assertIs(self.manifest["include_preferred_pipeline"], True)
+        self.assertEqual(self.manifest["exposure_assistants"], ["conversation"])
+
+    def test_version_pin_is_a_nonempty_string(self):
+        # Deliberately not pinned to an exact version here: the exporter warns on drift, and this
+        # test should not need editing every HA upgrade.
+        pin = self.manifest.get("ha_version_expected")
+        self.assertTrue(isinstance(pin, str) and pin.strip(), "version pin missing or blank")
+
+    def test_the_documented_content_pipeline_exception_is_present(self):
+        # lidarr_ma_sync is tracked deliberately as an operational/content-pipeline dependency
+        # rather than runtime behaviour, and the note must say so.
+        self.assertIn("lidarr_ma_sync", self.manifest["automations"])
+        note = " ".join(self.manifest["_note"]) if isinstance(self.manifest["_note"], list) \
+            else str(self.manifest["_note"])
+        self.assertIn("lidarr_ma_sync", note)
+        self.assertIn("content-pipeline", note)
+
+    def test_every_pipeline_id_is_ulid_shaped(self):
+        # A malformed id would be reported as a missing resource on the host instead of here.
+        for pid in self.manifest["pipelines"]:
+            self.assertTrue(ha_export.ULID_RE.match(pid), "not ULID-shaped: %r" % pid)
+
+    def test_satellite_entries_are_select_entity_ids(self):
+        for eid in self.manifest["satellite_entities"]:
+            self.assertTrue(eid.startswith("select."), "not a select entity: %r" % eid)
+
+    def test_manifest_is_lf_only_with_a_trailing_newline(self):
+        # It is deployed to the host and digest-compared with tr -d CR; CRLF here would defeat that.
+        self.assertNotIn(b"\r", self.raw)
+        self.assertTrue(self.raw.endswith(b"\n"))
+
+    def test_no_secret_shaped_values_in_the_manifest(self):
+        self.assertEqual(ha_export.scan_secrets(self.manifest), [])
+
+
 class ExitCodeTest(unittest.TestCase):
     def test_codes_are_distinct(self):
         codes = [ha_export.EXIT_OK, ha_export.EXIT_USAGE, ha_export.EXIT_TRANSPORT,
