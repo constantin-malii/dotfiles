@@ -344,19 +344,19 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 
 | Discovery | Recorded value | Consumed by |
 |---|---|---|
-| **D1** exact mic-mute entity ID | | Task 9 (`announce_mic_mute_entity` default), Task 14 |
-| **D2** does muting suppress wake detection | | Task 14; a no-go returns to design |
+| **D1** exact mic-mute entity ID | **SETTLED 2026-09-07 (AN-2).** `switch.respeaker_living_room_microphone_mute` — available, `off` at baseline. Goes into `config.json`'s `announce_mic_mute_entity`; the `config.py` default stays `""`. | done — Task 9 |
+| **D2** does muting suppress wake detection | **PASSES 2026-09-07 (AN-2).** With the mic muted 19:12:36→19:1x the operator said the wake word twice plus a full sentence: **zero** new pipeline runs on slot 1 (`01kxygpr39jas5hgsf28cph108`) **or** slot 2. **Positive control:** once unmuted, the operator's *"what time is it"* produced a run at 19:19:43 with `STT='What time is it?'`, so the zero is real suppression and not a broken capture path. Corroborated by the device's own LED ring turning **red** while muted — the firmware knows, so the wake engine is gated at the device rather than the audio merely dropped downstream. | done |
 | **D3** `resolve_media` URL shape + signature TTL | | Task 8 |
 | **D4** does MA fetch a signed URL | | Task 2 go/no-go → Task 12's chime clip |
 | **D5** echoed `media_content_id` (query preserved?) | | Task 12 (`match_key`) |
-| **D6** mute feedback sound audible | | Task 27 (documentation only) |
+| **D6** mute feedback sound audible | **NO AUDIBLE FEEDBACK OBSERVED 2026-09-07 (AN-2).** Measured, not assumed: the operator **connected speakers to the reSpeaker's audio output** first, output left at 50%, `switch.…_mute_unmute_sound` left `on`, and listened across a mute at `16:07:30` and an unmute at `16:07:38`. Nothing heard at either transition. Minor confound recorded: the ceiling was playing at `volume_level=0.1` during the window. **Consequence: none** — no need to turn `mute_unmute_sound` off, so an announcement will not start with a satellite chirp on top of the ceiling chime. | done — Task 27 note only |
 | **D8** `params` payload shape | **SETTLED 2026-09-07:** `intent`/`params` are top-level `data:` keys, `params` structured, **no `payload:` wrapper**. Task 26 corrected. | done |
 | **D13a** the live `rest_command` `timeout` | **INFORMATIONAL / UNRESOLVED — does not block.** AN-01 ships a **dedicated** `rest_command.resolver_command_announce` with `timeout: 200`, so the existing command's timeout is never inherited and never changed. Its value would only matter if the shared shape were chosen, which it is not. Record it if convenient; do not wait for it. | not blocking |
 | **D13b** the live `payload:` **body template** | **PASSES BY PRODUCTION EVIDENCE — INFERRED, NOT DIRECTLY READ.** The template itself was never read: `rest_command` is YAML-only with no config entry, no API route, and no VM shell — confirmed independently by `tools/ha_export.py`, which captures automations, scripts, pipelines and exposure but no rest_commands. The inference: nine live scripts call `rest_command.resolver_command` with top-level `intent`/`params`, `response_variable` and `continue_on_error`, passing `params` mappings of **0 to 5 keys** (`news` `{}`; `ceiling_set_volume` `{mode, volume}`; `find_stations` 3 keys; `play_radio` 5 keys with `\| default('', true)` templating). A raw `{{ params }}` interpolation would emit Python dict repr with single quotes, which `/command` cannot parse — so nine working callers rule that out. Announce's `{mode, text}` is structurally identical to `ceiling_set_volume`'s proven `{mode, volume}`. Source: the `tools/ha_export.py` baseline under `docs/homebrain/ha/scripts/`. **The stop condition (raw interpolation) is ruled out.** Task 25's dedicated-command round trip (step 5) is the **final validation**, and until it passes this remains inferred. | not blocking; validated at Task 25 step 5 |
 | **D12** source discriminator field | **SETTLED 2026-09-07 (SPIKE-AN-3).** The discriminator is **`trigger.satellite_id`**. Observed, one probe sentence from three sources: phone `device_id=1542a2a3…` (SM-S948W-Costea) / `satellite_id=None`; satellite `device_id=b30ac5e3…` (reSpeaker Living Room) / `satellite_id=assist_satellite.respeaker_living_room_assist_satellite`; web Assist `device_id=None` / `satellite_id=None`. Stable over three phone repeats. `agent_id`, `user_id` and `details` carry nothing. Both candidate fields are present-and-null rather than absent on non-satellite sources, so `\| default(none)` is cheap defence, not load-bearing. **Chosen condition (recorded, NOT yet implemented):** `{{ trigger.satellite_id \| default(none) is none }}` — admits phone and web Assist, blocks satellite Assist, and avoids fragile Companion-device-id pinning, which would break on re-registration. | done — Task 26 carries it |
 | **D7** wildcard-slot normalisation | **UNRESOLVED BUT INFORMED 2026-09-07.** HA **preserves** capitalisation and punctuation in the received sentence: STT delivered `Run the source probe.` while typed input gave `run the source probe`. That **contradicts** the design's §5 step 3 claim that trigger text is lower-cased and stripped. **Do not assume `trigger.slots.message` and `trigger.sentence` normalise identically** — only `sentence` was observed, and a wildcard slot may differ. | still needs the **G4b** observation; design corrected at Task 27 step 8a |
 | **D13** chosen shape | **DECIDED:** dedicated `resolver_command_announce`, `timeout: 200`. No existing caller's timeout moves. | Task 25 |
-| **D14** does HA report `on` for an unreachable device | | Task 14; a no-go returns to design |
+| **D14** does HA report `on` for an unreachable device | **PASSES 2026-09-07 (AN-2).** Per the operator's agreed method: reversible per-device isolation (USB power unplug), no host or router change. HA marked the whole device `unavailable` after **45 s** (two consecutive reads). `switch.turn_on` against the dead device returned **HTTP 200, body `[]`** — and the entity stayed **`unavailable` on all 10 polls over 18 s**, never `on`; the `assist_satellite` and firmware sensor were `unavailable` throughout too. Recovery on replug was immediate, mute left `off`. **So HA does not optimistically fake the state, and §9.3's read-back is meaningful proof of muting.** Note the trap this closes: the same 200-in-1 ms response comes back from a *healthy* device *before* the state changes, so the service response carries no information — only the state read does. | done |
 
 - [ ] **Step 2: Apply each reconciliation rule.** These are the only sanctioned plan edits at this
   checkpoint:
@@ -371,9 +371,26 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 | **D14 no-go** (HA reports `on` optimistically) | **Return to design.** §9.3's read-back is not proof of muting. |
 | **D3 shows an absolute URL** | Task 8's absolutisation becomes a no-op guard rather than a rewrite; keep the guard and the test. |
 | **D3 shows a very short TTL** | Confirm Task 15 resolves the chime **per announcement** (it does by design — never cached). No change; record the TTL. |
-| **Step-2 latency > 2 s** | Task 9 raises `announce_mic_confirm_timeout_ms` to the measured value + margin, and Task 20 re-checks the §6.5 budget arithmetic. |
+| ~~**Step-2 latency > 2 s**~~ | **NOT TRIGGERED.** Measured 2026-09-07: the switch reports `on` after **255 ms**, and `off` after 255 ms on the way back. The shipped `announce_mic_confirm_timeout_ms: 2000` fits with ~8× headroom, so Task 9 needs no change and §6.5's arithmetic stands. |
 | **D12 no-go** | Task 26 ships without a source condition; Task 27 documents that announcements can also be triggered from the satellite. |
 | **D13 disposition (accepted 2026-09-07)** | **D13b passes by inference, D13a is informational.** Neither blocks Checkpoint A or G2. The dedicated-command shape is decided, so Task 25 never touches the shared timeout and the five exposed scripts keep theirs. Task 25 step 5's round trip is the final validation of the D13b inference — **if it fails, stop and return to design rather than patching forward.** |
+
+> **AN-2 incidental findings (2026-09-07), recorded because they change operational docs rather
+> than code:**
+>
+> 1. **The LED ring turns red while the mic is muted.** Undocumented — `s0-satellite-inventory.md`
+>    lists `light.…_led_ring` and its brightness but not that it signals mute state. This matters for
+>    §9.5's residual risk: if a crashed announcement strands the mic muted after the in-memory
+>    dead-man dies with the process, a red ring makes that **visible across the room** instead of
+>    discoverable only by talking to a deaf satellite. Task 27's runbook line should say so.
+> 2. **HA marks the satellite `unavailable` ~45 s after it loses power.** Bounds how long a stale
+>    reading could persist if the device dies mid-announcement.
+> 3. **Nine slot-1 runs with empty STT in the ~40 minutes after the replug** (19:20 → 20:00). The
+>    known `stt-no-text-recognized` / false-wake pattern (`ONBOARDING.md` §6, `CHANGELOG.md`
+>    2026-09-06), but brisker than the "8 of 20" that entry describes. **Not diagnosed** — only the
+>    STT text was pulled, not the error codes, so whether these are VAD cut-offs, ambient false
+>    wakes, or something the power cycle provoked is open. No bearing on D2, which was measured with
+>    the mic muted. Worth a look before any further wake-word tuning.
 
 - [ ] **Step 3: Update the design doc's status header** to note G1/G1b complete with the date, and
   which no-go fallbacks (if any) are now in force.
@@ -388,7 +405,7 @@ git commit -m "docs(homebrain): record AN-01 G1/G1b discovery results (D1-D6, D8
 ```
 
 - [ ] **Step 5: Confirm the gate.** D8 and D12 are settled; **D13b passes by inference and D13a is
-  informational**, so neither blocks. What remains is **D1–D6 and D14** from the attended AN-2/AN-1
+  informational**, so neither blocks. **AN-2 is complete: D1, D2, D6 and D14 are all recorded.** What remains is **D3, D4 and D5** from the AN-1 chime spike — the one that needs a quiet house, because its go criterion is the operator *hearing* the chime. Formally, the confirmation line is still *"Checkpoint A complete; D1–D6, D8, D12–D14
   session. State explicitly: *"Checkpoint A complete; D1–D6, D8, D12–D14
   recorded; reconciliations applied; G2 may begin."* Do not start Task 5 without that statement.
 
