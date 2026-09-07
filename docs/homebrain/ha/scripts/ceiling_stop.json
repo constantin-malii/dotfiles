@@ -1,0 +1,14 @@
+{
+  "alias": "Ceiling: Stop Music",
+  "description": "Stop music on the ceiling speakers. Use ONLY for an explicit \"stop\" / \"stop the music\" request. NEVER use this for volume requests (\"quieter\", \"turn it down\", \"volume down\") - use Volume Down for those.",
+  "icon": "mdi:stop",
+  "object_id": "ceiling_stop",
+  "sequence": [
+    {
+      "action": "media_player.media_pause",
+      "target": {
+        "entity_id": "media_player.ceiling_speakers"
+      }
+    }
+  ]
+}

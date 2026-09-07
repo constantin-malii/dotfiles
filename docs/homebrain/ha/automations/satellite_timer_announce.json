@@ -1,0 +1,81 @@
+{
+  "actions": [
+    {
+      "delay": {
+        "hours": 0,
+        "minutes": 0,
+        "seconds": 3
+      }
+    },
+    {
+      "condition": "state",
+      "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
+      "state": "idle"
+    },
+    {
+      "repeat": {
+        "sequence": [
+          {
+            "action": "rest_command.resolver_command",
+            "continue_on_error": true,
+            "data": {
+              "intent": "interaction",
+              "params": {
+                "mode": "say_text",
+                "text": "Your timer is finished."
+              }
+            }
+          },
+          {
+            "delay": {
+              "hours": 0,
+              "minutes": 0,
+              "seconds": 25
+            }
+          }
+        ],
+        "while": [
+          {
+            "condition": "state",
+            "entity_id": "media_player.respeaker_living_room_media_player",
+            "state": "playing"
+          },
+          {
+            "condition": "state",
+            "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
+            "state": "idle"
+          },
+          {
+            "condition": "template",
+            "value_template": "{{ repeat.index <= 8 }}"
+          }
+        ]
+      }
+    }
+  ],
+  "alias": "Satellite timer - announce on ceiling",
+  "automation_id": "satellite_timer_announce",
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
+      "for": {
+        "hours": 0,
+        "minutes": 0,
+        "seconds": 5
+      },
+      "state": "idle"
+    }
+  ],
+  "description": "The reSpeaker has no speaker, so HA's voice-timer chime is inaudible and only the LED ring shows. HA emits NO event for timer completion (verified against the whole event bus), so this infers it: local playback while the satellite is NOT in a conversation -- conversational turns also play locally (~107 state changes in 20 min), which is why the idle condition is load-bearing. Announces via the resolver say_text (play_media) route because MA announcements fail on this player ('Failed to stream audio'): MA requires correct state/elapsed reporting, which Universal->Squeezelite does not provide. Repeats every 25s while the alarm is still ringing, up to 8 times, stopping when the timer is dismissed. Cannot name WHICH timer finished -- no event payload exists; that needs the firmware on_timer_finished hook. The loop also requires the satellite to be idle: our own announcement can false-wake it (heard as 'The pipeline is finished'), and a conversation makes the satellite's media_player play too -- without this the loop could be sustained by the turns it caused. GUARDED against the wake-sound race: the wake chime makes the satellite's media_player play ~180ms before HA marks it listening, so a plain state condition fires on every wake word. The automation therefore waits 3s and re-checks that the satellite is still idle before announcing.",
+  "id": "satellite_timer_announce",
+  "max_exceeded": "silent",
+  "mode": "single",
+  "triggers": [
+    {
+      "entity_id": "media_player.respeaker_living_room_media_player",
+      "platform": "state",
+      "to": "playing"
+    }
+  ]
+}

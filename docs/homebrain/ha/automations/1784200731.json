@@ -1,0 +1,28 @@
+{
+  "actions": [
+    {
+      "action": "rest_command.resolver_command",
+      "continue_on_error": true,
+      "data": {
+        "intent": "interaction",
+        "params": {
+          "mode": "say",
+          "uri": "{{ trigger.event.data.uri }}"
+        }
+      }
+    }
+  ],
+  "alias": "S1b-2 - Satellite Reply on Ceiling",
+  "automation_id": "1784200731",
+  "conditions": [],
+  "description": "Routes the reSpeaker Living Room satellite's TTS reply URI (esphome.tts_uri event) to the resolver 'say' (play_media on media_player.ceiling_speakers). Slice 3 of S1b-2 - HA-automation only, no firmware. Reply plays on the ceiling; the satellite's local playback is silent (no speaker). continue_on_error so a long blocking reply does not mark the automation failed.",
+  "id": "1784200731",
+  "max": 3,
+  "mode": "queued",
+  "triggers": [
+    {
+      "event_type": "esphome.tts_uri",
+      "platform": "event"
+    }
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "_note": "Complete HomeBrain operational boundary, validated live 2026-09-06 on HA 2026.6.4. Exception: lidarr_ma_sync is not runtime behaviour but an operational / content-pipeline dependency, maintaining the music library the runtime consumes. Scope reasoning, the pipeline id-to-name map and the satellite-enumeration boundary are documented in plans/2026-09-06-inf-09-ha-managed-state-exporter-plan.md and runbooks/ha-managed-state-export.md.",
+  "ha_version_expected": "2026.6.4",
+  "include_preferred_pipeline": true,
+  "exposure_assistants": [
+    "conversation"
+  ],
+  "scripts": [
+    "ceiling_announce",
+    "ceiling_next",
+    "ceiling_pause",
+    "ceiling_play_music",
+    "ceiling_play_radio",
+    "ceiling_previous",
+    "ceiling_resume",
+    "ceiling_set_volume",
+    "ceiling_stop",
+    "ceiling_volume_down",
+    "ceiling_volume_up",
+    "find_stations",
+    "media_status",
+    "news",
+    "play_music",
+    "play_radio"
+  ],
+  "automations": [
+    "1784146586",
+    "1784200731",
+    "lidarr_ma_sync",
+    "ma_auto_reload",
+    "ma_health_probe",
+    "satellite_timer_announce",
+    "voice_ceiling_speakers"
+  ],
+  "pipelines": [
+    "01kvpdchwfeh0wa8p7d4bcywj4",
+    "01kvs55xvmsz0yy27hj7bkaygg",
+    "01kxhm0a1vcdjwkrbp40a6cs43",
+    "01kxygpr39jas5hgsf28cph108",
+    "01kz45tkgbnsn57gpyj25vyfd0"
+  ],
+  "satellite_entities": [
+    "select.respeaker_living_room_assistant",
+    "select.respeaker_living_room_assistant_2",
+    "select.respeaker_living_room_finished_speaking_detection",
+    "select.respeaker_living_room_wake_word",
+    "select.respeaker_living_room_wake_word_2",
+    "select.respeaker_living_room_wake_word_sensitivity"
+  ]
+}

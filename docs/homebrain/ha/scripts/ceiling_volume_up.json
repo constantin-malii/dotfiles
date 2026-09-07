@@ -1,0 +1,34 @@
+{
+  "alias": "Ceiling: Volume Up",
+  "description": "RELATIVE volume INCREASE for the ceiling speakers. Use this for EVERY 'volume up', 'louder', 'turn it up', 'raise the volume', or 'up by N percent' request. Default raises by 10%; pass step=N to raise by N%. Do NOT use 'Set Volume' for these and do NOT compute a new absolute number.",
+  "fields": {
+    "step": {
+      "description": "How many percent to raise by (default 10).",
+      "name": "Step percent",
+      "required": false,
+      "selector": {
+        "number": {
+          "max": 100,
+          "min": 1,
+          "mode": "box"
+        }
+      }
+    }
+  },
+  "icon": "mdi:volume-plus",
+  "object_id": "ceiling_volume_up",
+  "sequence": [
+    {
+      "action": "rest_command.resolver_command",
+      "continue_on_error": true,
+      "data": {
+        "intent": "interaction",
+        "params": {
+          "mode": "volume_up",
+          "step": "{{ step | default(10) }}"
+        }
+      },
+      "response_variable": "r"
+    }
+  ]
+}

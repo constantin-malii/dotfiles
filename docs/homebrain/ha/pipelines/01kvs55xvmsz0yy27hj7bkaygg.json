@@ -1,0 +1,15 @@
+{
+  "conversation_engine": "conversation.openai_conversation",
+  "conversation_language": "en",
+  "id": "01kvs55xvmsz0yy27hj7bkaygg",
+  "language": "en",
+  "name": "ChatGPT",
+  "prefer_local_intents": false,
+  "stt_engine": "stt.faster_whisper",
+  "stt_language": "en",
+  "tts_engine": null,
+  "tts_language": null,
+  "tts_voice": null,
+  "wake_word_entity": null,
+  "wake_word_id": null
+}

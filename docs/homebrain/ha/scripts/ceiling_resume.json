@@ -1,0 +1,30 @@
+{
+  "alias": "Ceiling: Resume Music",
+  "description": "Resume/continue playing music on the ceiling speakers. Use for \"resume\", \"continue\", \"resume playing\", \"play again\", \"unpause\".",
+  "icon": "mdi:play",
+  "object_id": "ceiling_resume",
+  "sequence": [
+    {
+      "action": "rest_command.resolver_command",
+      "continue_on_error": true,
+      "data": {
+        "intent": "interaction",
+        "params": {
+          "mode": "resume"
+        }
+      },
+      "response_variable": "r"
+    },
+    {
+      "variables": {
+        "resp": {
+          "chat_text": "{{ r.content.chat_text if (r is defined and r.content is defined and r.content.chat_text is defined) else \"Sorry, I could not reach the media system.\" }}"
+        }
+      }
+    },
+    {
+      "response_variable": "resp",
+      "stop": "done"
+    }
+  ]
+}

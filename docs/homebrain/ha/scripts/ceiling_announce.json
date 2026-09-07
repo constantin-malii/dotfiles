@@ -1,0 +1,28 @@
+{
+  "alias": "Ceiling: Announce",
+  "description": "Speak a message aloud on the ceiling speakers using Piper TTS.",
+  "fields": {
+    "message": {
+      "description": "Text to speak",
+      "name": "Message",
+      "required": true,
+      "selector": {
+        "text": {}
+      }
+    }
+  },
+  "icon": "mdi:bullhorn",
+  "object_id": "ceiling_announce",
+  "sequence": [
+    {
+      "action": "tts.speak",
+      "data": {
+        "media_player_entity_id": "media_player.ceiling_speakers",
+        "message": "{{ message }}"
+      },
+      "target": {
+        "entity_id": "tts.piper"
+      }
+    }
+  ]
+}
