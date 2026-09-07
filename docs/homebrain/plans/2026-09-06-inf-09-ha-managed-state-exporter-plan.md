@@ -391,8 +391,33 @@ turn each into a checked fact before any code depends on it.
 1. `/api/config/script/config/<object_id>` is keyed by **object_id** (`play_radio`), while
    `/api/config/automation/config/<id>` is keyed by the automation's **`attributes.id`**
    (`voice_ceiling_speakers`). Two different identifier schemes — easy to get wrong.
-2. `assist_pipeline/pipeline/list` field names, and whether it returns `preferred_pipeline`. The
-   fields listed in §4 are inferred from a partial print and are **not** confirmed complete.
+2. ~~`assist_pipeline/pipeline/list` field names, and whether it returns `preferred_pipeline`.~~
+   **RESOLVED 2026-09-06 by a read-only structural probe.** The wrapper is exactly
+   `{pipelines: list, preferred_pipeline: str}`, and each pipeline object has **13 keys, present on
+   every pipeline, with no nesting anywhere**:
+
+   ```
+   id                     str          language               str    <- MISSED by the original guess
+   name                   str          prefer_local_intents   bool
+   conversation_engine    str          stt_engine             str
+   conversation_language  str          stt_language           str
+   tts_engine             str | null   tts_voice              str | null
+   tts_language           str | null
+   wake_word_entity       null (all)   wake_word_id           null (all)
+   ```
+
+   The §4 allowlist was inferred from a partial print and was wrong by exactly one key: `language`.
+   The first real probe exited 4 on it. **The value of recording the whole schema rather than fixing
+   the one reported key is that it also proves there is no 14th key waiting** — otherwise this
+   becomes a first-error-only remediation cycle, one probe per missing field.
+
+   `tts_*` are nullable (2 of 5 live pipelines) and `wake_word_*` were null on all five. Neither
+   fact justifies dropping the fields: a null today is a value that can change tomorrow, and a field
+   missing from the allowlist would fail the export instead of recording the change.
+
+   Also learned here: **HA had 5 pipelines while the manifest declared 2**, and the other three were
+   filtered out of the export with nothing said about them. Pipelines now have an unmanaged
+   reporting path like scripts, automations and exposure assistants.
 3. ~~`homeassistant/expose_entity/list` exists and its response shape on 2026.6.4.~~
    **RESOLVED 2026-09-06 by a read-only structural probe. The recorded live shape is:**
 

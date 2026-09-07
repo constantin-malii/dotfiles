@@ -33,8 +33,10 @@ Everything named in `docs/homebrain/ha/MANIFEST.json`, and nothing else:
 
 Helper entities, dashboards, integrations and config entries, `.storage` internals, secrets, the
 recorder database, add-ons, and **the instance itself**. Anything outside `MANIFEST.json` is
-**unmanaged** — the run summary lists unmanaged scripts and automations so the manifest can be
-extended deliberately, but it is never exported silently.
+**unmanaged** — the run summary lists unmanaged **scripts, automations, pipelines and exposure
+assistants** so the manifest can be extended deliberately, but nothing unmanaged is ever exported.
+Under `--strict-inventory` any of those four makes the run **exit 5** before anything is written,
+reported as `script.<id>` / `automation:<id>` / `pipeline:<id>` / `assistant:<name>`.
 
 **Two singleton surfaces are declared explicitly**, so nothing is captured merely because
 HA returned it: `exposure_assistants` filters conversation exposure to the assistants you

@@ -70,8 +70,13 @@ AUTOMATION_SCALARS = ("id", "alias", "description", "mode", "max", "max_exceeded
 AUTOMATION_SUBTREES = ("triggers", "trigger", "conditions", "condition",
                        "actions", "action", "variables")
 
+# All 13 keys RECORDED live on 2026.6.4 (structural probe), not assumed. `language` was the one
+# my original guess missed, and the probe also proved there is no 14th key hiding behind it.
+# `tts_*` are nullable and `wake_word_*` are currently null on every pipeline here -- neither fact
+# justifies dropping the fields: a null today is a value that can change tomorrow, and a field
+# absent from the allowlist would fail the export rather than record the change.
 PIPELINE_ENVELOPE = frozenset((
-    "id", "name", "conversation_engine", "conversation_language",
+    "id", "name", "language", "conversation_engine", "conversation_language",
     "stt_engine", "stt_language", "tts_engine", "tts_voice", "tts_language",
     "wake_word_entity", "wake_word_id", "prefer_local_intents",
 ))
@@ -619,9 +624,14 @@ def collect(client, manifest):
     # registry, so a declared assistant with zero exposed entities is indistinguishable from an
     # invalid name. Calling either one "missing" claims knowledge the API does not provide.
     # The observed assistant set comes back from the normalization boundary instead.
+    # Pipelines get an unmanaged path too. `available` above is the complete inventory the endpoint
+    # returned, so an undeclared pipeline is reportable here -- previously it was filtered out of
+    # the export silently, with nothing said about it.
     unmanaged = {
         "scripts": sorted(script_ids - set(manifest.get("scripts", []))),
         "automations": sorted(automation_ids - set(manifest.get("automations", []))),
+        "pipelines": sorted(pid for pid in (available - set(manifest.get("pipelines") or []))
+                            if pid),
     }
     return raw, unmanaged
 
@@ -740,6 +750,7 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
     if strict_inventory:
         extra = sorted(["script." + n for n in unmanaged["scripts"]]
                        + ["automation:" + n for n in unmanaged["automations"]]
+                       + ["pipeline:" + n for n in unmanaged["pipelines"]]
                        + ["assistant:" + n for n in unmanaged["exposure_assistants"]])
         if extra:
             raise ExportError(EXIT_MISSING,
@@ -885,7 +896,7 @@ def main(argv=None):
         sys.stdout.write("HA %s  %s\n" % (summary.get("ha_version"),
                                           "PROBE OK (nothing written)" if args.probe_only
                                           else "exported %d files" % len(summary.get("files", []))))
-        for section in ("scripts", "automations", "exposure_assistants"):
+        for section in ("scripts", "automations", "pipelines", "exposure_assistants"):
             extra = summary["unmanaged"].get(section) or []
             if extra:
                 sys.stdout.write("  unmanaged %s: %s\n" % (section, ", ".join(extra)))

@@ -69,15 +69,36 @@ SELECT_STATE = {
     "context": {"id": "01M1VT7G0JRMBFGF71FVD72FPT", "parent_id": None, "user_id": "4749dd84"},
 }
 
+# RECORDED from the live 2026.6.4 instance (structural probe): 13 keys, present on every
+# pipeline, no nesting. `language` is the key the original allowlist guess missed. `tts_*` are
+# nullable (2 of 5 live pipelines had them null) and `wake_word_*` were null on all of them --
+# both are represented below rather than assumed away.
+PIPELINE_KEYS = ("id", "name", "language", "conversation_engine", "conversation_language",
+                 "stt_engine", "stt_language", "tts_engine", "tts_voice", "tts_language",
+                 "wake_word_entity", "wake_word_id", "prefer_local_intents")
+
+PIPELINE_WITH_TTS = {
+    "id": "01kxygpr39jas5hgsf28cph108", "name": "Living Room Voice", "language": "en",
+    "conversation_engine": "conversation.openai_conversation", "conversation_language": "en",
+    "stt_engine": "stt.faster_whisper", "stt_language": "en",
+    "tts_engine": "tts.piper", "tts_voice": "en_US-amy", "tts_language": "en",
+    "wake_word_entity": None, "wake_word_id": None, "prefer_local_intents": True,
+}
+
+PIPELINE_NULL_TTS = {
+    "id": "01kz45tkgbnsn57gpyj25vyfd0", "name": "Living Room Knowledge", "language": "en",
+    "conversation_engine": "conversation.openai_conversation_2", "conversation_language": "en",
+    "stt_engine": "stt.faster_whisper", "stt_language": "en",
+    "tts_engine": None, "tts_voice": None, "tts_language": None,
+    "wake_word_entity": None, "wake_word_id": None, "prefer_local_intents": False,
+}
+
+UNDECLARED_PIPELINE = dict(PIPELINE_WITH_TTS, id="01zzzzzzzzzzzzzzzzzzzzzzzz",
+                           name="Some Other Pipeline")
+
 PIPELINES = {
     "preferred_pipeline": "01kxygpr39jas5hgsf28cph108",
-    "pipelines": [
-        {"id": "01kxygpr39jas5hgsf28cph108", "name": "Living Room Voice",
-         "conversation_engine": "conversation.openai_conversation", "conversation_language": "en",
-         "stt_engine": "stt.faster_whisper", "stt_language": "en",
-         "tts_engine": "tts.piper", "tts_voice": "en_US-amy", "tts_language": "en",
-         "wake_word_entity": None, "wake_word_id": None, "prefer_local_intents": True},
-    ],
+    "pipelines": [PIPELINE_WITH_TTS, PIPELINE_NULL_TTS],
 }
 
 # RECORDED from the live 2026.6.4 instance (Gate 3 structural probe), not assumed:
@@ -97,7 +118,9 @@ MANIFEST = {
     "exposure_assistants": ["conversation"],
     "scripts": ["play_radio"],
     "automations": ["voice_ceiling_speakers"],
-    "pipelines": ["01kxygpr39jas5hgsf28cph108"],
+    # Both fixture pipelines are declared, so unmanaged["pipelines"] is empty by default and the
+    # strict-mode tests below can isolate a single unmanaged resource.
+    "pipelines": ["01kxygpr39jas5hgsf28cph108", "01kz45tkgbnsn57gpyj25vyfd0"],
     "satellite_entities": ["select.respeaker_living_room_finished_speaking_detection"],
 }
 
@@ -777,6 +800,71 @@ class DeclaredSingletonsTest(ExportCase):
             with self.assertRaises(ha_export.ExportError) as caught:
                 self.run_export(manifest=manifest)
             self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
+
+
+class PipelineSchemaTest(ExportCase):
+    """Built from the recorded 2026.6.4 schema. The original allowlist was a guess that omitted
+    `language`, and the first real probe exited 4 because of it."""
+
+    def _written(self, pipeline_id):
+        blob = self.read_out()["pipelines/%s.json" % pipeline_id]
+        return json.loads(blob.decode("utf-8"))
+
+    def test_language_survives_canonical_normalization(self):
+        self.run_export()
+        self.assertEqual(self._written("01kxygpr39jas5hgsf28cph108")["language"], "en")
+
+    def test_all_thirteen_recorded_fields_are_accepted_and_preserved(self):
+        self.run_export()
+        written = self._written("01kxygpr39jas5hgsf28cph108")
+        self.assertEqual(sorted(written.keys()), sorted(PIPELINE_KEYS))
+        self.assertEqual(len(PIPELINE_KEYS), 13)
+
+    def test_nullable_tts_fields_are_preserved_as_null(self):
+        # A null today is a value that can change tomorrow; dropping the field would hide that.
+        self.run_export()
+        written = self._written("01kz45tkgbnsn57gpyj25vyfd0")
+        for key in ("tts_engine", "tts_voice", "tts_language"):
+            self.assertIn(key, written)
+            self.assertIsNone(written[key], key)
+
+    def test_currently_null_wake_word_fields_are_preserved(self):
+        self.run_export()
+        written = self._written("01kxygpr39jas5hgsf28cph108")
+        for key in ("wake_word_entity", "wake_word_id"):
+            self.assertIn(key, written)
+            self.assertIsNone(written[key], key)
+
+    def _with_undeclared(self):
+        pipelines = json.loads(json.dumps(PIPELINES))
+        pipelines["pipelines"].append(json.loads(json.dumps(UNDECLARED_PIPELINE)))
+        return FakeClient(pipelines=pipelines)
+
+    def test_undeclared_pipeline_is_reported_but_not_exported(self):
+        summary = self.run_export(self._with_undeclared())
+        self.assertEqual(summary["unmanaged"]["pipelines"], ["01zzzzzzzzzzzzzzzzzzzzzzzz"])
+        self.assertNotIn("pipelines/01zzzzzzzzzzzzzzzzzzzzzzzz.json", self.read_out())
+        self.assertIn("pipelines/01kxygpr39jas5hgsf28cph108.json", self.read_out())
+
+    def test_no_unmanaged_pipelines_when_all_are_declared(self):
+        summary = self.run_export()
+        self.assertEqual(summary["unmanaged"]["pipelines"], [])
+
+    def test_undeclared_pipeline_alone_triggers_strict_exit_5(self):
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(self._with_undeclared(), strict_inventory=True)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
+        self.assertEqual(caught.exception.detail,
+                         ["assistant:cloud.alexa", "pipeline:01zzzzzzzzzzzzzzzzzzzzzzzz"])
+        self.assertFalse(os.path.exists(self.out))
+        self.assertEqual(self.residue(), [])
+
+    def test_strict_succeeds_when_every_returned_pipeline_is_declared(self):
+        manifest = dict(MANIFEST)
+        manifest["exposure_assistants"] = ["conversation", "cloud.alexa"]
+        summary = self.run_export(strict_inventory=True, manifest=manifest)
+        self.assertTrue(summary["written"])
+        self.assertEqual(summary["unmanaged"]["pipelines"], [])
 
 
 class ExposureWrapperTest(ExportCase):
