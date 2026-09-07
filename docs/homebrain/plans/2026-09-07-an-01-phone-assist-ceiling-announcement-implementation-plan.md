@@ -354,7 +354,8 @@ task; starting G2 with any of them unrecorded means coding against a guess.
 | **D8** `params` payload shape | **SETTLED 2026-09-07:** `intent`/`params` are top-level `data:` keys, `params` structured, **no `payload:` wrapper**. Task 26 corrected. | done |
 | **D13a** the live `rest_command` `timeout` | | **G1b step 3c** — blocks Checkpoint A |
 | **D13b** the live `payload:` **body template** — does it `\| to_json` the params, or interpolate raw? | | **G1b step 3c** — blocks Checkpoint A; **re-checked** at Task 25 step 3a |
-| **D12** source discriminator field | | Task 26 |
+| **D12** source discriminator field | **SETTLED 2026-09-07 (SPIKE-AN-3).** The discriminator is **`trigger.satellite_id`**. Observed, one probe sentence from three sources: phone `device_id=1542a2a3…` (SM-S948W-Costea) / `satellite_id=None`; satellite `device_id=b30ac5e3…` (reSpeaker Living Room) / `satellite_id=assist_satellite.respeaker_living_room_assist_satellite`; web Assist `device_id=None` / `satellite_id=None`. Stable over three phone repeats. `agent_id`, `user_id` and `details` carry nothing. Both candidate fields are present-and-null rather than absent on non-satellite sources, so `\| default(none)` is cheap defence, not load-bearing. **Chosen condition (recorded, NOT yet implemented):** `{{ trigger.satellite_id \| default(none) is none }}` — admits phone and web Assist, blocks satellite Assist, and avoids fragile Companion-device-id pinning, which would break on re-registration. | done — Task 26 carries it |
+| **D7** wildcard-slot normalisation | **UNRESOLVED BUT INFORMED 2026-09-07.** HA **preserves** capitalisation and punctuation in the received sentence: STT delivered `Run the source probe.` while typed input gave `run the source probe`. That **contradicts** the design's §5 step 3 claim that trigger text is lower-cased and stripped. **Do not assume `trigger.slots.message` and `trigger.sentence` normalise identically** — only `sentence` was observed, and a wildcard slot may differ. | still needs the **G4b** observation; design corrected at Task 27 step 8a |
 | **D13** current shared timeout + chosen shape | | Task 25 |
 | **D14** does HA report `on` for an unreachable device | | Task 14; a no-go returns to design |
 
@@ -4004,11 +4005,15 @@ memory** — copy it from the live file, because step 3a's whole point is that i
       - conditions:
           - condition: trigger
             id: announce
-          # D12 gate -- INCLUDE ONLY IF SPIKE-AN-3 found a dependable field. If it did not, omit
-          # this condition entirely and document that the satellite can trigger announcements too
-          # (design 5.1). Do not invent a field.
+          # D12 SETTLED at SPIKE-AN-3 (2026-09-07). Gate on satellite_id, NOT on a pinned
+          # Companion device_id: the harm design 5.1 identified is SATELLITE invocation (duck-marker
+          # contention, and muting the microphone of the satellite that just invoked it). Web Assist
+          # invocation is harmless, so this admits phone + web and blocks only the satellite. A
+          # pinned device_id would also break silently on Companion-app re-registration.
+          # `| default(none)` is defence for a source where the key is absent; on all three observed
+          # sources it is present-and-null.
           - condition: template
-            value_template: "{{ trigger.<D12 field> == '<D12 phone value>' }}"
+            value_template: "{{ trigger.satellite_id | default(none) is none }}"
         sequence:
           - action: rest_command.resolver_command_announce
             data:
@@ -4055,12 +4060,23 @@ templated string inside a structured mapping; serialising it to JSON is the **re
 body template's** job, one layer down. That is the part still unverified — see the D13b gate at
 **G1b step 3c**, which blocks Checkpoint A, and its re-check at Task 25 step 3a.
 
+**D7 caution on `trigger.slots.message` (unresolved).** SPIKE-AN-3 showed HA **preserves**
+capitalisation and punctuation in `trigger.sentence` — STT gave `Run the source probe.`, typed input
+gave `run the source probe`. The design's §5 step 3 assumes the opposite (lower-cased, stripped).
+**Only `sentence` was observed**, and a wildcard *slot* may normalise differently, so step 4 below
+must record what `trigger.slots.message` actually contains — capitalisation, trailing punctuation,
+and whether a trailing period survives into the spoken clip. Better prosody than the design predicted
+is the likely outcome; either way it is an observation, not an assumption.
+
 **No spoken confirmation.** A text-only conversation response is not a dialogue — nothing is asked of
 the operator and no second turn happens. A *spoken* confirmation is forbidden (`ONBOARDING.md` §5):
 it would be a second clip fighting the announcement it confirms.
 
-- [ ] **Step 4: §11.5 item 4 — test from the phone.** Both sentences, with music playing and with the
-  ceiling idle. Confirm the message is spoken **verbatim** and the app shows `Announced.`
+- [ ] **Step 4: §11.5 item 4 — test from the phone, and settle D7.** Both sentences, with music
+  playing and with the ceiling idle. Confirm the message is spoken **verbatim** and the app shows
+  `Announced.` **Record `trigger.slots.message`'s exact content** — dictate a message with a capital
+  and a natural full stop, then compare the resolver log's `chars=` count and the `tts_calls` text
+  against what you said. That closes D7.
 
 - [ ] **Step 5: §11.5 item 7 — failure delivery.** Force one refusal end to end — easiest is
   temporarily pointing `announce_mic_mute_entity` at a non-existent entity — and confirm the **phone
@@ -4127,6 +4143,13 @@ it would be a second clip fighting the announcement it confirms.
   dead-man dies with the process (§9.5) — recovery is to toggle the switch in the HA UI. (b) If the
   ceiling is silent and `paused` after a failed announcement, both the clip play and its replay
   failed (§8.3a); recovery is *"resume"* (`interaction` mode `resume`), not a resolver restart.
+
+- [ ] **Step 8a: The design doc — correct the §5 step 3 normalisation claim.** It states HA
+  normalises trigger text by lower-casing and stripping punctuation, so the resolver receives
+  `dinner is ready` rather than `Dinner is ready.` SPIKE-AN-3 contradicted that for
+  `trigger.sentence`, and Task 26 step 4 settles it for `trigger.slots.message`. Replace the claim
+  with what was measured, and remove D7 from the open list once step 4 has recorded the slot's
+  behaviour.
 
 - [ ] **Step 8: The design doc** — update the status header to record G1–G5 complete with dates.
   **No §8.3a addendum:** the plan implements §8.3a as approved. Add one short note recording the
@@ -4208,11 +4231,12 @@ Run against the design at `259c730`.
 | §13 gates G1–G5 | all phases | covered |
 | §13.1 rollback | Rollback section | covered |
 | §13.2 doc updates | 27 | covered |
-| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered. **D8 is settled** (G1b, 2026-09-07). **D13 split into D13a** (timeout) **and D13b** (body template) — D13b is a **stop gate at G1b step 3c** (blocking Checkpoint A, re-checked at Task 25 step 3a), because a raw `{{ params }}` interpolation yields Python dict repr, not JSON. **D7, D9, D10, D11 are observational** — recorded at G4b/G3/after-use, no task implements them |
+| §14 D1–D14 | 1–4, Checkpoint A | D1–D6, D8, D12–D14 covered. **D8 is settled** (G1b, 2026-09-07). **D13 split into D13a** (timeout) **and D13b** (body template) — D13b is a **stop gate at G1b step 3c** (blocking Checkpoint A, re-checked at Task 25 step 3a), because a raw `{{ params }}` interpolation yields Python dict repr, not JSON. **D12 is settled** (SPIKE-AN-3, 2026-09-07) and Task 26 carries the condition. **D7 is unresolved-but-informed** — HA preserves capitalisation/punctuation in `trigger.sentence`, contradicting the design's §5 step 3; the wildcard *slot* is still unobserved, so Task 26 step 4 records it and Task 27 step 8a corrects the design. **D9, D10, D11 remain observational** — recorded at G3/after-use, no task implements them |
 
-**One gap, deliberate:** D7 (wildcard text normalisation), D9 (chime→speech gap), D10 (how often a
-non-announcement supersedes) and D11 (is 0.80 right by ear) are observations with no code
-consequence. They are recorded at G3/G4b or after a week of use, not built.
+**One gap, deliberate:** D9 (chime→speech gap), D10 (how often a non-announcement supersedes) and
+D11 (is 0.80 right by ear) are observations with no code consequence. **D7 was in this group and has
+been promoted** — SPIKE-AN-3 contradicted the design's normalisation claim, so Task 26 step 4 now
+records the slot's real content and Task 27 step 8a corrects the design. They are recorded at G3/G4b or after a week of use, not built.
 
 **One behavioural change to a shared path, intended:** Task 17 changes `say`/`say_text` recovery on
 an *ambiguous* play failure from un-pause to replay, per §8.3a. It is the only existing test
@@ -4226,7 +4250,7 @@ called out in Task 21's PR body. Success-path sequences are unchanged and pinned
 - **Three intentional substitution points**, each labelled and each blocked by Checkpoint A rather
   than left vague: `<D1: the exact switch entity id>` (Task 9 step 4), the copy-from-live values in
   Task 25 step 3b (gated by step 3a),
-  `<D12 field>` (Task 26 step 3). Task 9 step 4 says explicitly: *do not leave the placeholder; if
+  (D12 is now settled, so Task 26 step 3 carries a real condition). Task 9 step 4 says explicitly: *do not leave the placeholder; if
   Checkpoint A did not produce D1, stop.*
 - **Every code snippet is directly usable as written.** An earlier draft carried two that were not:
   Task 17's `_seq` helper referenced an undefined `cap_or_none`, and Task 18's last test ended in
