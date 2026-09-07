@@ -3,6 +3,43 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — INF-09 strict expanded STAGING export: exit 0, 37 files, 41 KB (not yet the baseline)
+
+> Second staging export, at the full operational boundary and with **`--strict-inventory`**. Written
+> to new paths (`staging-managed-expanded` / `staging-raw-expanded`); **the 2026-09-06 17-file
+> staging result was left untouched**. Nothing copied into the repository — the baseline is a
+> separate gate.
+
+- **Result:** exit **0**, `HA 2026.6.4  exported 37 files`, empty stderr, **no unmanaged output**.
+- **`--strict-inventory` passing is itself the proof that nothing is unmanaged.** Strict mode exits 5
+  if any of the four discoverable inventories has an undeclared member, so a clean run confirms all
+  34 collection entries are declared — and independently confirms the `cloud.alexa` correction: had a
+  real unmanaged assistant existed, this run would have failed.
+- **37 canonical files, 41,604 bytes**, exactly the predicted shape:
+
+  | Area | Files | |
+  |---|---|---|
+  | `scripts/` | 16 | |
+  | `automations/` | 7 | |
+  | `pipelines/` | 6 | 5 pipelines + `_preferred.json` |
+  | `satellite/` | 6 | |
+  | `exposure/assistants.json` | 1 | |
+  | `meta.json` | 1 | |
+  | **total** | **37** | 0 non-JSON files |
+
+  All parse; **CR=0 everywhere; trailing LF everywhere.**
+- **Size, and a corrected estimate.** 41,604 bytes — I had estimated 60–100 KB and was roughly
+  double the truth. Doubling the resource count roughly doubled the export (21,114 → 41,604), and the
+  distribution improved: `voice_ceiling_speakers.json` fell from **56% to 28.5%** of the total, so a
+  single automation no longer dominates every diff. Largest five: `voice_ceiling_speakers` 11,860 B,
+  `satellite_timer_announce` 3,242 B, `play_radio` 2,517 B, `ceiling_play_music` 2,054 B,
+  `1784146586` 1,713 B.
+- **Raw snapshot:** root and run directory `drwx------ 700`, **32 files all mode `600`**, one run
+  directory. Contents neither read nor copied. No `.tmp-*` or `*.prev-*` residue.
+- **The earlier staging result is provably untouched:** `staging-managed` still 17 files / 21,114
+  bytes, `staging-raw` still 1 run dir / 15 files, and **every mtime in both still reads
+  `2026-09-06 20:04`**. Both deployed digests unchanged (`4113f173…`, `25fc208e…`).
+
 ## 2026-09-07 — INF-09 expanded probe passes: all 34 collection entries validate, nothing unmanaged remains
 
 > Single `--probe-only`, exit **0**, read-only, wrote nothing. No `--strict-inventory`.
