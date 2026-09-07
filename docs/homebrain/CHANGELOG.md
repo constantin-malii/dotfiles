@@ -3,7 +3,39 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
-## 2026-09-07 — INF-09 exporter hardened after a post-baseline code review (offline; NOT yet deployed)
+## 2026-09-07 — INF-09 idempotency PROVEN: a fresh re-export is byte-identical to the committed baseline
+
+> The hardened exporter deployed and re-exported to fresh paths. **Zero diff against the committed
+> 37-file baseline.** This is the first time the drift-detection premise has actually been tested —
+> everything before it only proved the exporter could *create* a snapshot.
+
+- **Why this matters more than the exports that preceded it.** A baseline is only useful if
+  re-running the exporter against an unchanged instance reproduces it exactly. Until now that was
+  assumed. A zero diff establishes three things at once: the baseline is **reproducible**, there is
+  **no churn** (no timestamps, no ordering instability, no runtime metadata leaking through), and the
+  security hardening **changed no output** — the same bytes come out of a materially different build.
+- **Sequence, each step gated and verified:**
+  1. Host confirmed still on the pre-hardening exporter `25fc208e…` — which independently corroborates
+     that the hardening was never deployed before this point.
+  2. Backup `~/mass-resolver/.bak/20260907-124713/tools/ha_export.py` (digest verified equal to the
+     file it replaced), then deploy `8d1d030a67a7a18e…` from commit `8f6a003`. Local and host digests
+     compared explicitly; `py_compile` OK on Python 3.5.2.
+  3. **A fresh `--probe-only` BEFORE any export** — the hardened validator is stricter and the
+     deployed manifest was unchanged, so this separates *"the new build still accepts the manifest"*
+     from *"the output is unchanged"*. Exit 0, nothing written.
+  4. `--strict-inventory` export to `staging-managed-idem` / `staging-raw-idem`. Exit 0, 37 files.
+- **Comparison was made against the committed blobs** (`git show HEAD:<path>`), not the working tree
+  or the earlier staging directory — the baseline that actually matters is the one in the repository.
+  **37/37 byte-identical.**
+- **Everything else verified unchanged:** raw tree `0700` with all 32 files `0600`; the two earlier
+  staging trees byte-identical *and* mtime-identical (`staging-managed` 2026-09-06 20:04,
+  `staging-managed-expanded` 2026-09-07 07:50); no `.tmp-*` or `*.prev-*` residue; the baseline output
+  paths `~/ha-state/managed` and `~/ha-state/raw` still absent.
+- **Still untested:** the other half of drift detection — *change something in HA, re-export, and see
+  exactly that change and nothing else*. That test should ride on the `play_radio` fix rather than a
+  synthetic edit.
+
+## 2026-09-07 — INF-09 exporter hardened after a post-baseline code review (deployed later the same day)
 
 > Security and fail-closed hardening found by reviewing the committed exporter, plus the review
 > fixes applied on top. **Offline only — Home Assistant was not contacted and nothing was
