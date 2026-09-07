@@ -3,6 +3,73 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — INF-09 first STAGING export (exit 0, 17 files, 21 KB) — explicitly NOT the baseline
+
+> **A staging export, not the authoritative baseline.** The manifest is intentionally
+> under-inclusive, so this output is for review and sizing only. Written to dedicated,
+> previously-absent paths — `~/ha-state/staging-managed` and `~/ha-state/staging-raw` — and
+> **nothing was copied into the repository.** Both staging trees are left in place deliberately.
+
+- **Result:** exit **0**, `HA 2026.6.4  exported 17 files`, empty stderr. Both staging paths were
+  confirmed absent beforehand, and the deployed exporter (`25fc208e…`) and manifest (`c2e72f99…`)
+  digests were re-verified against their recorded values first.
+- **Canonical output: 17 JSON files, 0 non-JSON, 21,114 bytes total.** Every file parses as JSON,
+  every file has **CR=0** and a trailing LF — so the scoped `eol=lf` rule and the LF-only writer both
+  work end to end, and a repo↔host comparison will not report phantom differences.
+
+  | Area | Files | Notable |
+  |---|---|---|
+  | `automations/` | 1 | `voice_ceiling_speakers.json` at **11,860 B — 56% of the whole export** |
+  | `scripts/` | 5 | `play_radio.json` 2,517 B (the tool-schema surface), `find_stations` 1,351 B |
+  | `satellite/` | 6 | 239–308 B each |
+  | `pipelines/` | 3 | 2 pipelines + `_preferred.json` |
+  | `exposure/` | 1 | `assistants.json` 929 B |
+  | `meta.json` | 1 | 58 B |
+
+- **Plan assumption #7 is answered: ~21 KB total.** That is a genuinely reviewable diff, not a dump —
+  which was the open question. The one automation is over half of it, so a change there will dominate
+  any future diff; that is correct, since it is also where the behaviour lives.
+- **Raw snapshot permissions verified:** root and run directory both `drwx------ 700`, all 15 raw
+  files `-rw------- 600`, one run directory. **Raw contents were neither read nor copied** — only
+  names and modes were inspected. No `.tmp-*` residue anywhere.
+- **Unmanaged, reported not exported:** 11 scripts, 6 automations, 3 pipelines (unchanged from the
+  probe). **The next decision is which of the load-bearing ones belong under change control** —
+  `satellite_timer_announce`, the `ma_auto_reload`/`ma_health_probe` self-healing pair, and the
+  exposed `news`/`play_music` tools are the obvious candidates.
+- **Capacity note, not implicated in anything here:** host `/` is at **86% used, 15 GB free**. Ample
+  for an export of this size; recorded for monitoring, no cleanup taken.
+
+## 2026-09-06 — SSH hangs traced to a lost agent key, not the host: a fallback that blocks instead of failing
+
+> Read-only diagnosis. No host change, no service restart, no configuration edit.
+
+- **Symptom:** remote commands intermittently returned nothing and `timeout` killed them
+  (`exit 124`), while other attempts succeeded. One earlier compound step died with a bare `exit 1`
+  after its output vanished, leaving it genuinely unclear whether a `cp` had run.
+- **The host was never the problem.** `load 0.06 0.08 0.06`, uptime 68 d, 2.6 GB memory available,
+  **zero `D`-state processes**, `sshd` accepting TCP on :22 instantly, and the HA VM answering
+  **HTTP 200 in 21 ms** — which also proves host networking and KVM were healthy, since that VM runs
+  on this host.
+- **Root cause:** the ssh-agent had lost `id_homebrain`, so **publickey authentication failed and
+  SSH fell back to password**, which in a non-interactive shell **blocks trying to open `/dev/tty`**
+  to prompt. That presents as a hang, not a denial — the single most misleading failure shape
+  available. Intermittent successes were most consistent with a lingering multiplexed connection.
+- **The diagnostic that made it visible instantly:**
+  `ssh -o BatchMode=yes` → `Permission denied (publickey,password)`, 4/4, immediately. **Use that
+  before suspecting the network:** with prompting disabled an auth failure fails fast and says so.
+  `ssh -vvv` corroborated it with `Next authentication method: password`.
+- **Fix (client-side only):** `ssh-add ~/.ssh/id_homebrain` into the **existing** agent. Do **not**
+  wrap it in `eval "$(ssh-agent -s)"` — doing that earlier in this workstream leaked 13 agent
+  processes and made `ssh-add` itself begin hanging.
+- **Verification that should gate any write over SSH:** three *fresh* connections, each returning a
+  unique marker with exit 0, using `BatchMode=yes -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no -o PreferredAuthentications=publickey -o ControlPath=none`.
+  Multiplexing off matters — otherwise a reused master connection hides a broken authentication path.
+- **Lesson:** a write was correctly *not* attempted while the transport could not reliably return
+  command status. An intermittent transport is more dangerous than an outage: an outage stops you,
+  whereas an intermittent one invites a retry that appears to work and leaves the previous attempt's
+  effect unknown.
+
 ## 2026-09-06 — INF-09 probe passes: the managed HA surface validates end to end (still no export)
 
 > Third `--probe-only`, exit **0**. Read-only, wrote nothing. **No full export has ever run**; that
