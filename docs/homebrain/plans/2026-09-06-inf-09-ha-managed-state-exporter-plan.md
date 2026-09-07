@@ -211,9 +211,21 @@ assistants under change control. Resources present in HA but absent from the man
 recently" — the first seeded manifest used the latter and that was its weakness: it encoded the
 author's recent attention rather than what would hurt if it changed unnoticed. Validated live on
 2026-09-06 (HA 2026.6.4): **16 scripts, 7 automations, 5 pipelines, 6 satellite selects**, plus the
-two singleton declarations. All five pipelines are included — the two assigned to the satellite, the
-preferred instance default (behaviourally relevant to any entry point that pins nothing), the
-ChatGPT pipeline, and the superseded `Living Room Voice` (retained so a change to it stays visible).
+two singleton declarations. That is **34 collection entries** in total, of which **20 were newly
+managed** at the 2026-09-06 expansion: 11 scripts, 6 automations, 3 pipelines (all 6 satellite
+entities were already declared).
+
+**All five pipelines are included.** Their ids are opaque ULIDs, so the map lives here — the manifest
+itself keeps only a one-line `_note`, deliberately, because it is a strictly-schema-validated file
+and a free-form multi-part note would be an arbitrary-typed hole in it:
+
+| Pipeline id | Name | Why managed |
+|---|---|---|
+| `01kvpdchwfeh0wa8p7d4bcywj4` | Home Assistant | Instance default **and the preferred pipeline** — behaviourally relevant to any entry point that pins none. `_preferred.json` records a change *of* preference; managing it also catches a change *within* the preferred pipeline. |
+| `01kvs55xvmsz0yy27hj7bkaygg` | ChatGPT | HomeBrain-specific: the ChatGPT/phone pipeline that runs the exposed resolver tools. |
+| `01kxygpr39jas5hgsf28cph108` | Living Room ChatGPT | Assigned to `select.respeaker_living_room_assistant`. |
+| `01kz45tkgbnsn57gpyj25vyfd0` | Living Room Knowledge | Assigned to `select.respeaker_living_room_assistant_2`. |
+| `01kxhm0a1vcdjwkrbp40a6cs43` | Living Room Voice | Superseded satellite pipeline, retained so a change to it stays visible. |
 **One deliberate exception:** `lidarr_ma_sync` is not runtime behaviour but an operational /
 content-pipeline dependency — it maintains the library the runtime consumes and could not be
 reconstructed from resolver code — and the manifest's `_note` records that reasoning rather than

@@ -1,11 +1,5 @@
 {
-  "_note": [
-    "Scope principle: the COMPLETE HomeBrain operational boundary -- every script, automation and Assist pipeline this stack depends on, not merely the resources recently edited or exposed to the LLM. A partial manifest is worse than an obvious gap: a clean diff over some resources reads as 'Home Assistant has not changed'.",
-    "Validated against the live instance on 2026-09-06, HA 2026.6.4, by read-only structural probes: 16 scripts and 7 automations enumerated from /api/states and each config fetched, and all 5 pipelines classified by name, preferred flag and satellite-select assignment. Every observed key was already within the exporter's allowlists, so this expansion needs no ha_export.py change.",
-    "EXCEPTION -- lidarr_ma_sync is NOT runtime behaviour. It is an operational / content-pipeline dependency: it maintains the music library the runtime consumes, it lives in Home Assistant, and it could not be reconstructed from resolver code alone. Tracked deliberately on that basis, not because the runtime calls it.",
-    "Pipeline ids are opaque ULIDs, so their names are recorded here for the human maintainer: 01kvpdchwfeh0wa8p7d4bcywj4 = Home Assistant (instance default, and the PREFERRED pipeline -- behaviourally relevant to any entry point that does not pin one); 01kvs55xvmsz0yy27hj7bkaygg = ChatGPT; 01kxygpr39jas5hgsf28cph108 = Living Room ChatGPT (assigned to select.respeaker_living_room_assistant); 01kz45tkgbnsn57gpyj25vyfd0 = Living Room Knowledge (assigned to select.respeaker_living_room_assistant_2); 01kxhm0a1vcdjwkrbp40a6cs43 = Living Room Voice (superseded, retained so a change to it is still visible).",
-    "Satellite entities are verified to exist but are NOT enumerated for unmanaged reporting: /api/states is the whole instance, and separating out 'the satellite's entities' would need a device or integration boundary rather than an entity_id prefix match. Add one here if you want it tracked."
-  ],
+  "_note": "Complete HomeBrain operational boundary, validated live 2026-09-06 on HA 2026.6.4. Exception: lidarr_ma_sync is not runtime behaviour but an operational / content-pipeline dependency, maintaining the music library the runtime consumes. Scope reasoning, the pipeline id-to-name map and the satellite-enumeration boundary are documented in plans/2026-09-06-inf-09-ha-managed-state-exporter-plan.md and runbooks/ha-managed-state-export.md.",
   "ha_version_expected": "2026.6.4",
   "include_preferred_pipeline": true,
   "exposure_assistants": [

@@ -1035,12 +1035,19 @@ class RealRepositoryManifestTest(unittest.TestCase):
         pin = self.manifest.get("ha_version_expected")
         self.assertTrue(isinstance(pin, str) and pin.strip(), "version pin missing or blank")
 
+    def test_note_is_a_nonempty_string(self):
+        # validate_manifest() does not type-check _note, so an array or object there would be an
+        # arbitrary-typed hole in an otherwise strict schema. Pin the type here instead.
+        note = self.manifest.get("_note")
+        self.assertIsInstance(note, str)
+        self.assertTrue(note.strip(), "_note is blank")
+
     def test_the_documented_content_pipeline_exception_is_present(self):
         # lidarr_ma_sync is tracked deliberately as an operational/content-pipeline dependency
-        # rather than runtime behaviour, and the note must say so.
+        # rather than runtime behaviour, and the note must say so -- otherwise a future reader has
+        # to guess why a library-sync automation is in a runtime manifest.
         self.assertIn("lidarr_ma_sync", self.manifest["automations"])
-        note = " ".join(self.manifest["_note"]) if isinstance(self.manifest["_note"], list) \
-            else str(self.manifest["_note"])
+        note = self.manifest["_note"]
         self.assertIn("lidarr_ma_sync", note)
         self.assertIn("content-pipeline", note)
 
