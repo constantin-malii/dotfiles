@@ -3,6 +3,36 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-06 — INF-09 exporter re-deployed after the exposure-shape remediation (one file; still NOT run)
+
+> Gate 1, second pass. **Only `ha_export.py` was copied; `MANIFEST.json` was deliberately not
+> recopied** because it is unchanged. The exporter has still never been executed — no probe, no
+> export, no Home Assistant access, no restart or reload.
+
+- **Why:** the first `--probe-only` exited 5 claiming the declared exposure assistant was absent.
+  A read-only structural probe established the live shape and proved the exporter, not the manifest,
+  was wrong — it assumed the result *was* the entity map with `{"should_expose": bool}` leaves, when
+  2026.6.4 returns `{"exposed_entities": {<entity_id>: {<assistant>: bool}}}`. See
+  `plans/2026-09-06-inf-09-ha-managed-state-exporter-plan.md` §11.3 for the recorded shape.
+- **Digests**, `sha256` with `tr -d '\r'` applied on both sides, source commit
+  `cc4ac86664bb26d961ad0f98c4af45a993643ac8`:
+
+  ```
+  old (replaced)  63d0a92ba1ad3deba62af959f547bf231487c500189820e67a383a1935fcd593  tools/ha_export.py
+  new (deployed)  b9dc29781f325ca1e16ab9dddc35209519adea5a4fde3d9757665f6115ee48e7  tools/ha_export.py
+  unchanged       c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched.** The old deployed digest was
+  verified to still equal the value recorded at first bootstrap, so nothing had drifted on the host
+  in between.
+- **Backup:** `~/mass-resolver/.bak/20260906-184938/tools/ha_export.py`, confirmed byte-identical to
+  the file it replaced. That is the rollback pointer.
+- **Host verification:** `python3 -V` → **3.5.2**; `python3 -m py_compile tools/ha_export.py` →
+  `COMPILE_OK` (compiles to bytecode, does not execute). `~/ha-state/managed` and `~/ha-state/raw`
+  both still absent, confirming the exporter has produced no output. `tools/__pycache__` exists as
+  the ordinary byproduct of `py_compile`.
+
 ## 2026-09-06 — INF-09 exporter bootstrapped to the host (deployment only; NOT yet run)
 
 > Gate 1 of INF-09. Two files placed by hand and digest-verified. **The exporter has not been
