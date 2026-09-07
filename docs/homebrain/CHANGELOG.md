@@ -3,6 +3,38 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — INF-09 expanded manifest deployed (manifest only; exporter untouched, not invoked)
+
+> Gate 1, manifest-only. **`ha_export.py` was neither rebuilt nor recopied** — the read-only schema
+> probes showed every observed key across all 16 scripts and 7 automations already sat inside its
+> existing allowlists, so the expansion needed no code change. **No exporter invocation in this
+> gate**, and the staging trees from 2026-09-06 were left exactly as they were.
+
+- **Scope now deployed:** the complete HomeBrain operational boundary — **34 collection entries**
+  (16 scripts, 7 automations, 5 pipelines, 6 satellite selects), of which **20 were newly managed**:
+  11 scripts, 6 automations, 3 pipelines. All 6 satellite entities were already declared.
+- **Pre-check:** the host manifest still had digest `c2e72f99…`, the value recorded at first
+  bootstrap — no drift in between.
+- **Digests**, `sha256` with `tr -d '\r'` on both sides, source commit
+  `431f80b87689d6e864aa33dc8621a43356f25721`:
+
+  ```
+  old (replaced)  c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  new (deployed)  4113f173ca9de9e4ee0bee0b35c7c9ed5aee99acde72501840fb3ac72bd29254  ha-state/MANIFEST.json
+  unchanged       25fc208e081028bf0ee4aa3ebf49094bce223bca4f95367a721c67aec430efb7  tools/ha_export.py
+  ```
+
+  **Local and host digests were compared explicitly and matched.**
+- **Backup:** `~/mass-resolver/.bak/20260907-073248/ha-state/MANIFEST.json`, digest verified equal to
+  the file it replaced. Rollback pointer.
+- **Verified under host Python 3.5.2:** parses, 16/7/5/6 entries all unique, `_note` is a `str`,
+  `include_preferred_pipeline=True`, `exposure_assistants=['conversation']`, pin `'2026.6.4'`.
+- **Staging trees untouched:** `staging-managed` still 17 JSON files, `staging-raw` still 1 run
+  directory.
+- **Transport was verified before writing**, per the lesson recorded on 2026-09-06: three fresh
+  publickey-only connections each returning a unique marker with exit 0, multiplexing disabled. A
+  write is not attempted over a link that cannot reliably return command status.
+
 ## 2026-09-06 — INF-09 first STAGING export (exit 0, 17 files, 21 KB) — explicitly NOT the baseline
 
 > **A staging export, not the authoritative baseline.** The manifest is intentionally
