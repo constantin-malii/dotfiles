@@ -393,8 +393,28 @@ turn each into a checked fact before any code depends on it.
    (`voice_ceiling_speakers`). Two different identifier schemes — easy to get wrong.
 2. `assist_pipeline/pipeline/list` field names, and whether it returns `preferred_pipeline`. The
    fields listed in §4 are inferred from a partial print and are **not** confirmed complete.
-3. `homeassistant/expose_entity/list` exists and its response shape on 2026.6.4. It is cited in
-   `assistant-capabilities.md` but was not run during this session.
+3. ~~`homeassistant/expose_entity/list` exists and its response shape on 2026.6.4.~~
+   **RESOLVED 2026-09-06 by a read-only structural probe. The recorded live shape is:**
+
+   ```
+   result                          dict, 1 key
+   └── exposed_entities            dict          <- a WRAPPER, present
+       └── <entity_id>             dict
+           └── <assistant name>    bool          <- a plain boolean, not an object
+   ```
+
+   The exporter had assumed the result *was* the entity map and that each leaf was a
+   `{"should_expose": bool}` object. **Both were wrong**, and the first probe exited 5 claiming the
+   declared assistant was absent — the assistant walk was collecting entity ids out of the wrapper
+   instead of assistant names. Fixed in `9d8812a`: unwrapping now happens once, at the normalization
+   boundary, and the fixtures are rebuilt from this recorded response rather than from the
+   assumption. **A fixture written from an assumption agrees with the bug instead of catching it** —
+   that is why the shape had to be recorded before remediating.
+
+   One property of this endpoint constrains the design permanently: it reports **exposures, not the
+   assistant registry**, so an assistant with nothing exposed leaves no key at all. Absence therefore
+   cannot distinguish an invalid assistant name from a valid one with zero exposures, and that case
+   is a warning, never an error.
 4. Whether automations/scripts return singular or plural `trigger(s)`/`action(s)` **consistently**;
    the plural form was observed once.
 5. Whether **any** managed script or automation currently embeds a secret. If one does, the first

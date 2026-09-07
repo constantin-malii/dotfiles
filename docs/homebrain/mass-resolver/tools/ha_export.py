@@ -719,14 +719,6 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
         summary["version_warning"] = (
             "HA is %s but the manifest expects %s; the script/automation config routes are "
             "version-coupled -- re-probe and review the allowlists" % (actual, expected))
-    if strict_inventory:
-        extra = sorted(["script." + n for n in unmanaged["scripts"]]
-                       + ["automation:" + n for n in unmanaged["automations"]])
-        if extra:
-            raise ExportError(EXIT_MISSING,
-                              "--strict-inventory: unmanaged resources exist in Home Assistant",
-                              extra)
-
     canonical, observed_assistants = build_canonical(raw, manifest)   # phase 3 (memory only)
 
     # Assistant bookkeeping belongs here, after the single unwrapping boundary has run.
@@ -740,6 +732,19 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
             "declared assistant(s) matched zero exposed entities: %s -- this endpoint reports "
             "exposures, not the assistant registry, so this may mean the name is wrong OR that "
             "nothing is exposed to it" % ", ".join(unexposed))
+
+    # AFTER the assistant bookkeeping, deliberately. Running this before normalization left
+    # unmanaged["exposure_assistants"] unpopulated, so an undeclared assistant was reported but
+    # never actually failed strict mode -- contrary to the "an unmanaged resource" contract.
+    # Still ahead of any write (phase 5), so a strict failure leaves the filesystem untouched.
+    if strict_inventory:
+        extra = sorted(["script." + n for n in unmanaged["scripts"]]
+                       + ["automation:" + n for n in unmanaged["automations"]]
+                       + ["assistant:" + n for n in unmanaged["exposure_assistants"]])
+        if extra:
+            raise ExportError(EXIT_MISSING,
+                              "--strict-inventory: unmanaged resources exist in Home Assistant",
+                              extra)
 
     findings = scan_secrets(raw, literals)                      # phase 4 (memory only)
     for rel in sorted(canonical.keys()):

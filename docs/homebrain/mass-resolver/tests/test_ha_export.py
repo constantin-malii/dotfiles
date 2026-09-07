@@ -430,6 +430,31 @@ class FailureModeTest(ExportCase):
             self.run_export(client, strict_inventory=True)
         self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
 
+    def test_an_undeclared_assistant_is_the_only_unmanaged_resource_by_default(self):
+        # Precondition for the strict test below: with the default fixture, every script and
+        # automation is declared, so cloud.alexa stands alone.
+        summary = self.run_export()
+        self.assertEqual(summary["unmanaged"]["scripts"], [])
+        self.assertEqual(summary["unmanaged"]["automations"], [])
+        self.assertEqual(summary["unmanaged"]["exposure_assistants"], ["cloud.alexa"])
+
+    def test_strict_inventory_flags_an_undeclared_assistant_alone(self):
+        # REGRESSION: the strict check used to run before exposure normalization populated
+        # unmanaged["exposure_assistants"], and listed only scripts and automations -- so an
+        # undeclared assistant was reported and then quietly exited 0 under strict mode.
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(strict_inventory=True)
+        self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
+        self.assertEqual(caught.exception.detail, ["assistant:cloud.alexa"])
+        self.assertFalse(os.path.exists(self.out))
+        self.assertEqual(self.residue(), [])
+
+    def test_strict_inventory_passes_when_every_assistant_is_declared(self):
+        manifest = dict(MANIFEST)
+        manifest["exposure_assistants"] = ["conversation", "cloud.alexa"]
+        summary = self.run_export(strict_inventory=True, manifest=manifest)
+        self.assertTrue(summary["written"])
+
     def test_unmanaged_resources_are_reported_without_strict(self):
         states = states_list() + [{"entity_id": "script.other", "state": "off", "attributes": {}}]
         client = FakeClient(states=states)
