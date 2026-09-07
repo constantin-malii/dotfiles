@@ -80,10 +80,15 @@ PIPELINES = {
     ],
 }
 
+# RECORDED from the live 2026.6.4 instance (Gate 3 structural probe), not assumed:
+#   result -> {"exposed_entities": {<entity_id>: {<assistant>: bool}}}
+# The previous fixture encoded my own wrong assumption (unwrapped, {"should_expose": bool}
+# leaves) and therefore agreed with the bug instead of catching it.
 EXPOSURE = {
-    "script.play_radio": {"conversation": {"should_expose": True},
-                          "cloud.alexa": {"should_expose": True}},
-    "media_player.ceiling_speakers": {"conversation": {"should_expose": False}},
+    "exposed_entities": {
+        "script.play_radio": {"conversation": True, "cloud.alexa": True},
+        "media_player.ceiling_speakers": {"conversation": False},
+    }
 }
 
 MANIFEST = {
@@ -670,14 +675,20 @@ class DeclaredSingletonsTest(ExportCase):
             self.run_export(manifest=manifest)
         self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
 
-    def test_declared_assistant_absent_from_ha_is_missing_not_empty(self):
-        # Declared "conversation", HA returns only cloud.alexa: the export must NOT exit 0 with an
-        # empty exposure file. Same declared-vs-returned check as managed pipelines.
-        exposure = {"script.play_radio": {"cloud.alexa": {"should_expose": True}}}
-        with self.assertRaises(ha_export.ExportError) as caught:
-            self.run_export(FakeClient(exposure=exposure))
-        self.assertEqual(caught.exception.code, ha_export.EXIT_MISSING)
-        self.assertFalse(os.path.exists(self.out))
+    def test_declared_assistant_with_zero_entities_succeeds_with_a_warning(self):
+        # This endpoint reports EXPOSURES, not the assistant registry: an assistant with nothing
+        # exposed leaves no key at all. Absence therefore cannot distinguish an invalid name from
+        # a valid-but-empty one, so calling it exit 5 would claim knowledge the API lacks.
+        exposure = {"exposed_entities": {"script.play_radio": {"cloud.alexa": True}}}
+        summary = self.run_export(FakeClient(exposure=exposure))
+        self.assertTrue(summary["written"])
+        self.assertIn("conversation", summary["exposure_warning"])
+        written = json.loads(self.read_out()["exposure/assistants.json"].decode("utf-8"))
+        self.assertEqual(written["exposed_entities"], {})    # the legitimate empty result
+
+    def test_no_warning_when_every_declared_assistant_is_seen(self):
+        summary = self.run_export()
+        self.assertNotIn("exposure_warning", summary)
 
     def test_declared_preferred_pipeline_key_absent_is_missing_not_omitted(self):
         # include_preferred_pipeline is true but the wrapper has no such key: capture that was
@@ -741,6 +752,63 @@ class DeclaredSingletonsTest(ExportCase):
             with self.assertRaises(ha_export.ExportError) as caught:
                 self.run_export(manifest=manifest)
             self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
+
+
+class ExposureWrapperTest(ExportCase):
+    """The wrapper is an API envelope. Missing or malformed is exit 4 -- exit 5 is reserved for
+    resources whose existence an inventory endpoint can actually establish."""
+
+    def test_recorded_shape_captures_the_declared_assistant(self):
+        self.run_export()
+        written = json.loads(self.read_out()["exposure/assistants.json"].decode("utf-8"))
+        self.assertEqual(written["exposed_entities"]["script.play_radio"],
+                         {"conversation": True})
+        self.assertEqual(written["exposed_entities"]["media_player.ceiling_speakers"],
+                         {"conversation": False})
+
+    def _expect_schema_error(self, exposure):
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(exposure=exposure))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
+        self.assertFalse(os.path.exists(self.out))
+
+    def test_missing_wrapper_is_exit_4(self):
+        # Exactly the pre-fix live shape assumption: the entity map with no wrapper.
+        self._expect_schema_error({"script.play_radio": {"conversation": True}})
+
+    def test_unknown_wrapper_key_is_exit_4(self):
+        self._expect_schema_error({"exposed_entities": {}, "something_new": 1})
+
+    def test_non_object_wrapper_value_is_exit_4(self):
+        for bad in ([], "nope", 3, None):
+            self._expect_schema_error({"exposed_entities": bad})
+
+    def test_non_object_entity_row_is_exit_4(self):
+        self._expect_schema_error({"exposed_entities": {"script.play_radio": True}})
+
+    def test_non_boolean_leaf_is_exit_4(self):
+        # The old assumed shape: {"should_expose": bool} instead of a plain bool.
+        self._expect_schema_error(
+            {"exposed_entities": {"script.play_radio": {"conversation": {"should_expose": True}}}})
+        self._expect_schema_error(
+            {"exposed_entities": {"script.play_radio": {"conversation": "true"}}})
+
+    def test_empty_exposed_entities_is_valid(self):
+        summary = self.run_export(FakeClient(exposure={"exposed_entities": {}}))
+        self.assertTrue(summary["written"])
+        written = json.loads(self.read_out()["exposure/assistants.json"].decode("utf-8"))
+        self.assertEqual(written["exposed_entities"], {})
+
+    def test_raw_snapshot_preserves_the_complete_wrapped_response(self):
+        # Raw is the forensic artefact: it keeps the wrapper and the undeclared assistant that
+        # canonical filters out, so a canonical file's provenance stays checkable.
+        self.run_export(stamp="20260101T000000Z")
+        path = os.path.join(self.raw, "20260101T000000Z", "exposure.json")
+        with open(path, "rb") as handle:
+            blob = json.loads(handle.read().decode("utf-8"))
+        self.assertIn("exposed_entities", blob)
+        self.assertEqual(blob["exposed_entities"]["script.play_radio"],
+                         {"conversation": True, "cloud.alexa": True})
 
 
 class VersionPinTest(ExportCase):

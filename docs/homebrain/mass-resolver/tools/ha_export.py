@@ -84,7 +84,11 @@ STATE_ENVELOPE = frozenset((
 RUNTIME_STATE_KEYS = ("last_changed", "last_updated", "last_reported", "context")
 SELECT_ATTRS = frozenset(("options", "friendly_name", "icon", "device_class", "editable"))
 
-EXPOSURE_ENTRY = frozenset(("should_expose",))
+# Recorded live on 2026.6.4 (Gate 3 structural probe), not assumed:
+#   result -> {"exposed_entities": {<entity_id>: {<assistant name>: bool}}}
+# The earlier code assumed the result WAS the entity map and that each leaf was a
+# {"should_expose": bool} object. Both were wrong.
+EXPOSURE_LIST_ENVELOPE = frozenset(("exposed_entities",))
 
 # The WS wrapper around the pipeline list is itself an envelope and gets the same strict
 # treatment: an unknown wrapper key would otherwise be dropped while reporting success.
@@ -299,22 +303,46 @@ def normalize_select_state(payload):
 
 
 def normalize_exposure(payload, assistants):
-    """{entity_id: {assistant: {"should_expose": bool}}} -> sorted, flags only, filtered to the
-    DECLARED assistants. HA returns every assistant it knows about; exporting all of them would
-    be an implicit surface the manifest never claimed."""
+    """THE single unwrapping boundary for exposure. The raw snapshot keeps the complete wrapped
+    response; this is the only place that reaches inside it, so the shape is asserted once.
+
+    Live 2026.6.4 shape: {"exposed_entities": {<entity_id>: {<assistant>: bool}}}.
+    Returns (canonical_doc, observed_assistants).
+
+    A missing or malformed wrapper is an API-ENVELOPE failure (exit 4), not a missing resource:
+    exit 5 is reserved for resources whose existence an inventory endpoint can actually establish.
+    This endpoint reports exposures, not the assistant registry."""
+    check_envelope("homeassistant/expose_entity/list", payload, EXPOSURE_LIST_ENVELOPE)
+    if "exposed_entities" not in payload:
+        raise ExportError(EXIT_SCHEMA,
+                          "homeassistant/expose_entity/list: no 'exposed_entities' wrapper")
+    inner = payload["exposed_entities"]
+    if not isinstance(inner, dict):
+        raise ExportError(EXIT_SCHEMA,
+                          "homeassistant/expose_entity/list: 'exposed_entities' must be an "
+                          "object, got %s" % type(inner).__name__)
+
     wanted = set(assistants or [])
+    observed = set()
     out = {}
-    for entity_id in sorted((payload or {}).keys()):
-        row = {}
-        for assistant in sorted((payload[entity_id] or {}).keys()):
-            if assistant not in wanted:
-                continue
-            entry = (payload[entity_id] or {})[assistant] or {}
-            check_envelope("exposure[%s][%s]" % (entity_id, assistant), entry, EXPOSURE_ENTRY)
-            row[assistant] = bool(entry.get("should_expose"))
-        if row:
-            out[entity_id] = row
-    return {"exposed_entities": out}
+    for entity_id in sorted(inner.keys()):
+        row = inner[entity_id]
+        if not isinstance(row, dict):
+            raise ExportError(EXIT_SCHEMA, "exposure[%s]: expected an object, got %s"
+                              % (entity_id, type(row).__name__))
+        kept = {}
+        for assistant in sorted(row.keys()):
+            leaf = row[assistant]
+            if not isinstance(leaf, bool):
+                raise ExportError(EXIT_SCHEMA,
+                                  "exposure[%s][%s]: expected a boolean leaf, got %s"
+                                  % (entity_id, assistant, type(leaf).__name__))
+            observed.add(assistant)
+            if assistant in wanted:
+                kept[assistant] = leaf
+        if kept:
+            out[entity_id] = kept
+    return {"exposed_entities": out}, observed
 
 
 def render(obj):
@@ -585,19 +613,15 @@ def collect(client, manifest):
                           "include_preferred_pipeline is declared but the pipeline list has no "
                           "preferred_pipeline key", ["pipelines.preferred_pipeline"])
 
-    seen_assistants = set()
-    for assistants in (raw["exposure"] or {}).values():
-        seen_assistants.update((assistants or {}).keys())
-    absent_assistants = sorted(set(manifest.get("exposure_assistants") or []) - seen_assistants)
-    if absent_assistants:
-        raise ExportError(EXIT_MISSING,
-                          "managed exposure assistants absent from Home Assistant",
-                          ["assistant:" + a for a in absent_assistants])
+    # No declared-assistant presence check here, deliberately. collect() would have to reach
+    # inside the exposure wrapper to do it, duplicating the unwrapping that normalize_exposure
+    # owns -- and the check itself was unsound: this endpoint reports EXPOSURES, not the assistant
+    # registry, so a declared assistant with zero exposed entities is indistinguishable from an
+    # invalid name. Calling either one "missing" claims knowledge the API does not provide.
+    # The observed assistant set comes back from the normalization boundary instead.
     unmanaged = {
         "scripts": sorted(script_ids - set(manifest.get("scripts", []))),
         "automations": sorted(automation_ids - set(manifest.get("automations", []))),
-        "exposure_assistants": sorted(
-            seen_assistants - set(manifest.get("exposure_assistants") or [])),
     }
     return raw, unmanaged
 
@@ -630,9 +654,10 @@ def build_canonical(raw, manifest):
         files["pipelines/_preferred.json"] = render(
             {"preferred_pipeline": pipelines.get("preferred_pipeline")})
 
-    files["exposure/assistants.json"] = render(
-        normalize_exposure(raw.get("exposure"), manifest.get("exposure_assistants")))
-    return files
+    exposure_doc, observed_assistants = normalize_exposure(
+        raw.get("exposure"), manifest.get("exposure_assistants"))
+    files["exposure/assistants.json"] = render(exposure_doc)
+    return files, observed_assistants
 
 
 def raw_files(raw):
@@ -702,7 +727,19 @@ def run_export(client, manifest, out_dir, raw_dir, literals=(), probe_only=False
                               "--strict-inventory: unmanaged resources exist in Home Assistant",
                               extra)
 
-    canonical = build_canonical(raw, manifest)                  # phase 3 (memory only)
+    canonical, observed_assistants = build_canonical(raw, manifest)   # phase 3 (memory only)
+
+    # Assistant bookkeeping belongs here, after the single unwrapping boundary has run.
+    declared_assistants = set(manifest.get("exposure_assistants") or [])
+    unmanaged["exposure_assistants"] = sorted(observed_assistants - declared_assistants)
+    unexposed = sorted(declared_assistants - observed_assistants)
+    if unexposed:
+        # Success with a warning, NOT exit 5. An assistant with nothing exposed leaves no key in
+        # this response, so absence cannot distinguish "invalid name" from "valid but empty".
+        summary["exposure_warning"] = (
+            "declared assistant(s) matched zero exposed entities: %s -- this endpoint reports "
+            "exposures, not the assistant registry, so this may mean the name is wrong OR that "
+            "nothing is exposed to it" % ", ".join(unexposed))
 
     findings = scan_secrets(raw, literals)                      # phase 4 (memory only)
     for rel in sorted(canonical.keys()):
@@ -838,6 +875,8 @@ def main(argv=None):
                              "will restore it\n" % summary["orphan_detected"])
         if summary.get("version_warning"):
             sys.stdout.write("WARNING: " + summary["version_warning"] + "\n")
+        if summary.get("exposure_warning"):
+            sys.stdout.write("WARNING: " + summary["exposure_warning"] + "\n")
         sys.stdout.write("HA %s  %s\n" % (summary.get("ha_version"),
                                           "PROBE OK (nothing written)" if args.probe_only
                                           else "exported %d files" % len(summary.get("files", []))))
