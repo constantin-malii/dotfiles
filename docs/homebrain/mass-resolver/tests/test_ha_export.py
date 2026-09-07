@@ -693,6 +693,21 @@ class ManifestValidationTest(ExportCase):
             self.run_export(manifest=manifest)
         self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE)
 
+    def test_note_must_be_a_nonempty_string_at_runtime(self):
+        for bad in (None, 7, [], ""):
+            manifest = dict(MANIFEST)
+            manifest["_note"] = bad
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(manifest=manifest)
+            self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
+
+    def test_manifest_identifiers_cannot_escape_output_tree(self):
+        for bad in ("../outside", "nested/name", r"nested\name", "..", ""):
+            manifest = dict(MANIFEST)
+            manifest["scripts"] = [bad]
+            with self.assertRaises(ha_export.ExportError) as caught:
+                self.run_export(manifest=manifest)
+            self.assertEqual(caught.exception.code, ha_export.EXIT_USAGE, repr(bad))
 
 class DeclaredSingletonsTest(ExportCase):
     """Everything declared, nothing implicit. HA returns every assistant it knows about and a
@@ -986,6 +1001,20 @@ class PipelineWrapperTest(ExportCase):
     def test_non_object_wrapper_fails_closed(self):
         with self.assertRaises(ha_export.ExportError) as caught:
             self.run_export(FakeClient(pipelines=[{"id": "x"}]))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
+
+    def test_non_object_pipeline_entry_fails_closed(self):
+        pipelines = json.loads(json.dumps(PIPELINES))
+        pipelines["pipelines"] = ["not-an-object"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(pipelines=pipelines))
+        self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
+
+    def test_non_object_script_fields_fails_closed(self):
+        scripts = {"play_radio": json.loads(json.dumps(SCRIPT_PLAY_RADIO))}
+        scripts["play_radio"]["fields"] = ["not-an-object"]
+        with self.assertRaises(ha_export.ExportError) as caught:
+            self.run_export(FakeClient(scripts=scripts))
         self.assertEqual(caught.exception.code, ha_export.EXIT_SCHEMA)
 
 

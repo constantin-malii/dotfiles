@@ -124,6 +124,8 @@ def validate_manifest(manifest):
         value = manifest[key]
         if not isinstance(value, list) or any(not isinstance(v, str) for v in value):
             raise ExportError(EXIT_USAGE, "manifest %r must be a list of strings" % key)
+        for entry in value:
+            validate_identifier(key, entry)
         dupes = sorted(set(v for v in value if value.count(v) > 1))
         if dupes:
             raise ExportError(EXIT_USAGE,
@@ -138,7 +140,18 @@ def validate_manifest(manifest):
     expected = manifest.get("ha_version_expected")
     if expected is not None and not isinstance(expected, str):
         raise ExportError(EXIT_USAGE, "manifest 'ha_version_expected' must be a string")
+    if "_note" in manifest and (not isinstance(manifest["_note"], str)
+                                or not manifest["_note"].strip()):
+        raise ExportError(EXIT_USAGE, "manifest '_note' must be a non-empty string")
 
+
+def validate_identifier(kind, value):
+    if not isinstance(value, str) or not value or value in (".", ".."):
+        raise ExportError(EXIT_USAGE,
+                          "manifest %s entry is not a safe identifier: %r" % (kind, value))
+    if "/" in value or chr(92) in value or chr(0) in value or any(ord(ch) < 32 for ch in value):
+        raise ExportError(EXIT_USAGE,
+                          "manifest %s entry is not a safe identifier: %r" % (kind, value))
 
 # --------------------------------------------------------------------------- secret detection
 #
@@ -269,6 +282,10 @@ def normalize_script(object_id, payload):
     _carry(out, payload, SCRIPT_SCALARS)
     _carry(out, payload, SCRIPT_SUBTREES)          # lossless
     if "fields" in payload:
+        if not isinstance(payload["fields"], dict):
+            raise ExportError(EXIT_SCHEMA,
+                              "script[%s].fields: expected an object, got %s"
+                              % (object_id, type(payload["fields"]).__name__))
         fields = {}
         for name, spec in (payload["fields"] or {}).items():
             check_envelope("script[%s].fields[%s]" % (object_id, name), spec, FIELD_ENVELOPE)
@@ -374,8 +391,12 @@ def set_mode(path, mode):
 
 
 def write_tree(root, files, dir_mode=None, file_mode=None):
+    root_abs = os.path.abspath(root)
+    root_prefix = root_abs if root_abs.endswith(os.sep) else root_abs + os.sep
     for rel in sorted(files.keys()):
-        target = os.path.join(root, rel.replace("/", os.sep))
+        target = os.path.abspath(os.path.join(root_abs, rel.replace("/", os.sep)))
+        if target != root_abs and not os.path.normcase(target).startswith(os.path.normcase(root_prefix)):
+            raise ExportError(EXIT_USAGE, "output path escapes root: %r" % rel)
         parent = os.path.dirname(target)
         if parent and not os.path.isdir(parent):
             os.makedirs(parent)
@@ -598,6 +619,12 @@ def collect(client, manifest):
 
     raw["pipelines"] = _ws_result(client, "assist_pipeline/pipeline/list")
     check_envelope("assist_pipeline/pipeline/list", raw["pipelines"], PIPELINE_LIST_ENVELOPE)
+    pipeline_rows = (raw["pipelines"] or {}).get("pipelines") or []
+    for index, pipeline in enumerate(pipeline_rows):
+        if not isinstance(pipeline, dict):
+            raise ExportError(EXIT_SCHEMA,
+                              "assist_pipeline/pipeline/list.pipelines[%d]: expected an object, "
+                              "got %s" % (index, type(pipeline).__name__))
     raw["exposure"] = _ws_result(client, "homeassistant/expose_entity/list")
 
     # Pipelines are fetched as a list rather than addressed by id, so a manifest id that does not
@@ -654,7 +681,11 @@ def build_canonical(raw, manifest):
     # Always filter against the DECLARED set. An empty list means "export no pipelines"; it
     # must never fall through to exporting every pipeline HA happens to have.
     wanted = set(manifest.get("pipelines") or [])
-    for pipeline in (pipelines.get("pipelines") or []):
+    for index, pipeline in enumerate(pipelines.get("pipelines") or []):
+        if not isinstance(pipeline, dict):
+            raise ExportError(EXIT_SCHEMA,
+                              "pipeline[%d]: expected an object, got %s"
+                              % (index, type(pipeline).__name__))
         if pipeline.get("id") not in wanted:
             continue
         files["pipelines/%s.json" % pipeline.get("id")] = render(normalize_pipeline(pipeline))
