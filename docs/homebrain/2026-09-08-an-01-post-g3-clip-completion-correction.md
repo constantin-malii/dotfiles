@@ -141,6 +141,91 @@ Assistant's history.
 **G4a and G4b remain blocked** until the mute window tracks the announcement. Sentence triggers would
 expose this window to the household.
 
+## Result of the read-only spike — appended 2026-09-08
+
+Answers the *"Open, and what settles it"* question above. That section is left as written; this is the
+result appended beneath it.
+
+**Method: read-only, and nothing was played.** Home Assistant's recorder had already captured the
+`media_player.ceiling_speakers` attributes while G3's own clips were playing, so the question was
+answered from history rather than by generating new audio. HA 2026.6.4, recorder enabled, rows
+returned for both windows.
+
+| Clip | Wrapper | `media_duration` | `media_position` | `media_position_updated_at` | Reaches `idle`? |
+|---|---|---|---|---|---|
+| Piper speech, step 3 (16:50) | `builtin://radio/…tts_proxy…` | **None** | **None** | **None** | **no** |
+| Piper speech, step 4 (17:10) | `builtin://radio/…tts_proxy…` | **None** | **None** | **None** | **no** |
+| chime, step 4 (17:10) | `builtin://track/…timer_chime.wav` | **4** | None | None | **yes**, at 23:10:24 |
+| live radio stream, for contrast | `library://radio/4` | None | **1101**, updating | present | n/a |
+
+**Option A is ruled out.** Exiting the finish poll on `media_position >= media_duration` is
+impossible for the clip that matters: *both* fields are `None`, across three samples in two separate
+turns.
+
+Two facts from the same data matter more than the negative result:
+
+1. **The wrapper decides everything.** A `track`-wrapped clip reports a duration **and** reaches
+   `idle`; a `radio`-wrapped one does neither. Same player, same turn, about seven seconds apart.
+   This is the mechanism behind this correction's central claim, now measured directly.
+2. **The TTS clip is the worst case.** A genuine radio stream at least reports a moving
+   `media_position`; the radio-wrapped TTS clip reports no duration, no position and no end.
+
+*Confidence:* recorder rows are state-change rows, so the absence of intermediate rows across the
+45 s is itself consistent with nothing updating. A live poll during a clip would be belt-and-braces
+confirmation, but it requires audio.
+
+## Option D — ask MA for a `track` (recommended next spike)
+
+A second read-only spike read HA's service registry:
+
+```
+service: music_assistant.play_media
+    media_id     required=True
+    media_type   required=False  options=['artist','album','audiobook','folder',
+                                          'playlist','podcast','track','radio']
+    enqueue      required=False  options=['play','replace','next','replace_next','add']
+    radio_mode   required=False
+```
+
+**The resolver does not pass `media_type`.** `_play_clip_and_wait` sends only
+`{"entity_id": zone, "media_id": norm_uri}`, so MA infers the type — and infers `radio` for a
+`tts_proxy` URL while inferring `track` for the chime's `/media/local/…wav`.
+
+**Option D: pass `media_type: "track"` for the speech clip.** If MA then wraps it as a track, the
+clip reaches `idle` and §8.3's existing ended-twice detection works **unchanged** — no new detection
+logic, no duration estimates, no timing guesses — and the mute window tracks the speech, which is
+what requirement 7 asks for. It addresses the cause identified above rather than the symptom.
+
+**Not yet verified, and the gap is stated plainly.** MA chose `track` for the chime unprompted;
+whether an *explicit* `media_type: track` makes MA treat a `tts_proxy` URL as a finite track is a
+strong inference from the table above, **not a measurement**. It needs **one attended, audible
+spike** — a single `say_text` with the parameter added, watching whether the state reaches `idle` and
+a duration appears. That cannot be done read-only, and it is **not authorised** as of this append.
+Failure costs nothing: MA would ignore or reject the parameter and behaviour would be unchanged.
+
+## Option C — retained as the fallback
+
+If D fails, estimate the clip's length from the message's character count using a measured
+chars-per-second rate for `tts.piper`, and bound the finish poll by
+`min(estimate × slack, budget)`. It needs no new signal and degrades gracefully, but it is
+**open-loop**: a mis-estimate either truncates the speech or waits too long, and the rate varies with
+punctuation, language and voice — this house mixes Russian station names with English sentences. It
+treats the symptom, so it is the fallback rather than the choice.
+
+Tuning the finish budget or the blank-cid grace remains a **stopgap only**, for the reason already
+recorded: the budget cannot go below the longest legitimate clip, so any value that helps a
+seventeen-character message risks truncating a three-hundred-character one.
+
+## Unconditional, whichever remedy is chosen
+
+The budget exit must log at warning with the clip fingerprint and the elapsed time — the second
+defect recorded above, independent of how completion is detected. While there, the turn-level `clip`
+fingerprint is computed from the **raw** URI while the per-clip one is computed from the
+**normalised** URI, so a single turn logs two different ids and defeats the correlation `_clip_id`
+exists for. Cosmetic, one line, and it belongs in the same commit.
+
+**G4a and G4b remain blocked.**
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
