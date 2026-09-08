@@ -80,7 +80,7 @@ All paths relative to repo root.
 | `docs/homebrain/mass-resolver/tests/test_haconn.py` | `get_entity_state` timeout, `resolve_media_source`. | Tasks 7, 8 |
 | `docs/homebrain/mass-resolver/tests/test_config.py` | `AnnounceTunablesTest`. | Task 9 |
 | `docs/homebrain/mass-resolver/tests/test_interaction.py` | Golden regressions first, then every announce behaviour. | Tasks 5, 10–19 |
-| `docs/homebrain/CHANGELOG.md` | Discovery results (Checkpoint A), deploy record (G3), live record (G4a/G4b). | Tasks 4a, 22, 26 |
+| `docs/homebrain/CHANGELOG.md` | Discovery results (Checkpoint A), deploy record (G3), live record (G4a/G4b), the 2026-09-05 chime correction. | Tasks 4a, 22, 26, **27 (steps 7a/7b — the Checkpoint A entry is written here, not at 4a)** |
 | `docs/homebrain/BACKLOG.md` | Lane claim/release each gate; the `AN-01` row; the dated `S1b`–`S4` reconciliation note. | Tasks 4a, 27 |
 | `docs/homebrain/ONBOARDING.md` | §2/§4/§5/§6 updates. | Task 27 |
 | `docs/homebrain/assistant-capabilities.md` | "deliberately not LLM-exposed" note. | Task 27 |
@@ -3801,7 +3801,9 @@ git push -u origin homebrain/an-01-announce
   `AN-01: interaction mode announce (phone Assist -> ceiling)`.
 
 - [ ] **Step 3: PR body — the review checklist.** State plainly:
-  - Design commit `259c730`, gates G1/G1b complete (link the Checkpoint A `CHANGELOG.md` entry).
+  - Design commit `259c730`, gates G1/G1b complete. **Cite this plan's Task 4a table** as the
+    Checkpoint A record — there is no `CHANGELOG.md` entry to link at G2, because Task 27 step 7b
+    writes it at G5. Do not promise a link that does not resolve.
   - `say`/`say_text` public contract and **success-path** call sequences unchanged, proven by
     `GoldenSequenceTest`; the **one** intended failure-path change is Task 17's ambiguous-play
     replay (§8.3a), which renames and rewrites `ReplyBumpTest`'s un-pause test — the only existing
@@ -4232,6 +4234,8 @@ it would be a second clip fighting the announcement it confirms.
 - Modify: `docs/homebrain/BACKLOG.md` (`:185` reconciliation note, the `AN-01` row, `:306`)
 - Modify: `docs/homebrain/assistant-capabilities.md`
 - Modify: `docs/homebrain/runbooks/quick-connect-and-health-check.md`
+- Modify: `docs/homebrain/CHANGELOG.md` (the missing Checkpoint A entry at step 7b, and the
+  2026-09-05 chime correction at step 7a)
 - Modify: `docs/homebrain/2026-09-06-phone-assist-ceiling-announcement-design.md` (status header,
   and the §8.3a addendum from Task 17's deviation)
 
@@ -4277,6 +4281,90 @@ it would be a second clip fighting the announcement it confirms.
   §3.6 precedent for `BACKLOG.md` applies here too. Also correct §3.2 and §12 of the design doc,
   which quote the `./` form.
 
+- [ ] **Step 7b: `CHANGELOG.md` — add the missing AN-01 Checkpoint A discovery entry.**
+
+  **Why this step exists.** The file-ownership table above assigns the Checkpoint A discovery record
+  to `CHANGELOG.md` (Task 4a). It was never written there: the discoveries went into this plan's own
+  Task 4a table, and `CHANGELOG.md` carries **no AN-01 entry at all**. So the operational log — the
+  thing read first when something breaks months later — has no record that G1 ran, what it measured,
+  or that a two-day blocker was diagnosed. The plan is not that log; it is a build document that
+  stops being read once the work ships.
+
+  **Additive and history-preserving.** Add **one new entry** and change **no existing one**. Do not
+  reword, re-date, merge, reorder or delete any existing entry, including the 2026-09-05 chime entry
+  that step 7a corrects: that correction is itself an appended note, per the §3.6 precedent for
+  `BACKLOG.md`. "Additive" is about not touching what is already written, not about position.
+
+  **Date it 2026-09-07** — the day the discoveries were measured, not the day this step runs. An
+  operational log records when things happened.
+
+  **Placement: in date order, which is not the top of the file.** The log is reverse-chronological
+  and `main` already carries several **2026-09-07** entries (the INF-09 baseline work and the
+  trigger-key migration). Insert among them so the file stays reverse-chronological; do not assume
+  the newest entry is 2026-09-06, and do not move an existing entry to make room. Step 7c checks the
+  ordering rather than trusting it.
+
+  **Leave the existing passing mentions of AN-01 alone.** `main`'s 2026-09-07 entries already refer
+  to AN-01 in passing — the lane being released, and `automation.voice_ceiling_speakers` being the
+  target of Task 26. Those are another change's record of its own context. This entry is the
+  discovery record; it does not absorb, correct or duplicate them.
+
+  **What the entry must contain**, transcribed from the Task 4a table rather than re-derived:
+
+  - **D1** the mic-mute entity, settled at AN-2, and that `config.py`'s default stays `""` so a
+    machine with no config refuses rather than broadcasting with a live microphone.
+  - **D2** the measured mute read-back latency, and that HA answers the write in about 1 ms
+    **before** the state changes — so the service response carries no information and only the state
+    read proves anything.
+  - **D3/D4/D5** the chime: that it played on the ceiling with the operator listening, that MA
+    fetched the signed URL, and that the query string is **preserved** in the echoed
+    `media_content_id` — which withdrew §8.2's path-only match key.
+  - **D6** recorded as measured, including that the first run's "no audible feedback" was corrected
+    after the reSpeaker's own output was verified. Both runs stay in the record.
+  - **D8**, **D12** (`trigger.satellite_id`, with the chosen condition), **D13a/D13b** (the
+    inference and that Task 25 step 5 is its final validation), **D14** (HA does **not** report `on`
+    for an unreachable device, so the read-back is meaningful proof).
+  - **The `./` root cause**, in one sentence: a `./` segment makes HA sign the un-normalised path
+    while returning a normalised URL, so the signature cannot validate. This is the two-day blocker
+    from 2026-09-05 to 2026-09-07, and step 7a's correction to the 2026-09-05 entry points here.
+  - A pointer to this plan's Task 4a table as the detailed record, so the two do not drift into two
+    competing accounts.
+
+  **No secrets.** Write `authSig=REDACTED`. No token value, no signed URL, no bearer header, and no
+  `device_id` beyond the truncated forms already in the Task 4a table.
+
+- [ ] **Step 7c: Check step 7b before moving on.**
+
+```bash
+cd /d/repos/dotfiles
+# 1. Additive only: the deletions column must read 0, and no existing line may change.
+git diff --numstat docs/homebrain/CHANGELOG.md
+git diff docs/homebrain/CHANGELOG.md | grep '^-[^-]' \
+  && echo "STOP: an existing CHANGELOG line was modified or removed" || echo "OK: additive only"
+# 2. The entry exists, is dated 2026-09-07, and cites the plan.
+grep -n "^## 2026-09-07 .*AN-01\|^## 2026-09-07 .*Checkpoint A" docs/homebrain/CHANGELOG.md
+grep -c "an-01-phone-assist-ceiling-announcement-implementation-plan" docs/homebrain/CHANGELOG.md
+# 3. The NEW entry is in date order: above every entry dated earlier than 2026-09-07.
+#    Scoped to the new entry on purpose. A whole-file monotonic check is NOT usable here -- the log
+#    already carries one ordering anomaly from July (2026-07-01 sits below 2026-06-28), which is
+#    pre-existing, unrelated, and must be left exactly as it is. Check 1 already proves no existing
+#    heading moved, since a reorder shows up as deleted lines.
+NEW=$(grep -n "^## 2026-09-07 .*Checkpoint A" docs/homebrain/CHANGELOG.md | head -1 | cut -d: -f1)
+OLDER=$(awk '/^## 20/ {if ($2 < "2026-09-07") {print NR; exit}}' docs/homebrain/CHANGELOG.md)
+if [ -n "$NEW" ] && [ -n "$OLDER" ] && [ "$NEW" -lt "$OLDER" ]; then
+  echo "OK: placed in date order (entry at $NEW, first older entry at $OLDER)"
+else
+  echo "STOP: entry missing, or placed below an older entry"
+fi
+# 4. No credential material in what was added.
+git diff docs/homebrain/CHANGELOG.md | grep -nE '^\+' \
+  | grep -iE 'authsig=[A-Za-z0-9]|bearer [A-Za-z0-9]{12,}|\.ha_token' \
+  && echo "STOP: credential material in the entry" || echo "OK: no credential material"
+```
+
+Expected: `OK: additive only`, the heading found, a non-zero plan citation count,
+`OK: placed in date order`, and `OK: no credential material`.
+
 - [ ] **Step 8a: The design doc — correct the §5 step 3 normalisation claim.** It states HA
   normalises trigger text by lower-casing and stripping punctuation, so the resolver receives
   `dinner is ready` rather than `Dinner is ready.` SPIKE-AN-3 contradicted that for
@@ -4292,13 +4380,26 @@ it would be a second clip fighting the announcement it confirms.
 
 - [ ] **Step 9: Commit docs separately from code**, per `CLAUDE.md`.
 
+`CHANGELOG.md` is in this list because steps 7a and 7b both write to it. It was missing from an
+earlier draft, which would have left both the Checkpoint A entry and the chime correction
+uncommitted while the commit still claimed the reconciliation was done.
+
 ```bash
 git add docs/homebrain/ONBOARDING.md docs/homebrain/BACKLOG.md \
         docs/homebrain/assistant-capabilities.md \
         docs/homebrain/runbooks/quick-connect-and-health-check.md \
+        docs/homebrain/CHANGELOG.md \
         docs/homebrain/2026-09-06-phone-assist-ceiling-announcement-design.md
 git commit -m "docs(homebrain): reconcile AN-01 announcement into onboarding, backlog and runbook"
 ```
+
+Then confirm nothing was left behind:
+
+```bash
+git status --porcelain docs/homebrain/
+```
+
+Expected: empty. A modified-but-unstaged `CHANGELOG.md` here means step 9 missed it again.
 
 ---
 
