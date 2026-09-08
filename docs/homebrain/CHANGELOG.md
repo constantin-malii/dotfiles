@@ -3,6 +3,68 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — `play_radio` routes through the resolver; the other half of drift detection is now tested
+
+> The bare "play the radio" branch stopped bypassing the resolver. It was the last hardcoded station
+> in the automation layer, and fixing it doubled as the first real test of *change something in HA,
+> re-export, and see exactly that change* — the half of INF-09 that had never been exercised.
+
+- **The defect was routing, not a wrong default.** Every other branch of
+  `automation.voice_ceiling_speakers` calls the resolver; `play_radio` alone called
+  `music_assistant.play_media` directly with a literal `"Radio Paradise"` and an explicit
+  `media_player.ceiling_speakers` target. Meanwhile `radio.py:130-133` carries a comment written for
+  exactly this case — *"A bare 'play radio' has no station: fall back to the configured default"* —
+  and it was unreachable from the automation. Swapping the literal to `101 SMOOTH JAZZ` would have
+  reset the drift, not removed it, so the branch now calls `script.play_radio` with no fields and
+  lets `default_station` answer. The speaker is unchanged: the resolver takes the zone from
+  `ceiling_entity`, which is the same entity the explicit target named.
+- **Exporter redeployed first.** The host was still on `8d1d030a…` (commit `8f6a003`) while the repo
+  had moved to `21ee0ab0…` (commit `e1a155f`, the `/api/states` row guard merged in PR #44). Running
+  a drift test on a superseded build would have proved nothing about the build under review. Backup
+  `~/mass-resolver/.bak/20260907-224131/tools/ha_export.py` (digest verified equal to the file it
+  replaced), deploy, digests compared with `tr -d ''` on both sides, `py_compile` OK on Python
+  3.5.2. **The `/api/states` guard was previously untested against live data; it accepts the
+  instance.** The hardened build also reproduced the baseline byte-for-byte, so the guard changed no
+  output.
+- **Gated on a clean pre-change export.** `--strict-inventory`, exit 0, 37 files, **zero diff against
+  the committed blobs**. Without that, a post-change diff cannot be attributed to the change.
+- **Result: exactly one canonical file changed**, `automations/voice_ceiling_speakers.json`
+  (`4b52bcf9…` → `8fda1446…`, 347 → 340 lines). 36 of 37 byte-identical. The drift-detection premise
+  holds in both directions now.
+
+### Home Assistant rewrites the schema on every UI save
+
+- **The one intended edit produced nine hunks, not one.** Eight of them are
+  `"platform": "conversation"` → `"trigger": "conversation"` on every conversation trigger in the
+  file. Nothing typed by hand touched those lines: saving an automation through the UI normalises the
+  whole config to the current schema, and HA renamed the trigger key some versions back.
+- **Audited rather than assumed.** The before-file was transformed programmatically by only those two
+  changes (the action replacement, and `platform`→`trigger` restricted to values equal to
+  `"conversation"`) and compared to the exported after-file: **exact equality**. 1 replacement, 8
+  renames, 0 `platform` keys left, 8 `trigger` keys present. The diff provably contains nothing else.
+  The byte arithmetic agrees independently — the prediction for the intended change alone was 11,622
+  bytes, the actual file is 11,614, and 8 bytes is precisely 8 renames of an 8-character key to a
+  7-character one.
+- **Behaviourally inert, but scope-relevant.** `trigger:` is the modern spelling HA itself emitted for
+  2026.6.4; sentence triggers, IDs and ordering are unchanged. Accepted deliberately: the baseline
+  must match what the instance actually contains.
+- **The other six automations were deliberately NOT migrated.** They still carry **8 legacy
+  `platform:` occurrences** between them (`1784146586` 2, `ma_auto_reload` 2, and one each in
+  `1784200731`, `lidarr_ma_sync`, `ma_health_probe`, `satellite_timer_announce`). Consequence worth
+  remembering: **a UI save on any managed automation is never a one-hunk diff** until those are
+  migrated. That is now a known property of the workflow rather than a surprise mid-review.
+
+### Live verification
+
+- Spoken *"play radio"*. `req=c4dc0bc8`: `radio mode=play target='101 SMOOTH JAZZ' candidates=1` →
+  `RADIO PLAY ACCEPTED by MA … uri=library://radio/2 source=favorite` → **`RADIO CONFIRM … is
+  playing`** eight seconds later. Confirmed playing, not merely accepted.
+- Two guards fired correctly and are visible in the same trace: the duck was skipped
+  (*"this turn started library://radio/2"*) and the spoken reply suppressed (*"the reply would replace
+  it"*), so the music starts without a confirmation talking over it.
+- Resolver log lines appear for this phrase **for the first time** — the old branch never reached the
+  resolver at all, which is the clearest evidence the routing changed.
+
 ## 2026-09-07 — INF-09 idempotency PROVEN: a fresh re-export is byte-identical to the committed baseline
 
 > The hardened exporter deployed and re-exported to fresh paths. **Zero diff against the committed
