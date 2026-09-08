@@ -128,6 +128,7 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - ✅ **Local music + radio via the resolver (synchronous, F1-R)** — `script.play_music` (local library), `script.play_radio`, `script.find_stations`; ChatGPT relays the real `chat_text`. See the **Resolver / Inc 0–1 / F1-R current state** section.
 - ✅ **Phone voice control (Phase 2)** — Companion app → Whisper STT → `automation.voice_ceiling_speakers` → ceiling. **Text replies only** (Piper TTS disabled in pipeline). Generic spoken-number volume parsing.
 - ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; runs the exposed resolver media tools (`play_music`/`play_radio`/`find_stations`) and the ceiling control scripts, and reads `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
+- ✅ **HA app-layer state is version-controlled** — managed scripts, automations, Assist pipelines, satellite selects, exposure, and metadata are captured under [`ha/`](ha/). Changes are exported and reviewed through the managed-state runbook in §14.
 - ⚠️ **Ceiling TTS announcements via `tts.speak` DO NOT WORK** (corrected 2026-09-05). `tts.speak` → MA
   `play_announcement` fails on this player: `Ceiling: Announce: Error executing script ... Failed to
   stream audio`. MA's docs give the precondition — announcements need correct **state + elapsed-time**
@@ -341,6 +342,8 @@ Reliable playback of **track, artist, album, playlist, genre** from YouTube Musi
   - **Resolver / Inc / F1-R:** `2026-06-28-F1-synchronous-command-result-design.md` (F1 design), `2026-06-28-F1-R-chatgpt-tool-result-relay-design.md` (F1-R addendum), `plans/2026-06-28-F1-R-music-remigration.md` (music migration), `plans/2026-06-29-F1-R-radio-find-migration.md` (radio/find migration), `assistant-capabilities.md`, `local-music-architecture.md`, `CHANGELOG.md`.
   - `haos-vm-deployment.md`, `homebrain-architecture.md`, `migration-inventory.md`, **this `ONBOARDING.md`**.
   - **Runbooks:** `runbooks/quick-connect-and-health-check.md` — SSH connect + read-only stack health check + "ChatGPT can't play" triage.
+    `runbooks/ha-managed-state-export.md` — bootstrap, probe, export, diff review, secret handling, and recovery for the version-controlled HA app-layer surface.
+  - **Managed HA state:** `ha/` — canonical JSON baseline; `mass-resolver/tools/ha_export.py` — stdlib exporter; `ha/MANIFEST.json` — explicit managed-resource inventory.
 - **Agent memory (running project log, latest status):** `~/.claude/projects/C--Users-ConstantinMalii/memory/homebrain-ha-vm-project.md` — detailed chronology + every finding.
 - **Scratchpad (test outputs, config snapshots):** session scratchpad dir; e.g. `ma_cfg_before_*.json`, `phase3_exposure_snapshot_*.json`.
 

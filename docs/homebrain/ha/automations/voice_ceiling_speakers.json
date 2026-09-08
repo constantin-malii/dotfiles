@@ -1,0 +1,340 @@
+{
+  "actions": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='play_favorite' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "script.play_radio",
+              "data": {
+                "station": "{{ trigger.sentence }}"
+              },
+              "response_variable": "r"
+            },
+            {
+              "set_conversation_response": "{{ r.chat_text if (r is defined and r.chat_text is defined) else 'Playing.' }}"
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='play_radio' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "set_conversation_response": "Playing radio on the ceiling speakers."
+            },
+            {
+              "action": "script.play_radio"
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='pause' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "pause"
+                }
+              }
+            },
+            {
+              "set_conversation_response": "Paused."
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='resume' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "set_conversation_response": "Resuming."
+            },
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "resume"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='stop' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "pause"
+                }
+              }
+            },
+            {
+              "set_conversation_response": "Stopped."
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='vol_set' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "variables": {
+                "dir": "{% set raw = trigger.slots.percent | default('') | string | lower %}{% if 'down' in raw %}down{% elif 'up' in raw %}up{% else %}set{% endif %}",
+                "num": "{% set raw = trigger.slots.percent | default('') | string | lower %}{% set d = raw | regex_findall('[0-9]+') %}{% if d %}{{ d[0]|int }}{% else %}{% set r = raw|replace('percent','')|replace('up','')|replace('down','')|replace('to','')|replace('-',' ')|trim %}{% set o={'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90,'hundred':100} %}{% set ns=namespace(v=0,fl=false) %}{% for w in r.split() %}{% if w in o %}{% set ns.v=ns.v+o[w] %}{% set ns.fl=true %}{% endif %}{% endfor %}{{ ns.v if ns.fl else 0 }}{% endif %}"
+              }
+            },
+            {
+              "set_conversation_response": "{% if dir=='down' %}Turning it down.{% elif dir=='up' %}Turning it up.{% else %}Setting the volume.{% endif %}"
+            },
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "{% if dir=='up' %}volume_up{% elif dir=='down' %}volume_down{% else %}set_volume{% endif %}",
+                  "step": "{{ num | int(10) }}",
+                  "volume": "{{ num | int(0) }}"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='vol_up' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "variables": {
+                "step": "{% set raw = trigger.slots.percent | default('') | string | lower %}{% set r = raw | replace('percent','') | replace('%','') | replace('by','') | trim %}{% if r.isdigit() %}{{ r|int }}{% else %}{% set o={'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90,'hundred':100} %}{% set ns=namespace(v=0,f=false) %}{% for w in r.split() %}{% if w in o %}{% set ns.v=ns.v+o[w] %}{% set ns.f=true %}{% endif %}{% endfor %}{{ ns.v if ns.f else 10 }}{% endif %}"
+              }
+            },
+            {
+              "set_conversation_response": "Turning it up."
+            },
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "volume_up",
+                  "step": "{{ step | int(10) }}"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "template",
+              "value_template": "{{ trigger.id=='vol_down' }}"
+            }
+          ],
+          "sequence": [
+            {
+              "variables": {
+                "step": "{% set raw = trigger.slots.percent | default('') | string | lower %}{% set r = raw | replace('percent','') | replace('%','') | replace('by','') | trim %}{% if r.isdigit() %}{{ r|int }}{% else %}{% set o={'zero':0,'one':1,'two':2,'three':3,'four':4,'five':5,'six':6,'seven':7,'eight':8,'nine':9,'ten':10,'eleven':11,'twelve':12,'thirteen':13,'fourteen':14,'fifteen':15,'sixteen':16,'seventeen':17,'eighteen':18,'nineteen':19,'twenty':20,'thirty':30,'forty':40,'fifty':50,'sixty':60,'seventy':70,'eighty':80,'ninety':90,'hundred':100} %}{% set ns=namespace(v=0,f=false) %}{% for w in r.split() %}{% if w in o %}{% set ns.v=ns.v+o[w] %}{% set ns.f=true %}{% endif %}{% endfor %}{{ ns.v if ns.f else 10 }}{% endif %}"
+              }
+            },
+            {
+              "set_conversation_response": "Turning it down."
+            },
+            {
+              "action": "rest_command.resolver_command",
+              "continue_on_error": true,
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "volume_down",
+                  "step": "{{ step | int(10) }}"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alias": "Voice — Ceiling Speakers",
+  "automation_id": "voice_ceiling_speakers",
+  "conditions": [],
+  "description": "Phase 2 NL voice control (generic numeric volume).",
+  "id": "voice_ceiling_speakers",
+  "mode": "queued",
+  "triggers": [
+    {
+      "command": [
+        "play [the] mega hits",
+        "put on [the] mega hits",
+        "play [the] native roads",
+        "put on [the] native roads",
+        "play [the] russian songs",
+        "put on [the] russian songs",
+        "play [the] russian radio",
+        "put on [the] russian radio",
+        "play [the] retro fm",
+        "put on [the] retro fm",
+        "play [the] smooth jazz",
+        "put on [the] smooth jazz",
+        "play [the] cafe del mar",
+        "put on [the] cafe del mar",
+        "play [the] classic fm",
+        "put on [the] classic fm",
+        "play [the] deep house",
+        "put on [the] deep house",
+        "play [the] europa plus",
+        "put on [the] europa plus",
+        "play [the] hit fm",
+        "put on [the] hit fm",
+        "play [the] kiss fm",
+        "put on [the] kiss fm",
+        "play [the] lux fm",
+        "put on [the] lux fm",
+        "play [the] nashe nine",
+        "put on [the] nashe nine",
+        "play [the] nashe thirteen",
+        "put on [the] nashe thirteen",
+        "play [the] radio romania",
+        "put on [the] radio romania",
+        "play [the] calm radio",
+        "put on [the] calm radio"
+      ],
+      "id": "play_favorite",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "play [the] radio",
+        "play radio [on [the] ceiling speakers]"
+      ],
+      "id": "play_radio",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "pause",
+        "pause [the] music"
+      ],
+      "id": "pause",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "play music",
+        "resume",
+        "resume [the] music",
+        "continue",
+        "continue playing",
+        "continue [the] music",
+        "start playing again",
+        "unpause"
+      ],
+      "id": "resume",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "stop",
+        "stop [the] music"
+      ],
+      "id": "stop",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "turn [the] (music|volume|it) up",
+        "make it louder",
+        "volume up",
+        "louder",
+        "volume up {percent} percent",
+        "volume up by {percent} percent",
+        "turn [the] (music|volume|it) up by {percent} percent",
+        "raise [the] volume by {percent} percent",
+        "increase [the] volume by {percent} percent",
+        "louder by {percent} percent",
+        "raise [the] volume",
+        "increase [the] volume",
+        "turn up [the] (volume|music)",
+        "put [the] (volume|music) up"
+      ],
+      "id": "vol_up",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "turn [the] (music|volume|it) down",
+        "make it quieter",
+        "volume down",
+        "quieter",
+        "volume down {percent} percent",
+        "volume down by {percent} percent",
+        "turn [the] (music|volume|it) down by {percent} percent",
+        "lower [the] volume by {percent} percent",
+        "decrease [the] volume by {percent} percent",
+        "quieter by {percent} percent",
+        "lower [the] volume",
+        "decrease [the] volume",
+        "reduce [the] volume",
+        "turn down [the] (volume|music)",
+        "put [the] (volume|music) down"
+      ],
+      "id": "vol_down",
+      "trigger": "conversation"
+    },
+    {
+      "command": [
+        "volume {percent} percent",
+        "volume to {percent} [percent]",
+        "set [the] volume to {percent} percent",
+        "set [the] volume to {percent}",
+        "set [the] ceiling speakers to {percent} [percent]"
+      ],
+      "id": "vol_set",
+      "trigger": "conversation"
+    }
+  ]
+}

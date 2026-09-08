@@ -1,0 +1,71 @@
+{
+  "actions": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "duck"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "rest_command.resolver_command",
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "duck"
+                }
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "restore"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "rest_command.resolver_command",
+              "data": {
+                "intent": "interaction",
+                "params": {
+                  "mode": "restore"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alias": "S1a - Satellite Ceiling Duck/Restore",
+  "automation_id": "1784146586",
+  "conditions": [],
+  "description": "Ducks the ceiling media zone while the reSpeaker Living Room satellite is in a conversation; restores when idle. Duck/restore are resolver-owned (AU-02/AU-03); this automation only triggers them.",
+  "id": "1784146586",
+  "max": 10,
+  "mode": "queued",
+  "triggers": [
+    {
+      "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
+      "id": "duck",
+      "to": [
+        "listening",
+        "processing",
+        "responding"
+      ],
+      "trigger": "state"
+    },
+    {
+      "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
+      "id": "restore",
+      "to": "idle",
+      "trigger": "state"
+    }
+  ]
+}

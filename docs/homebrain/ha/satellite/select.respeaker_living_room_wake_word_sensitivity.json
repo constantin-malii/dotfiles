@@ -1,0 +1,10 @@
+{
+  "entity_id": "select.respeaker_living_room_wake_word_sensitivity",
+  "friendly_name": "reSpeaker Living Room Wake word sensitivity",
+  "options": [
+    "Moderately sensitive",
+    "Slightly sensitive",
+    "Very sensitive"
+  ],
+  "state": "Slightly sensitive"
+}

@@ -1,0 +1,10 @@
+{
+  "entity_id": "select.respeaker_living_room_finished_speaking_detection",
+  "friendly_name": "reSpeaker Living Room Finished speaking detection",
+  "options": [
+    "aggressive",
+    "default",
+    "relaxed"
+  ],
+  "state": "default"
+}

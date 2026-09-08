@@ -1,0 +1,28 @@
+{
+  "alias": "Ceiling: Media Status (resolver)",
+  "description": "Reports what is currently playing on the ceiling speakers — the song or radio station and the current volume — or that nothing is playing. Read-only. Use when the user asks what's playing, what song or station is on, whether anything is playing, or the current/how-loud volume.",
+  "mode": "single",
+  "object_id": "media_status",
+  "sequence": [
+    {
+      "action": "rest_command.resolver_command",
+      "continue_on_error": true,
+      "data": {
+        "intent": "status",
+        "params": {}
+      },
+      "response_variable": "r"
+    },
+    {
+      "variables": {
+        "resp": {
+          "chat_text": "{{ r.content.chat_text if (r is defined and r.content is defined and r.content.chat_text is defined) else 'Sorry, I could not check what is playing.' }}"
+        }
+      }
+    },
+    {
+      "response_variable": "resp",
+      "stop": "done"
+    }
+  ]
+}

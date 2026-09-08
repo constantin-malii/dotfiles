@@ -1,0 +1,15 @@
+{
+  "conversation_engine": "conversation.openai_conversation_2",
+  "conversation_language": "en",
+  "id": "01kz45tkgbnsn57gpyj25vyfd0",
+  "language": "en",
+  "name": "Living Room Knowledge",
+  "prefer_local_intents": false,
+  "stt_engine": "stt.faster_whisper",
+  "stt_language": "en",
+  "tts_engine": "tts.piper",
+  "tts_language": "en_US",
+  "tts_voice": "en_US-amy-low",
+  "wake_word_entity": null,
+  "wake_word_id": null
+}

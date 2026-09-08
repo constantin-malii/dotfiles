@@ -3,6 +3,549 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — normalise the legacy `platform:` trigger key across the remaining six automations
+
+> Eight `"platform"` → `"trigger"` renames in six managed automations. **No behaviour change of any
+> kind** — the point is that the *next* automation edit produces a readable diff.
+
+- **Live gate.** Claimed for this migration on `homebrain/automation-trigger-key-migration` after the
+  AN-01 owner confirmed G1 complete and released it; released again on merge. Recorded here rather
+  than in `BACKLOG.md` by deliberate choice. The work is disjoint from AN-01: its only Home Assistant
+  write target is `automation.voice_ceiling_speakers`, which this change does **not** touch.
+- **Why now.** PR #46 established that saving *any* automation through the HA UI rewrites the whole
+  config to the current schema, so a one-line intended edit arrived with eight unrequested rename
+  hunks attached. Every remaining managed automation carried the same latent cost. Doing them
+  deliberately, in isolation, means the renames are reviewed once on their own terms instead of
+  ambushing an unrelated review later.
+- **Method: save-only.** Each automation was opened in the UI's YAML editor and saved with **no text
+  edited**. The save alone triggers the normalisation; that *is* the migration.
+- **Scope, and one deliberate exclusion.** `automation.voice_ceiling_speakers` was normalised in
+  PR #46 and is untouched here — it is the target of AN-01's Task 26 and the subject of its G4b
+  rollback, so it stays out of any unrelated change.
+
+| Automation | Renames | Trigger platform values |
+|---|---|---|
+| `1784146586` (S1a - Satellite Ceiling Duck/Restore) | 2 | `state`, `state` |
+| `ma_auto_reload` (MA: auto-reload after restart) | 2 | `homeassistant`, `state` |
+| `1784200731` (S1b-2 - Satellite Reply on Ceiling) | 1 | `event` |
+| `lidarr_ma_sync` (Lidarr import -> MA sync) | 1 | `webhook` |
+| `ma_health_probe` (MA: health probe auto-reload) | 1 | `time_pattern` |
+| `satellite_timer_announce` (Satellite timer - announce) | 1 | `state` |
+
+- **These are not all `conversation` triggers.** PR #46's audit restricted the rename to values equal
+  to `"conversation"`; that rule would have been wrong here. The eight span five platform values, so
+  the audit had to accept any value and separately assert the value was **preserved**.
+- **Twenty-two changed lines, not sixteen.** Canonical output sorts keys and `trigger` sorts after
+  `to`, where `platform` sorted before it. In `1784146586` (both triggers) and
+  `satellite_timer_announce` the key therefore moves position and the adjacent line's trailing comma
+  moves with it. Predicted in advance precisely so it would not read as an anomaly in review.
+
+### Verification: the expected output was computed before Home Assistant was touched
+
+- **Byte-exact prediction, offline.** The exporter's `render()` (`sort_keys=True`,
+  `ensure_ascii=False`, `indent=2`, trailing newline) was replicated locally and applied to the
+  committed files with the rename as the only transform, producing six predicted digests **before any
+  UI save**. All six exports matched them exactly. A prediction made before the change cannot be
+  retro-fitted to agree with a mistake — this is the guard that a fixture written after the fact does
+  not give.
+- **Pre-change gate.** `--strict-inventory`, exit 0, 37 files, zero diff against `main` at `d520da7`.
+- **Post-change audit, four independent checks.** (A) exactly 6 of 37 files differ; (B) each is one of
+  the six intended; (C) each matches its offline-predicted digest; (D) transforming each committed
+  file by the rename alone reproduces the exported file exactly, with 0 `platform` keys left. 8/8
+  renames, 0 failures.
+- **Line counts unchanged in all six; −8 bytes total**, one per rename (`"platform"` is 8 characters,
+  `"trigger"` is 7).
+- **Checked for other legacy keys and found none** — all six already used the modern `action:`,
+  `triggers:` and `actions:` spellings, so `platform:` was the only thing HA rewrote. The `webhook`
+  trigger in `lidarr_ma_sync` was watched specifically in case saving re-registered it; it did not.
+
+## 2026-09-07 — `play_radio` routes through the resolver; the other half of drift detection is now tested
+
+> The bare "play the radio" branch stopped bypassing the resolver. It was the last hardcoded station
+> in the automation layer, and fixing it doubled as the first real test of *change something in HA,
+> re-export, and see exactly that change* — the half of INF-09 that had never been exercised.
+
+- **The defect was routing, not a wrong default.** Every other branch of
+  `automation.voice_ceiling_speakers` calls the resolver; `play_radio` alone called
+  `music_assistant.play_media` directly with a literal `"Radio Paradise"` and an explicit
+  `media_player.ceiling_speakers` target. Meanwhile `radio.py:130-133` carries a comment written for
+  exactly this case — *"A bare 'play radio' has no station: fall back to the configured default"* —
+  and it was unreachable from the automation. Swapping the literal to `101 SMOOTH JAZZ` would have
+  reset the drift, not removed it, so the branch now calls `script.play_radio` with no fields and
+  lets `default_station` answer. The speaker is unchanged: the resolver takes the zone from
+  `ceiling_entity`, which is the same entity the explicit target named.
+- **Exporter redeployed first.** The host was still on `8d1d030a…` (commit `8f6a003`) while the repo
+  had moved to `21ee0ab0…` (commit `e1a155f`, the `/api/states` row guard merged in PR #44). Running
+  a drift test on a superseded build would have proved nothing about the build under review. Backup
+  `~/mass-resolver/.bak/20260907-224131/tools/ha_export.py` (digest verified equal to the file it
+  replaced), deploy, digests compared with `tr -d ''` on both sides, `py_compile` OK on Python
+  3.5.2. **The `/api/states` guard was previously untested against live data; it accepts the
+  instance.** The hardened build also reproduced the baseline byte-for-byte, so the guard changed no
+  output.
+- **Gated on a clean pre-change export.** `--strict-inventory`, exit 0, 37 files, **zero diff against
+  the committed blobs**. Without that, a post-change diff cannot be attributed to the change.
+- **Result: exactly one canonical file changed**, `automations/voice_ceiling_speakers.json`
+  (`4b52bcf9…` → `8fda1446…`, 347 → 340 lines). 36 of 37 byte-identical. The drift-detection premise
+  holds in both directions now.
+
+### Home Assistant rewrites the schema on every UI save
+
+- **The one intended edit produced nine hunks, not one.** Eight of them are
+  `"platform": "conversation"` → `"trigger": "conversation"` on every conversation trigger in the
+  file. Nothing typed by hand touched those lines: saving an automation through the UI normalises the
+  whole config to the current schema, and HA renamed the trigger key some versions back.
+- **Audited rather than assumed.** The before-file was transformed programmatically by only those two
+  changes (the action replacement, and `platform`→`trigger` restricted to values equal to
+  `"conversation"`) and compared to the exported after-file: **exact equality**. 1 replacement, 8
+  renames, 0 `platform` keys left, 8 `trigger` keys present. The diff provably contains nothing else.
+  The byte arithmetic agrees independently — the prediction for the intended change alone was 11,622
+  bytes, the actual file is 11,614, and 8 bytes is precisely 8 renames of an 8-character key to a
+  7-character one.
+- **Behaviourally inert, but scope-relevant.** `trigger:` is the modern spelling HA itself emitted for
+  2026.6.4; sentence triggers, IDs and ordering are unchanged. Accepted deliberately: the baseline
+  must match what the instance actually contains.
+- **The other six automations were deliberately NOT migrated.** They still carry **8 legacy
+  `platform:` occurrences** between them (`1784146586` 2, `ma_auto_reload` 2, and one each in
+  `1784200731`, `lidarr_ma_sync`, `ma_health_probe`, `satellite_timer_announce`). Consequence worth
+  remembering: **a UI save on any managed automation is never a one-hunk diff** until those are
+  migrated. That is now a known property of the workflow rather than a surprise mid-review.
+
+### Live verification
+
+- Spoken *"play radio"*. `req=c4dc0bc8`: `radio mode=play target='101 SMOOTH JAZZ' candidates=1` →
+  `RADIO PLAY ACCEPTED by MA … uri=library://radio/2 source=favorite` → **`RADIO CONFIRM … is
+  playing`** eight seconds later. Confirmed playing, not merely accepted.
+- Two guards fired correctly and are visible in the same trace: the duck was skipped
+  (*"this turn started library://radio/2"*) and the spoken reply suppressed (*"the reply would replace
+  it"*), so the music starts without a confirmation talking over it.
+- Resolver log lines appear for this phrase **for the first time** — the old branch never reached the
+  resolver at all, which is the clearest evidence the routing changed.
+
+## 2026-09-07 — INF-09 idempotency PROVEN: a fresh re-export is byte-identical to the committed baseline
+
+> The hardened exporter deployed and re-exported to fresh paths. **Zero diff against the committed
+> 37-file baseline.** This is the first time the drift-detection premise has actually been tested —
+> everything before it only proved the exporter could *create* a snapshot.
+
+- **Why this matters more than the exports that preceded it.** A baseline is only useful if
+  re-running the exporter against an unchanged instance reproduces it exactly. Until now that was
+  assumed. A zero diff establishes three things at once: the baseline is **reproducible**, there is
+  **no churn** (no timestamps, no ordering instability, no runtime metadata leaking through), and the
+  security hardening **changed no output** — the same bytes come out of a materially different build.
+- **Sequence, each step gated and verified:**
+  1. Host confirmed still on the pre-hardening exporter `25fc208e…` — which independently corroborates
+     that the hardening was never deployed before this point.
+  2. Backup `~/mass-resolver/.bak/20260907-124713/tools/ha_export.py` (digest verified equal to the
+     file it replaced), then deploy `8d1d030a67a7a18e…` from commit `8f6a003`. Local and host digests
+     compared explicitly; `py_compile` OK on Python 3.5.2.
+  3. **A fresh `--probe-only` BEFORE any export** — the hardened validator is stricter and the
+     deployed manifest was unchanged, so this separates *"the new build still accepts the manifest"*
+     from *"the output is unchanged"*. Exit 0, nothing written.
+  4. `--strict-inventory` export to `staging-managed-idem` / `staging-raw-idem`. Exit 0, 37 files.
+- **Comparison was made against the committed blobs** (`git show HEAD:<path>`), not the working tree
+  or the earlier staging directory — the baseline that actually matters is the one in the repository.
+  **37/37 byte-identical.**
+- **Everything else verified unchanged:** raw tree `0700` with all 32 files `0600`; the two earlier
+  staging trees byte-identical *and* mtime-identical (`staging-managed` 2026-09-06 20:04,
+  `staging-managed-expanded` 2026-09-07 07:50); no `.tmp-*` or `*.prev-*` residue; the baseline output
+  paths `~/ha-state/managed` and `~/ha-state/raw` still absent.
+- **Still untested:** the other half of drift detection — *change something in HA, re-export, and see
+  exactly that change and nothing else*. That test should ride on the `play_radio` fix rather than a
+  synthetic edit.
+
+## 2026-09-07 — INF-09 exporter hardened after a post-baseline code review (deployed later the same day)
+
+> Security and fail-closed hardening found by reviewing the committed exporter, plus the review
+> fixes applied on top. **Offline only — Home Assistant was not contacted and nothing was
+> deployed.** The repo and host exporters now disagree, so a redeploy and a fresh `--probe-only`
+> must precede the planned idempotent re-export.
+
+**Hardening (`a764ee8`)**
+
+- **Manifest entries are validated as safe identifiers.** They become *filenames* —
+  `scripts/<object_id>.json`, `satellite/<entity_id>.json`, `pipelines/<id>.json` — so a manifest
+  entry of `../outside` would have written outside the output tree. `.`/`..`/`/`/`\`/NUL/control
+  characters are now rejected with exit 1. This is the same lesson `url2pdf` already carries, where
+  state names are restricted *"precisely because the name becomes a filename, and a `..` in it would
+  write credentials outside that gitignore."*
+- **`_note` is validated at runtime**, not merely pinned by a repo test. The type hole the earlier
+  review identified is now closed by the tool refusing, rather than by the test suite knowing.
+- **`write_tree` contains every output path** under its root — defence in depth behind the
+  identifier check.
+- **Malformed payloads fail closed:** a non-object script `fields`, or a non-object pipeline row,
+  now exits **4** naming the resource instead of raising `AttributeError` into the generic
+  unexpected-error path.
+- **`/api/states` rows are guarded too** (added while drafting the PR, when the claim that this
+  already existed turned out to be false). The hardening had covered pipeline rows and script
+  `fields` but left the *first* payload the exporter touches unchecked, where a non-dict row raised
+  `AttributeError` and surfaced as exit 7 "unexpected" — naming nothing. It now exits **4** with the
+  offending index, `/api/states[<n>]`. Validation-only: no live re-export was needed, since the
+  change cannot alter the output of a well-formed response.
+
+**Review fixes applied on top**
+
+- **Removed a duplicated pipeline-row check.** The same validation had been added in both
+  `collect()` and `build_canonical()`, with two different messages for one condition — the pattern
+  this workstream deliberately moved away from when exposure unwrapping was consolidated to a single
+  boundary. Row shape is now validated **once, at ingestion**, and the canonical builder trusts it.
+- **A path-containment failure is no longer `EXIT_USAGE`.** Every filename component has already
+  passed `validate_identifier` by the time anything is written, so an escape there is a broken
+  internal invariant, not something the operator typed. Reporting it as a usage error would send
+  someone to check their command line for a bug in the exporter. It now raises a plain exception
+  down `main()`'s unexpected-error path, with a regression test asserting it is **not** an
+  `ExportError`, plus a guard-rail test that ordinary nested paths still work.
+- **Documented a deliberate choice that was previously unstated:** pipeline row validation covers
+  **every** row, including pipelines the manifest does not manage. A malformed row we would not
+  export still means the endpoint returned a shape we do not understand, and a snapshot taken
+  against a half-understood response is not one to trust — so the whole export fails rather than
+  quietly skipping the row.
+
+**Verification:** exporter suite **114 tests**, full suite **490**, true exit status captured. The
+committed 37-file baseline is untouched by any of this. `ONBOARDING.md` now points at the runbook,
+the exporter, the manifest and the `ha/` baseline from both §5 and §14 — the runbook had been
+undiscoverable from the doc operators are told to read first.
+
+## 2026-09-07 — INF-09 BASELINE established: the Home Assistant app-layer surface is now under version control
+
+> **The Home Assistant half of HomeBrain is no longer untracked.** 37 canonical JSON files,
+> **41,604 bytes**, committed under `docs/homebrain/ha/`. Every one is byte-identical to the reviewed
+> `staging-managed-expanded` tree, which was produced by a `--strict-inventory` export that exited 0.
+> **Raw snapshots were not copied and never will be**; the staging trees stay on the host.
+
+- **What is now diffable:** 16 scripts (including the `fields` descriptions that *are* the LLM tool
+  schema), 7 automations with their sentence triggers, 5 Assist pipelines plus `_preferred`, 6
+  satellite `select` settings, the conversation exposure set, and `meta.json` recording HA
+  **2026.6.4**. A live change to any of these now produces a reviewable diff instead of vanishing.
+- **`--strict-inventory` exited 0**, which is positive evidence rather than an absence of complaints:
+  strict mode fails on any undeclared member of the four discoverable inventories, so a clean run
+  confirms all 34 collection entries are declared.
+- **Reviewed before committing, not after.** All 37 files read — verbatim for the five largest and
+  the structural ones, per-file signature pass over the rest. All parse, **CR=0 everywhere**, trailing
+  LF everywhere, byte-identical to staging, and the exporter's own secret scanner returned **0
+  findings** across all 38 files.
+- **`1784146586` and `1784200731` are `S1a - Satellite Ceiling Duck/Restore` and `S1b-2 - Satellite
+  Reply on Ceiling`.** Opaque numeric ids that HA assigns to UI-created automations; the baseline
+  makes them legible. Their descriptions — and `satellite_timer_announce`'s, which records the 180 ms
+  wake-sound race and why its idle condition is load-bearing — are now version-controlled rather than
+  living only in this changelog.
+
+### Four findings the baseline surfaced immediately — recorded, deliberately NOT fixed
+
+1. **`play_radio` branch vs resolver default disagree.** The `play_radio` *branch* of
+   `automation.voice_ceiling_speakers` hardcodes `media_id: "Radio Paradise"` straight to
+   `music_assistant.play_media`, bypassing the resolver — while `radio.json` sets
+   `default_station: "101 SMOOTH JAZZ"`. So *"play the radio"* and the resolver's own default point at
+   different stations.
+2. **Two dead `tts.speak` paths.** `script.ceiling_announce` (its only step) and
+   `script.ceiling_play_radio` (step 2) both call `tts.speak`, which is recorded as *proven broken*
+   on this player (MA `play_announcement` needs correct state/elapsed reporting; Universal→Squeezelite
+   does not provide it). Neither script is exposed to the assistant, so nothing calls them — but they
+   are dead on arrival and the baseline now shows it.
+3. **Exposure surface is 14 entities** — 13 scripts plus `weather.forecast_home`, and **no
+   `media_player.*` entity is exposed.** That is exactly the assertion `assistant-capabilities.md`
+   §NL-02 step 5 asks an operator to verify by hand; it is now recorded as data. The three unexposed
+   scripts are `ceiling_announce`, `ceiling_play_music`, `ceiling_play_radio`, consistent with the
+   resolver routes having superseded them.
+4. **Pipeline `tts_voice` is captured for the first time:** `en_US-amy-low` on all three Living Room
+   pipelines, `null` on `Home Assistant` and `ChatGPT`. This is the missing datum for the open
+   "unify the assistant voice" item — the resolver's `say_text` passes an *engine* only and therefore
+   gets Piper's default, which this shows is not necessarily `amy-low`.
+
+> **Not a problem, recorded so nobody "fixes" it:** the `voice_ceiling_speakers` alias renders as
+> `Voice ? Ceiling Speakers` in a cp1252 console. The file is correct — it contains the UTF-8 em dash
+> (`e2 80 94`), no replacement characters, and decodes as strict UTF-8.
+
+## 2026-09-07 — INF-09 strict expanded STAGING export: exit 0, 37 files, 41 KB (not yet the baseline)
+
+> Second staging export, at the full operational boundary and with **`--strict-inventory`**. Written
+> to new paths (`staging-managed-expanded` / `staging-raw-expanded`); **the 2026-09-06 17-file
+> staging result was left untouched**. Nothing copied into the repository — the baseline is a
+> separate gate.
+
+- **Result:** exit **0**, `HA 2026.6.4  exported 37 files`, empty stderr, **no unmanaged output**.
+- **`--strict-inventory` passing is itself the proof that nothing is unmanaged.** Strict mode exits 5
+  if any of the four discoverable inventories has an undeclared member, so a clean run confirms all
+  34 collection entries are declared — and independently confirms the `cloud.alexa` correction: had a
+  real unmanaged assistant existed, this run would have failed.
+- **37 canonical files, 41,604 bytes**, exactly the predicted shape:
+
+  | Area | Files | |
+  |---|---|---|
+  | `scripts/` | 16 | |
+  | `automations/` | 7 | |
+  | `pipelines/` | 6 | 5 pipelines + `_preferred.json` |
+  | `satellite/` | 6 | |
+  | `exposure/assistants.json` | 1 | |
+  | `meta.json` | 1 | |
+  | **total** | **37** | 0 non-JSON files |
+
+  All parse; **CR=0 everywhere; trailing LF everywhere.**
+- **Size, and a corrected estimate.** 41,604 bytes — I had estimated 60–100 KB and was roughly
+  double the truth. Doubling the resource count roughly doubled the export (21,114 → 41,604), and the
+  distribution improved: `voice_ceiling_speakers.json` fell from **56% to 28.5%** of the total, so a
+  single automation no longer dominates every diff. Largest five: `voice_ceiling_speakers` 11,860 B,
+  `satellite_timer_announce` 3,242 B, `play_radio` 2,517 B, `ceiling_play_music` 2,054 B,
+  `1784146586` 1,713 B.
+- **Raw snapshot:** root and run directory `drwx------ 700`, **32 files all mode `600`**, one run
+  directory. Contents neither read nor copied. No `.tmp-*` or `*.prev-*` residue.
+- **The earlier staging result is provably untouched:** `staging-managed` still 17 files / 21,114
+  bytes, `staging-raw` still 1 run dir / 15 files, and **every mtime in both still reads
+  `2026-09-06 20:04`**. Both deployed digests unchanged (`4113f173…`, `25fc208e…`).
+
+## 2026-09-07 — INF-09 expanded probe passes: all 34 collection entries validate, nothing unmanaged remains
+
+> Single `--probe-only`, exit **0**, read-only, wrote nothing. No `--strict-inventory`.
+> **No full export at the expanded scope yet** — that is a separate gate.
+
+- **Result:** `HA 2026.6.4  PROBE OK (nothing written)`, empty stderr, and — new — **no unmanaged
+  lines at all**. Every one of the four discoverable inventories is now fully declared.
+- **What this validated for the first time:** the **20 newly managed** envelopes (11 scripts, 6
+  automations, 3 pipelines) through `check_envelope`, and the secret scan across the whole expanded
+  surface rather than the original 6 resources. The schema pre-recording predicted every key would
+  already be inside the allowlists, and the probe confirms it: **no exit 4**.
+- **Secret scan: no findings across all 34 entries.** Stated precisely: that establishes only that
+  **nothing in the currently captured state tripped any detector**. `lidarr_ma_sync` and
+  `ma_health_probe` were the resources most likely to carry an API key or webhook URL; neither did.
+- **`cloud.alexa` does not exist on this instance — it is a TEST FIXTURE, not live data.** The
+  Gate 3 structural probe recorded exactly **one** assistant key in the live exposure response
+  (`conversation`, across 14 entities). `cloud.alexa` appears only in `test_ha_export.py`, where it
+  was added deliberately so the assistant-filtering and strict-mode isolation tests would have a
+  second assistant to filter *out*. Consequence: there are **no unmanaged exposure assistants**
+  live, and `--strict-inventory` would now pass cleanly on all four inventories.
+- **Post-conditions verified:** `~/ha-state/managed` and `~/ha-state/raw` still absent; the
+  2026-09-06 staging trees byte-identical (`staging-managed` 17 files / 21,114 bytes, mtime still
+  `2026-09-06 20:04`; `staging-raw` 1 run dir / 15 files); no `.tmp-*` residue; both deployed
+  digests unchanged (`4113f173…`, `25fc208e…`).
+
+## 2026-09-07 — INF-09 expanded manifest deployed (manifest only; exporter untouched, not invoked)
+
+> Gate 1, manifest-only. **`ha_export.py` was neither rebuilt nor recopied** — the read-only schema
+> probes showed every observed key across all 16 scripts and 7 automations already sat inside its
+> existing allowlists, so the expansion needed no code change. **No exporter invocation in this
+> gate**, and the staging trees from 2026-09-06 were left exactly as they were.
+
+- **Scope now deployed:** the complete HomeBrain operational boundary — **34 collection entries**
+  (16 scripts, 7 automations, 5 pipelines, 6 satellite selects), of which **20 were newly managed**:
+  11 scripts, 6 automations, 3 pipelines. All 6 satellite entities were already declared.
+- **Pre-check:** the host manifest still had digest `c2e72f99…`, the value recorded at first
+  bootstrap — no drift in between.
+- **Digests**, `sha256` with `tr -d '\r'` on both sides, source commit
+  `431f80b87689d6e864aa33dc8621a43356f25721`:
+
+  ```
+  old (replaced)  c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  new (deployed)  4113f173ca9de9e4ee0bee0b35c7c9ed5aee99acde72501840fb3ac72bd29254  ha-state/MANIFEST.json
+  unchanged       25fc208e081028bf0ee4aa3ebf49094bce223bca4f95367a721c67aec430efb7  tools/ha_export.py
+  ```
+
+  **Local and host digests were compared explicitly and matched.**
+- **Backup:** `~/mass-resolver/.bak/20260907-073248/ha-state/MANIFEST.json`, digest verified equal to
+  the file it replaced. Rollback pointer.
+- **Verified under host Python 3.5.2:** parses, 16/7/5/6 entries all unique, `_note` is a `str`,
+  `include_preferred_pipeline=True`, `exposure_assistants=['conversation']`, pin `'2026.6.4'`.
+- **Staging trees untouched:** `staging-managed` still 17 JSON files, `staging-raw` still 1 run
+  directory.
+- **Transport was verified before writing**, per the lesson recorded on 2026-09-06: three fresh
+  publickey-only connections each returning a unique marker with exit 0, multiplexing disabled. A
+  write is not attempted over a link that cannot reliably return command status.
+
+## 2026-09-06 — INF-09 first STAGING export (exit 0, 17 files, 21 KB) — explicitly NOT the baseline
+
+> **A staging export, not the authoritative baseline.** The manifest is intentionally
+> under-inclusive, so this output is for review and sizing only. Written to dedicated,
+> previously-absent paths — `~/ha-state/staging-managed` and `~/ha-state/staging-raw` — and
+> **nothing was copied into the repository.** Both staging trees are left in place deliberately.
+
+- **Result:** exit **0**, `HA 2026.6.4  exported 17 files`, empty stderr. Both staging paths were
+  confirmed absent beforehand, and the deployed exporter (`25fc208e…`) and manifest (`c2e72f99…`)
+  digests were re-verified against their recorded values first.
+- **Canonical output: 17 JSON files, 0 non-JSON, 21,114 bytes total.** Every file parses as JSON,
+  every file has **CR=0** and a trailing LF — so the scoped `eol=lf` rule and the LF-only writer both
+  work end to end, and a repo↔host comparison will not report phantom differences.
+
+  | Area | Files | Notable |
+  |---|---|---|
+  | `automations/` | 1 | `voice_ceiling_speakers.json` at **11,860 B — 56% of the whole export** |
+  | `scripts/` | 5 | `play_radio.json` 2,517 B (the tool-schema surface), `find_stations` 1,351 B |
+  | `satellite/` | 6 | 239–308 B each |
+  | `pipelines/` | 3 | 2 pipelines + `_preferred.json` |
+  | `exposure/` | 1 | `assistants.json` 929 B |
+  | `meta.json` | 1 | 58 B |
+
+- **Plan assumption #7 is answered: ~21 KB total.** That is a genuinely reviewable diff, not a dump —
+  which was the open question. The one automation is over half of it, so a change there will dominate
+  any future diff; that is correct, since it is also where the behaviour lives.
+- **Raw snapshot permissions verified:** root and run directory both `drwx------ 700`, all 15 raw
+  files `-rw------- 600`, one run directory. **Raw contents were neither read nor copied** — only
+  names and modes were inspected. No `.tmp-*` residue anywhere.
+- **Unmanaged, reported not exported:** 11 scripts, 6 automations, 3 pipelines (unchanged from the
+  probe). **The next decision is which of the load-bearing ones belong under change control** —
+  `satellite_timer_announce`, the `ma_auto_reload`/`ma_health_probe` self-healing pair, and the
+  exposed `news`/`play_music` tools are the obvious candidates.
+- **Capacity note, not implicated in anything here:** host `/` is at **86% used, 15 GB free**. Ample
+  for an export of this size; recorded for monitoring, no cleanup taken.
+
+## 2026-09-06 — SSH hangs traced to a lost agent key, not the host: a fallback that blocks instead of failing
+
+> Read-only diagnosis. No host change, no service restart, no configuration edit.
+
+- **Symptom:** remote commands intermittently returned nothing and `timeout` killed them
+  (`exit 124`), while other attempts succeeded. One earlier compound step died with a bare `exit 1`
+  after its output vanished, leaving it genuinely unclear whether a `cp` had run.
+- **The host was never the problem.** `load 0.06 0.08 0.06`, uptime 68 d, 2.6 GB memory available,
+  **zero `D`-state processes**, `sshd` accepting TCP on :22 instantly, and the HA VM answering
+  **HTTP 200 in 21 ms** — which also proves host networking and KVM were healthy, since that VM runs
+  on this host.
+- **Root cause:** the ssh-agent had lost `id_homebrain`, so **publickey authentication failed and
+  SSH fell back to password**, which in a non-interactive shell **blocks trying to open `/dev/tty`**
+  to prompt. That presents as a hang, not a denial — the single most misleading failure shape
+  available. Intermittent successes were most consistent with a lingering multiplexed connection.
+- **The diagnostic that made it visible instantly:**
+  `ssh -o BatchMode=yes` → `Permission denied (publickey,password)`, 4/4, immediately. **Use that
+  before suspecting the network:** with prompting disabled an auth failure fails fast and says so.
+  `ssh -vvv` corroborated it with `Next authentication method: password`.
+- **Fix (client-side only):** `ssh-add ~/.ssh/id_homebrain` into the **existing** agent. Do **not**
+  wrap it in `eval "$(ssh-agent -s)"` — doing that earlier in this workstream leaked 13 agent
+  processes and made `ssh-add` itself begin hanging.
+- **Verification that should gate any write over SSH:** three *fresh* connections, each returning a
+  unique marker with exit 0, using `BatchMode=yes -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no -o PreferredAuthentications=publickey -o ControlPath=none`.
+  Multiplexing off matters — otherwise a reused master connection hides a broken authentication path.
+- **Lesson:** a write was correctly *not* attempted while the transport could not reliably return
+  command status. An intermittent transport is more dangerous than an outage: an outage stops you,
+  whereas an intermittent one invites a retry that appears to work and leaves the previous attempt's
+  effect unknown.
+
+## 2026-09-06 — INF-09 probe passes: the managed HA surface validates end to end (still no export)
+
+> Third `--probe-only`, exit **0**. Read-only, wrote nothing. **No full export has ever run**; that
+> remains a separate gate.
+
+- **Result:** `HA 2026.6.4  PROBE OK (nothing written)`, empty stderr, `~/ha-state/managed` and
+  `~/ha-state/raw` both absent afterwards. No version warning (the instance matches the manifest
+  pin) and no exposure warning.
+- **Validated live:** both undocumented config routes for all 5 declared scripts and the 1 declared
+  automation; every resource envelope (scripts, automation, 2 pipelines, 6 satellite selects); the
+  pipeline-list wrapper; and the exposure wrapper with its boolean leaves. Plan assumptions #1–#4
+  are resolved — the two earlier probes each failed on one of them (#3 exposure shape → exit 5,
+  #2 pipeline `language` → exit 4).
+- **The secret scan executed and found nothing.** Stated precisely: that establishes only that
+  **nothing in the currently captured state tripped any detector**. It does not establish that a
+  managed resource cannot embed a secret, nor that a differently-shaped secret would be caught.
+- **Unmanaged resources reported** — present in HA, deliberately not exported, manifest
+  under-inclusive by design until extended:
+  - **11 scripts:** `ceiling_announce`, `ceiling_next`, `ceiling_play_music`, `ceiling_play_radio`,
+    `ceiling_previous`, `ceiling_resume`, `ceiling_set_volume`, `ceiling_volume_down`,
+    `ceiling_volume_up`, `news`, `play_music`
+  - **6 automations:** `1784146586`, `1784200731`, `lidarr_ma_sync`, `ma_auto_reload`,
+    `ma_health_probe`, `satellite_timer_announce`
+  - **3 pipelines**
+  Several matter to this workstream — `satellite_timer_announce` is the timer automation,
+  `ma_auto_reload`/`ma_health_probe` are the A1/A2a self-healing pair, and `news`/`play_music` are
+  exposed resolver tools. Whether to bring them under change control is a separate decision.
+- **Still unresolved:** satellite `select.*` id **stability** across a firmware or integration update
+  (they exist now; durability is a future-time property no probe can test), and total sanitized
+  output size (nothing has been written yet).
+
+## 2026-09-06 — INF-09 exporter re-deployed after the pipeline-schema remediation (one file; no invocation in this gate)
+
+> Gate 1, third pass. **Only `ha_export.py` copied; `MANIFEST.json` deliberately not recopied.**
+> **No exporter invocation occurred during this deployment gate** — no Home Assistant access, no
+> restart. (**Correction, applied 2026-09-06:** this entry originally read "the exporter has still
+> never been executed", which was false — two `--probe-only` runs had already happened by this
+> point. They wrote nothing, but they did run and did contact Home Assistant. **No full export has
+> ever run.**)
+
+- **Why:** the second `--probe-only` exited 4 on an unknown pipeline envelope key. A read-only
+  structural probe recorded the complete 13-key pipeline schema (see the plan §11.2) rather than just
+  the one key the error named — which also proved no 14th key was waiting behind it. `language` was
+  added, all 13 fields preserved including nullable `tts_*`, and pipelines gained an unmanaged
+  reporting path.
+- **Pre-check before replacing anything:** the deployed digest was confirmed to still equal
+  `b9dc29781f325ca1…`, the value recorded at the previous deployment. No drift on the host.
+- **Digests**, `sha256` with `tr -d '\r'` on both sides, source commit
+  `e884f48c69913106aa27eb932765df0cab075629`:
+
+  ```
+  old (replaced)  b9dc29781f325ca1e16ab9dddc35209519adea5a4fde3d9757665f6115ee48e7  tools/ha_export.py
+  new (deployed)  25fc208e081028bf0ee4aa3ebf49094bce223bca4f95367a721c67aec430efb7  tools/ha_export.py
+  unchanged       c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched.**
+- **Backup:** `~/mass-resolver/.bak/20260906-192243/tools/ha_export.py`, digest verified identical to
+  the file it replaced. Rollback pointer.
+- **Host verification:** Python **3.5.2**, `py_compile` → `COMPILE_OK` (compiles, does not execute).
+  `~/ha-state/managed` and `~/ha-state/raw` both still absent.
+- **Operational note:** the first attempt at the combined pre-check-and-backup step died with a bare
+  exit 1 and no output — an SSH transport failure, not a host problem. **Nothing partial had
+  happened:** re-checking read-only showed the digest unchanged and no new backup directory created.
+  The step was then re-run split into smaller calls. Worth recording because a bare exit 1 from a
+  compound remote command tells you nothing about how far it got — verify state before retrying.
+
+## 2026-09-06 — INF-09 exporter re-deployed after the exposure-shape remediation (one file; no invocation in this gate)
+
+> Gate 1, second pass. **Only `ha_export.py` was copied; `MANIFEST.json` was deliberately not
+> recopied** because it is unchanged. **No exporter invocation occurred during this deployment
+> gate** — no Home Assistant access, no restart or reload. (**Correction, applied 2026-09-06:** this
+> entry originally read "the exporter has still never been executed", which was false — one
+> `--probe-only` run had already happened, exiting 5. It wrote nothing, but it ran and contacted
+> Home Assistant. **No full export has ever run.**)
+
+- **Why:** the first `--probe-only` exited 5 claiming the declared exposure assistant was absent.
+  A read-only structural probe established the live shape and proved the exporter, not the manifest,
+  was wrong — it assumed the result *was* the entity map with `{"should_expose": bool}` leaves, when
+  2026.6.4 returns `{"exposed_entities": {<entity_id>: {<assistant>: bool}}}`. See
+  `plans/2026-09-06-inf-09-ha-managed-state-exporter-plan.md` §11.3 for the recorded shape.
+- **Digests**, `sha256` with `tr -d '\r'` applied on both sides, source commit
+  `cc4ac86664bb26d961ad0f98c4af45a993643ac8`:
+
+  ```
+  old (replaced)  63d0a92ba1ad3deba62af959f547bf231487c500189820e67a383a1935fcd593  tools/ha_export.py
+  new (deployed)  b9dc29781f325ca1e16ab9dddc35209519adea5a4fde3d9757665f6115ee48e7  tools/ha_export.py
+  unchanged       c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched.** The old deployed digest was
+  verified to still equal the value recorded at first bootstrap, so nothing had drifted on the host
+  in between.
+- **Backup:** `~/mass-resolver/.bak/20260906-184938/tools/ha_export.py`, confirmed byte-identical to
+  the file it replaced. That is the rollback pointer.
+- **Host verification:** `python3 -V` → **3.5.2**; `python3 -m py_compile tools/ha_export.py` →
+  `COMPILE_OK` (compiles to bytecode, does not execute). `~/ha-state/managed` and `~/ha-state/raw`
+  both still absent, confirming the exporter has produced no output. `tools/__pycache__` exists as
+  the ordinary byproduct of `py_compile`.
+
+## 2026-09-06 — INF-09 exporter bootstrapped to the host (deployment only; NOT yet run)
+
+> Gate 1 of INF-09. Two files placed by hand and digest-verified. **The exporter has not been
+> executed — no probe, no export, no Home Assistant access, no restart or reload.** Gate 2 (the first
+> `--probe-only`) is a separate approval.
+
+- **Why by hand:** the manifest-based resolver deploy does not exist yet, and `tools/` had never been
+  deployed at all (`snapshot.py` is repo-only). Both destination directories were created first —
+  `mkdir -p ~/mass-resolver/tools ~/ha-state` — because `scp` into a missing directory fails.
+- **Deployed artefacts and their recorded identity.** `sha256`, computed on both sides with
+  `tr -d '\r'` applied (mandatory: files authored from the Windows checkout carry CRLF, and a naive
+  digest never matches), from branch `homebrain/inf-09-ha-export-plan` at `6801ce7`:
+
+  ```
+  63d0a92ba1ad3deba62af959f547bf231487c500189820e67a383a1935fcd593  tools/ha_export.py
+  c2e72f998cd3bd8daf701e62d21260f86020101c137a5825e5c4d1b1fe76255a  ha-state/MANIFEST.json
+  ```
+
+  **Local and host digests were compared explicitly and matched on both files.** Until the
+  manifest-based deploy subsumes this, that pair is the only recorded identity these artefacts have.
+- **Host verification:** `python3 -V` → **3.5.2**; `python3 -m py_compile tools/ha_export.py` →
+  `COMPILE_OK` (compiles to bytecode, does not execute); `MANIFEST.json` parses. Both directories
+  contained exactly the one expected file and nothing else.
+- **The manifest is seeded, not confirmed.** It names 5 scripts, 1 automation, 2 pipelines, 6
+  satellite selects, `exposure_assistants: ["conversation"]` and `include_preferred_pipeline: true`,
+  drawn from resources observed on 2026-09-06. Several were only ever seen as entity ids. If a name
+  is wrong the first probe exits 5 — which is the designed way to find out.
+- **Re-copy the manifest whenever it changes in the repo.** A stale host copy silently exports a
+  different surface from the one under review.
+
 ## 2026-09-06 — Two voice defects fixed in live config: STT returning nothing, and "play russian songs" resolving to the wrong station
 
 > **Live HA config only — none of this is in the repo**, so this entry is the record. Three changes:

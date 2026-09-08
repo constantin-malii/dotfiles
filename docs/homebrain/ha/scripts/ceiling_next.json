@@ -1,0 +1,14 @@
+{
+  "alias": "Ceiling: Next Track",
+  "description": "Skip to the next track on the ceiling speakers.",
+  "icon": "mdi:skip-next",
+  "object_id": "ceiling_next",
+  "sequence": [
+    {
+      "action": "media_player.media_next_track",
+      "target": {
+        "entity_id": "media_player.ceiling_speakers"
+      }
+    }
+  ]
+}
