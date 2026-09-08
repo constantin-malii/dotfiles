@@ -1,6 +1,11 @@
 # AN-01 — Phone Assist → Ceiling-Speaker Announcement (design)
 
 > **Design / documentation only. No implementation, no live change, no spike executed.**
+> ⚠ **AMENDED 2026-09-07 by [`2026-09-07-an-01-post-g1-design-corrections.md`](./2026-09-07-an-01-post-g1-design-corrections.md)** — G1's spikes contradicted **§8.2**'s match-key rule
+> and exposed two security/classification gaps (§6.1's no-logging rule is incompletely applied, and
+> the chime is unclassified by §8.2's reply/source logic). Those sections are **left as written** on
+> purpose — they record what was believed at G0 — so **read the correction alongside them.**
+>
 > **Status:** **rev 5 — G0 APPROVED** (2026-09-06). The next authorised phase is an **implementation
 > plan only**. Nothing in this document has been built or deployed; nothing here modifies resolver
 > code, resolver tests, live Home Assistant, automations, or services. G1's spikes remain unexecuted
@@ -437,6 +442,12 @@ That is a requirement on the capability, listed in §10's result column.
 
 ### 6.1 `haconn.HA.resolve_media_source(uri, timeout=10)` — new
 
+> ⚠ **INCOMPLETE — see [`2026-09-07-an-01-post-g1-design-corrections.md`](./2026-09-07-an-01-post-g1-design-corrections.md) correction 2.** The never-log-the-URL rule below is right but
+> was applied only to the resolved URL. The signature **also travels inside the
+> `media_content_id` HA reports back**, which `_say` reads on every poll and logs as `cid[:60]` —
+> a truncation that happens to stop short of `authSig` for the measured URL, and would not for a
+> shorter host or path. An explicit redaction helper is required on every cid-touching log line.
+
 ```
 Turn a media-source:// URI into an absolute, MA-fetchable URL.
 
@@ -473,7 +484,7 @@ that carries its authorisation in the query string, which is the only form MA ca
 | `announce_volume_deadman_retries` | `3` | Bounded re-arms on a failed recovery write, then an `error` and stop. `_auto_restore` re-arms indefinitely; a one-shot announcement should not. |
 | `announce_min_call_timeout_ms` | `500` | Floor for a deadline-clipped blocking call (§6.5). A call with less than this left on the deadline is **not started**; the phase ends instead. |
 | `announce_max_prefix_chars` | `40` | Hard cap on the prefix. Over-long → the prefix is **dropped** with an `error` log, and the announcement proceeds. Degrading here rather than refusing is deliberate: a misconfigured prefix must not silently disable every announcement in the house. |
-| `announce_chime_uri` | `"media-source://media_source/local/./timer_chime.wav"` | The existing asset. Set to `""` to disable the chime entirely. |
+| `announce_chime_uri` | `"media-source://media_source/local/timer_chime.wav"` | The existing asset. Set to `""` to disable the chime entirely. **CORRECTED 2026-09-07:** this default previously carried a `./` segment, which yields a signature HA cannot validate against its own returned URL — see the post-G1 corrections. Never reintroduce `./`. |
 | `announce_mic_mute_entity` | `""` | The satellite mic-mute switch. **Empty until the spike establishes the real ID** (D1). |
 | `announce_require_mic_mute` | `true` | When true, an announcement that cannot establish muting **fails and does not broadcast** (requirement 7). Set false only to deliberately accept self-wake. |
 | `announce_mic_confirm_timeout_ms` | `2000` | How long to poll the mute switch for `on` after writing it. A successful `switch.turn_on` call is an *accepted request*, not a muted microphone (§9.3). |
@@ -778,6 +789,13 @@ exactly where it is.
 - a `superseded()` check on every poll iteration
 
 ### 8.2 Per-clip match key
+
+> ⚠ **PARTLY SUPERSEDED — see [`2026-09-07-an-01-post-g1-design-corrections.md`](./2026-09-07-an-01-post-g1-design-corrections.md) corrections 1 and 3.** The premise below (that MA may
+> strip the query) was **measured false** at AN-1: MA preserves it and wraps the chime as
+> `builtin://track/<url>?authSig=…`. Every clip's match key is therefore its **full normalised
+> URI**, and the path-only special case is withdrawn. The `builtin://track/` wrapper also means
+> `_is_reply_uri` does not recognise a chime, so it must be reclassified as an ephemeral clip.
+> The **containment** matching described below remains correct and necessary.
 
 `_say` currently confirms a clip with `norm_uri in (attrs.get("media_content_id") or "")`, under the
 comment that "MA does not echo the raw URL back as `media_content_id` — it wraps it, e.g.

@@ -19,8 +19,9 @@ reproduced in Home Assistant.
 `http.client` transports, Home Assistant 2026.6.4, Music Assistant 2.9.3.
 
 **Spec:** [`../2026-09-06-phone-assist-ceiling-announcement-design.md`](../2026-09-06-phone-assist-ceiling-announcement-design.md)
-at commit **`259c730`** — the authoritative design, G0-approved 2026-09-06. Read it alongside this
-plan. Section references below (`§6.5`, `§9.3`, …) are to that document.
+at commit **`259c730`** — the G0-approved design — **plus** [`../2026-09-07-an-01-post-g1-design-corrections.md`](../2026-09-07-an-01-post-g1-design-corrections.md), which **amends §8.2 and
+§6.1** in light of G1's measurements. Both are authoritative; read them alongside this plan. **G2's
+code worktree must be based on the commit containing the correction, not on `259c730`.** Section references below (`§6.5`, `§9.3`, …) are to that document.
 
 ---
 
@@ -430,15 +431,20 @@ git commit -m "docs(homebrain): record AN-01 G1/G1b discovery results (D1-D6, D8
 > cd /d/repos/dotfiles
 > # Confirm the base actually carries the spec.
 > git cat-file -e 259c730^{commit} && echo "design commit present"
-> git worktree add .claude/worktrees/an-01-code -b homebrain/an-01-announce 259c730
+> git worktree add .claude/worktrees/an-01-code -b homebrain/an-01-announce <POST-G1-CORRECTION-SHA>
 > cd .claude/worktrees/an-01-code
 > test -f docs/homebrain/2026-09-06-phone-assist-ceiling-announcement-design.md \
 >   && echo "spec present in the worktree"
 > cd docs/homebrain/mass-resolver
 > ```
 >
-> Pinning the **SHA** rather than `main` means this works whether or not `259c730` is later moved off
-> `main` onto a branch.
+> **Base on the post-G1 correction commit, not `259c730`.** `259c730` carries §8.2's *withdrawn*
+> match-key rule and §6.1's incompletely-applied logging rule; a worktree cut from it would not
+> contain the corrections G2 has to implement. The correction commit is a descendant of `259c730`
+> on `homebrain/an-01-implementation-plan`, so it carries the design, the correction, the plan and
+> every G1 record. Substitute its SHA above.
+>
+> Pinning a **SHA** rather than a branch means this works whether or not those commits later move.
 >
 > **Consequence for Task 21's PR:** if `origin/main` is still `7a99f04` when the branch is pushed,
 > the PR diff will also contain `259c730` (the design doc). Either push `main` first so
@@ -449,6 +455,9 @@ git commit -m "docs(homebrain): record AN-01 G1/G1b discovery results (D1-D6, D8
 > touched anywhere in G2.
 
 ### Task 5: Golden `say` / `say_text` regression tests — BEFORE any refactor
+
+> **Precondition:** the post-G1 design correction commit exists and is clean, and this worktree is
+> based on it (see the G2 preamble). Do not start from `259c730`.
 
 The most important task in G2, and it must be first. A 300-line extraction is not proven safe by
 reading it; only a byte-level assertion on emitted service calls proves it (§11.1). `FakeHA` already
@@ -1452,7 +1461,8 @@ git commit -m "refactor(resolver): extract the per-clip play/poll body out of _s
   `["volume_override"]`, `["deadline_from_now"]`, and a `metadata["clips"]` list of
   `{"clip", "started", "issued"}`. Task 15 consumes them.
 
-> **⚠ Two AN-1 findings that change this task (2026-09-07).**
+> **⚠ Three AN-1 findings that change this task (2026-09-07) — recorded as design corrections in**
+> [`../2026-09-07-an-01-post-g1-design-corrections.md`](../2026-09-07-an-01-post-g1-design-corrections.md)**, which is the authority for them.**
 >
 > **1. The query is PRESERVED, so no divergent match key is needed.** MA echoes
 > `builtin://track/http://…/timer_chime.wav?authSig=…`. §8.2 assumed the query would be stripped and
