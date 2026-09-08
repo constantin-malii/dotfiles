@@ -34,14 +34,7 @@
               "set_conversation_response": "Playing radio on the ceiling speakers."
             },
             {
-              "action": "music_assistant.play_media",
-              "data": {
-                "media_id": "Radio Paradise",
-                "media_type": "radio"
-              },
-              "target": {
-                "entity_id": "media_player.ceiling_speakers"
-              }
+              "action": "script.play_radio"
             }
           ]
         },
@@ -251,7 +244,7 @@
         "put on [the] calm radio"
       ],
       "id": "play_favorite",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -259,7 +252,7 @@
         "play radio [on [the] ceiling speakers]"
       ],
       "id": "play_radio",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -267,7 +260,7 @@
         "pause [the] music"
       ],
       "id": "pause",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -281,7 +274,7 @@
         "unpause"
       ],
       "id": "resume",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -289,7 +282,7 @@
         "stop [the] music"
       ],
       "id": "stop",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -309,7 +302,7 @@
         "put [the] (volume|music) up"
       ],
       "id": "vol_up",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -330,7 +323,7 @@
         "put [the] (volume|music) down"
       ],
       "id": "vol_down",
-      "platform": "conversation"
+      "trigger": "conversation"
     },
     {
       "command": [
@@ -341,7 +334,7 @@
         "set [the] ceiling speakers to {percent} [percent]"
       ],
       "id": "vol_set",
-      "platform": "conversation"
+      "trigger": "conversation"
     }
   ]
 }
