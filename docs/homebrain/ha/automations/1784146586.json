@@ -54,18 +54,18 @@
     {
       "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
       "id": "duck",
-      "platform": "state",
       "to": [
         "listening",
         "processing",
         "responding"
-      ]
+      ],
+      "trigger": "state"
     },
     {
       "entity_id": "assist_satellite.respeaker_living_room_assist_satellite",
       "id": "restore",
-      "platform": "state",
-      "to": "idle"
+      "to": "idle",
+      "trigger": "state"
     }
   ]
 }

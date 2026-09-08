@@ -22,7 +22,7 @@
   "triggers": [
     {
       "event_type": "esphome.tts_uri",
-      "platform": "event"
+      "trigger": "event"
     }
   ]
 }
