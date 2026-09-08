@@ -2345,5 +2345,506 @@ class PlayClipAndWaitTest(unittest.TestCase):
         self.assertNotIn(self.URI, joined)
 
 
+
+# A signed media URL is a BEARER CREDENTIAL. Every fixture below uses an obvious placeholder, never
+# a real signature, and the redaction tests assert on the placeholder to prove they are not vacuous.
+FAKE_SIG = "REDACTED-NOT-A-REAL-SIGNATURE"
+
+
+class ClipSequenceTest(unittest.TestCase):
+    """AN-01 Task 12: design 8.1-8.3. One baseline, one raise, N clips, one restore, one replay.
+
+    Fixtures follow the post-G1 design corrections, not design 8.2 as originally written:
+
+      * MA wraps by MEDIA TYPE -- the chime comes back as "builtin://track/<url>", not the
+        "builtin://radio/<url>" that interaction.py's comment documents for TTS clips.
+      * The query string is PRESERVED in MA's echo. Design 8.2 assumed it would be stripped and
+        specified a path-only match key for the chime; AN-1 measured otherwise, so every clip's
+        match key is its full normalised URI.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.chime = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig="
+                      + FAKE_SIG)
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _states(self):
+        return [playing_with_id(0.36, "library://radio/2"),                    # capture
+                playing_with_id(0.80, "builtin://track/" + self.chime),        # chime start
+                idle_state(), idle_state(),                                    # chime end
+                playing_with_id(0.80, "builtin://radio/" + self.tts),          # tts start
+                idle_state(), idle_state(),                                    # tts end
+                playing(0.80)]                                                 # restore read
+
+    def _two_clip(self, cap, ha, **over):
+        params = {"mode": "say", "uri": self.tts,
+                  "uris": [self.chime, self.tts],
+                  "match_keys": [self.chime, self.tts],      # full URIs -- correction 1
+                  "finish_timeouts": [15.0, 45.0],
+                  "volume_override": 0.80}
+        params.update(over)
+        return capability.run(cap, FakeCtx(ha), params, "rid-seq")
+
+    def _ready(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        return cap, ha
+
+    def test_two_clips_play_in_order_with_one_raise_and_one_restore(self):
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        self.assertTrue(r["ok"])
+        self.assertEqual([(d, sv) for d, sv, _ in ha.calls],
+                         [("media_player", "media_pause"),
+                          ("media_player", "volume_set"),
+                          ("music_assistant", "play_media"),
+                          ("music_assistant", "play_media"),
+                          ("media_player", "volume_set"),
+                          ("music_assistant", "play_media")])
+        self.assertEqual(ha.calls[2][2]["media_id"], self.chime)
+        self.assertEqual(ha.calls[3][2]["media_id"], self.tts)
+        self.assertEqual(ha.calls[5][2]["media_id"], "library://radio/2")
+
+    def test_volume_override_is_used_not_reply_volume(self):
+        cap, ha = self._ready()
+        self._two_clip(cap, ha)
+        self.assertEqual(ha.calls[1][2]["volume_level"], 0.80)
+
+    def test_volume_override_of_zero_is_honoured(self):
+        # An `or` fallback would silently discard 0.0; the check must be `is None`.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.0, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.0)])
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "volume_override": 0.0}, "rid-z")
+        self.assertEqual(ha.calls[1][2]["volume_level"], 0.0)
+
+    def test_baseline_is_captured_once_and_restored_once(self):
+        cap, ha = self._ready()
+        self._two_clip(cap, ha)
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"],
+                         [0.80, 0.36])
+
+    def test_source_is_replayed_once_after_both_clips(self):
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        self.assertTrue(r["metadata"]["replayed"])
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 3)   # 2 clips + replay
+
+    def test_the_chime_match_key_is_the_full_uri_query_included(self):
+        # AN-1 measured the query as PRESERVED in MA's echo, refuting design 8.2's assumption that
+        # it would be stripped. Both clips must therefore be seen to start.
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        clips = r["metadata"]["clips"]
+        self.assertEqual(len(clips), 2)
+        self.assertTrue(clips[0]["started"])
+        self.assertTrue(clips[1]["started"])
+
+    def test_a_path_only_match_key_would_still_match_but_is_not_what_we_send(self):
+        # Guard on the CONTRACT, not just the outcome: containment means a path-only key happens to
+        # match too, so an outcome-only assertion could not tell the two contracts apart. Assert on
+        # what actually goes to MA and on the full-URI key being sufficient.
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        self.assertTrue(r["metadata"]["clips"][0]["started"])
+        self.assertIn("authSig=", ha.calls[2][2]["media_id"])
+
+    def test_the_chime_is_matched_through_the_track_wrapper(self):
+        # Names the exact wrapper MA used at AN-1. If MA's wrapping changes, this fails loudly.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state(),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.80)])
+        r = self._two_clip(cap, ha)
+        self.assertTrue(r["metadata"]["clips"][0]["started"])
+
+    def test_each_clip_gets_its_own_finish_budget(self):
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        self.assertTrue(r["ok"])          # 15s chime + 45s message, not one budget twice
+
+    def test_a_failed_chime_does_not_make_the_reply_a_failure(self):
+        # design 8.3's asymmetry: reply_started tracks the LAST clip -- the message. A chime that
+        # never starts is a degraded announcement, not a silent one.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        # Exactly the 10 reads the chime's start poll consumes (5.0s budget / 0.5s poll), so the
+        # message's own start poll still finds its echo rather than more idle.
+        ha.set_states([playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 10                            # chime never starts
+                      + [playing_with_id(0.80, "builtin://radio/" + self.tts),   # message starts
+                         idle_state(), idle_state(), playing(0.80)])
+        r = self._two_clip(cap, ha, finish_timeouts=[15.0, 45.0])
+        self.assertTrue(r["ok"])
+        clips = r["metadata"]["clips"]
+        self.assertFalse(clips[0]["started"])
+        self.assertTrue(clips[1]["started"])
+        self.assertTrue(r["metadata"]["reply_started"])
+        self.assertFalse(r["metadata"]["likely_silent"])
+
+    def test_a_failed_message_is_reported_as_likely_silent(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state()] + [idle_state()] * 120)
+        r = self._two_clip(cap, ha)
+        clips = r["metadata"]["clips"]
+        self.assertTrue(clips[0]["started"])
+        self.assertFalse(clips[1]["started"])
+        self.assertFalse(r["metadata"]["reply_started"])
+        self.assertTrue(r["metadata"]["likely_silent"])
+
+    def test_every_clip_reports_issued_even_when_none_start(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")] + [idle_state()] * 200)
+        r = self._two_clip(cap, ha)
+        self.assertTrue(all(c["issued"] for c in r["metadata"]["clips"]))
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 3)   # 2 clips + replay
+
+    def test_each_clip_gets_its_own_fingerprint(self):
+        cap, ha = self._ready()
+        r = self._two_clip(cap, ha)
+        clips = r["metadata"]["clips"]
+        self.assertNotEqual(clips[0]["clip"], clips[1]["clip"])
+        self.assertEqual(clips[1]["clip"], cap._clip_id(self.tts))
+
+    def test_a_single_uri_still_works(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.40)])
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-one")
+        self.assertTrue(r["ok"])
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 2)
+        self.assertEqual(len(r["metadata"]["clips"]), 1)
+
+    def test_match_keys_default_to_the_uris_when_omitted(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts,
+                            "uris": [self.chime, self.tts],
+                            "finish_timeouts": [15.0, 45.0],
+                            "volume_override": 0.80}, "rid-nokeys")
+        self.assertTrue(all(c["started"] for c in r["metadata"]["clips"]))
+
+    def test_finish_timeouts_default_to_the_reply_timeout_when_omitted(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts,
+                            "uris": [self.chime, self.tts],
+                            "volume_override": 0.80}, "rid-nobudget")
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(r["metadata"]["clips"]), 2)
+
+    def test_the_match_key_list_is_positional_not_reordered(self):
+        # Swapping the keys must break matching -- otherwise the pairing is not really per-clip and
+        # the whole match_keys contract would be untested.
+        #
+        # Only the chime's echo is scripted, with an idle fallback. Matching is by CONTAINMENT and
+        # the polls read straight through the script, so leaving the message's echo in would let
+        # clip 1 -- now holding the message's key -- reach it and "match", passing for the wrong
+        # reason.
+        cap = self._cap()
+        ha = FakeHA(idle_state())
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state()])
+        r = self._two_clip(cap, ha, match_keys=[self.tts, self.chime])
+        self.assertFalse(any(c["started"] for c in r["metadata"]["clips"]))
+
+
+class ClipDeadlineTest(unittest.TestCase):
+    """AN-01 Task 12: design 6.5. Announcement clips poll against a wall-clock deadline and clip
+    each read to what is left; say/say_text keep accumulated-sleep bounding.
+
+    A deadline bounds each READ's inactivity allowance, not the call's wall-clock duration. These
+    tests pin the clipping arithmetic; they do not assert a total-duration guarantee.
+    """
+
+    def setUp(self):
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        self.now = [1000.0]
+
+    def _sleep(self, secs):
+        self.now[0] += secs
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer,
+                                                 clock=lambda: self.now[0],
+                                                 sleeper=self._sleep)
+
+    def _watching_ha(self, seen, burn):
+        ha = FakeHA(idle_state())
+
+        def watch(entity_id, timeout=None):
+            # Only the clip poll passes a timeout. _say's own bookkeeping reads -- the pre-turn
+            # capture and the pre-restore read -- call with no timeout at all, and recording those
+            # would mix un-clipped reads into assertions about clipping.
+            if timeout is not None:
+                seen.append(timeout)
+            self.now[0] += burn
+            return idle_state()
+        ha.get_entity_state = watch
+        return ha
+
+    def test_a_read_is_clipped_to_the_remaining_deadline(self):
+        seen = []
+        cap = self._cap()
+        ha = self._watching_ha(seen, 0.5)
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "uris": [self.tts],
+                        "match_keys": [self.tts], "finish_timeouts": [3.0],
+                        "deadline_from_now": 3.0}, "rid-dl")
+        self.assertTrue(seen)
+        self.assertTrue(all(t <= 3.0 for t in seen), seen)
+        self.assertTrue(min(seen) < 10)
+
+    def test_no_blocking_call_is_started_below_the_floor(self):
+        seen = []
+        cap = self._cap()
+        ha = self._watching_ha(seen, 0.9)
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "uris": [self.tts],
+                        "match_keys": [self.tts], "finish_timeouts": [1.0],
+                        "deadline_from_now": 1.0}, "rid-fl")
+        self.assertTrue(all(t >= 0.5 for t in seen), seen)
+
+    def test_the_deadline_spans_the_whole_sequence_not_each_clip(self):
+        # One deadline for the turn: a two-clip announcement must not get two full budgets.
+        seen = []
+        cap = self._cap()
+        ha = self._watching_ha(seen, 0.5)
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "uris": [self.tts, self.tts],
+                        "match_keys": [self.tts, self.tts], "finish_timeouts": [3.0, 3.0],
+                        "deadline_from_now": 3.0}, "rid-span")
+        self.assertTrue(all(t <= 3.0 for t in seen), seen)
+        self.assertLessEqual(self.now[0], 1000.0 + 3.0 + 1.0)   # one budget, plus a poll of slack
+
+    def test_say_and_say_text_still_bound_by_accumulated_sleep(self):
+        seen = []
+        cap = self._cap()
+        ha = self._watching_ha(seen, 30.0)
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-acc")
+        # No deadline: the default timeout is used unclipped, exactly as today.
+        self.assertEqual(set(seen), set([10]))
+
+
+class SignedUrlRedactionTest(unittest.TestCase):
+    """AN-01 post-G1 correction 2: a signed media URL is a bearer credential, and it travels inside
+    the media_content_id HA reports back on every poll.
+
+    _say's finish-poll used to log cid[:60]. For the URL measured at AN-1 those 60 characters stop
+    just short of authSig -- luck, not a guarantee. A shorter host or path writes a live credential
+    into resolver.log, which is world-readable on the host. A truncation is not a redaction.
+    """
+
+    SECRET = "s3cr3t-" + FAKE_SIG
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    # ---- the helper ---------------------------------------------------------
+
+    def test_authsig_is_redacted(self):
+        cap = self._cap()
+        out = cap._redact_uri("http://h:8123/media/local/c.wav?authSig=" + self.SECRET)
+        self.assertNotIn(self.SECRET, out)
+        self.assertIn("authSig=REDACTED", out)
+
+    def test_the_other_credential_parameters_are_redacted(self):
+        cap = self._cap()
+        for param in ("sig", "signature", "token", "access_token", "AUTHSIG"):
+            out = cap._redact_uri("http://h/x?" + param + "=" + self.SECRET)
+            self.assertNotIn(self.SECRET, out, param)
+
+    def test_redaction_reaches_inside_a_wrapped_uri(self):
+        # The credential arrives wrapped: "builtin://track/http://.../c.wav?authSig=..."
+        cap = self._cap()
+        out = cap._redact_uri("builtin://track/http://h:8123/media/local/c.wav?authSig="
+                              + self.SECRET)
+        self.assertNotIn(self.SECRET, out)
+        self.assertTrue(out.startswith("builtin://track/"))
+
+    def test_a_second_parameter_after_the_secret_survives(self):
+        cap = self._cap()
+        out = cap._redact_uri("http://h/x?authSig=" + self.SECRET + "&fmt=wav")
+        self.assertNotIn(self.SECRET, out)
+        self.assertIn("fmt=wav", out)
+
+    def test_an_ordinary_uri_is_left_alone(self):
+        cap = self._cap()
+        for u in ("library://radio/2", "builtin://radio/http://h/api/tts_proxy/x.mp3", "", None):
+            self.assertEqual(cap._redact_uri(u), u or "")
+
+    def test_a_bare_word_that_merely_ends_in_sig_is_not_mangled(self):
+        # "authSig" must not be found inside an unrelated word, and vice versa.
+        cap = self._cap()
+        self.assertEqual(cap._redact_uri("http://h/x?design=ok"), "http://h/x?design=ok")
+
+    # ---- every log line that touches a cid ----------------------------------
+
+    def test_no_log_record_of_a_chime_turn_contains_the_signature(self):
+        cap = self._cap()
+        chime = "http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=" + self.SECRET
+        tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        other = "builtin://track/http://192.168.122.10:8123/media/local/z.wav?authSig=" + self.SECRET
+        ha = FakeHA(playing(0.36))
+        # The message clip ends because the cid names something ELSE -- which is the path that makes
+        # the finish-poll exit line actually emit a cid. Ending on `idle` would emit an empty one and
+        # the test would pass without proving anything.
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + chime),
+                       idle_state(), idle_state(),
+                       playing_with_id(0.80, "builtin://radio/" + tts),
+                       playing_with_id(0.80, other), playing_with_id(0.80, other),
+                       playing(0.80)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": tts, "uris": [chime, tts],
+                            "match_keys": [chime, tts], "finish_timeouts": [15.0, 45.0],
+                            "volume_override": 0.80}, "rid-red")
+        joined = "\n".join(cm.output)
+        self.assertIn("cid=", joined, "the finish-poll exit line must have emitted a cid")
+        self.assertNotIn(self.SECRET, joined)
+        self.assertNotIn("authSig=" + self.SECRET, joined)
+
+    def test_the_pause_source_line_is_redacted(self):
+        cap = self._cap()
+        signed = "builtin://track/http://h:8123/media/local/c.wav?authSig=" + self.SECRET
+        ha = FakeHA(playing_with_id(0.4, signed))
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha), {"mode": "pause"}, "rid-p")
+        self.assertNotIn(self.SECRET, "\n".join(cm.output))
+
+    def test_the_resume_replay_lines_are_redacted(self):
+        cap = self._cap()
+        signed = "http://h:8123/media/local/c.wav?authSig=" + self.SECRET
+        # Force it into _last_source directly: remember_source now refuses this shape on purpose
+        # (correction 3), so this is the belt-and-braces case of a value that got in some other way.
+        cap._last_source["media_player.ceiling_speakers"] = signed
+        ha = FakeHA(playing(0.4))
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha), {"mode": "resume"}, "rid-r")
+        self.assertNotIn(self.SECRET, "\n".join(cm.output))
+
+    def test_the_fresh_playback_skip_line_is_redacted(self):
+        cap = self._cap()
+        zone = "media_player.ceiling_speakers"
+        signed = "builtin://track/http://h:8123/media/local/c.wav?authSig=" + self.SECRET
+        cap._turns[zone] = {"ts": 1000.0, "playback": signed, "stopped": False}
+        ha = FakeHA(playing(0.4))
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": "http://h/api/tts_proxy/x.mp3"}, "rid-fp")
+        self.assertNotIn(self.SECRET, "\n".join(cm.output))
+
+
+class EphemeralChimeSourceTest(unittest.TestCase):
+    """AN-01 post-G1 correction 3: a chime is an ephemeral clip, never a durable source.
+
+    _is_reply_uri excluded exactly two forms -- tts_proxy and builtin://radio/http. The chime
+    arrives as builtin://track/http://... and matched NEITHER, so remember_source would have kept a
+    spent chime as the zone's last real source. `resume` would then replay it instead of the
+    operator's music, by a URL whose signature has expired: a silent failure two layers from its
+    symptom. Same class of defect as the 2026-09-05 stop/replay bug in CHANGELOG.md.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    SIGNED_CHIME = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig="
+                    + FAKE_SIG)
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def test_the_track_wrapped_chime_is_classified_as_a_clip(self):
+        # Names MA's exact wrapper, so a change in MA's wrapping fails loudly here rather than
+        # silently re-enabling the bug.
+        cap = self._cap()
+        self.assertTrue(cap._is_reply_uri("builtin://track/" + self.SIGNED_CHIME))
+
+    def test_the_unwrapped_signed_chime_url_is_also_a_clip(self):
+        # This is the form resolve_media_source returns and _say hands to play_media, so it is what
+        # a capture read can see before MA has wrapped it.
+        cap = self._cap()
+        self.assertTrue(cap._is_reply_uri(self.SIGNED_CHIME))
+
+    def test_the_existing_clip_forms_are_still_classified_as_clips(self):
+        cap = self._cap()
+        self.assertTrue(cap._is_reply_uri("http://h:8123/api/tts_proxy/x.mp3"))
+        self.assertTrue(cap._is_reply_uri("builtin://radio/http://h:8123/api/tts_proxy/x.mp3"))
+
+    def test_real_music_is_still_a_durable_source(self):
+        # The narrow rule matters: a local library track must stay resumable.
+        #
+        # "builtin://radio/http..." is deliberately NOT in this list. The pre-existing rule claims
+        # that whole prefix for reply clips, so a wrapped internet-radio stream would be classified
+        # as ephemeral too. That is prior behaviour, unrelated to the chime, and in this house radio
+        # stations arrive as "library://radio/N" -- so it is left exactly as it was rather than
+        # widened or narrowed inside this task.
+        cap = self._cap()
+        for u in ("library://radio/2", "library://track/1234",
+                  "http://stream.example/live.mp3", "spotify://track/abc"):
+            self.assertFalse(cap._is_reply_uri(u), u)
+
+    def test_a_track_wrapper_that_is_not_media_local_is_still_a_source(self):
+        cap = self._cap()
+        self.assertFalse(cap._is_reply_uri("builtin://track/http://stream.example/song.mp3"))
+
+    def test_remember_source_refuses_the_chime(self):
+        cap = self._cap()
+        cap.remember_source(self.ZONE, "library://radio/2")
+        cap.remember_source(self.ZONE, "builtin://track/" + self.SIGNED_CHIME)
+        self.assertEqual(cap._last_source[self.ZONE], "library://radio/2")
+
+    def test_resume_does_not_replay_a_chime_left_in_the_player(self):
+        # The other door into the same bug: _resume's "replay the loaded source" branch reads the
+        # cid straight off the player, so it needs the same classification.
+        cap = self._cap()
+        ha = FakeHA(playing_with_id(0.4, "builtin://track/" + self.SIGNED_CHIME))
+        r = capability.run(cap, FakeCtx(ha), {"mode": "resume"}, "rid-rc")
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["resumed"])
+        self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
+
+    def test_a_chime_turn_leaves_the_real_source_resumable(self):
+        # End to end: the announcement's own clips must not displace the radio station.
+        cap = self._cap()
+        tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.SIGNED_CHIME),
+                       idle_state(), idle_state(),
+                       playing_with_id(0.80, "builtin://radio/" + tts),
+                       idle_state(), idle_state(), playing(0.80)])
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": tts, "uris": [self.SIGNED_CHIME, tts],
+                        "match_keys": [self.SIGNED_CHIME, tts],
+                        "finish_timeouts": [15.0, 45.0], "volume_override": 0.80}, "rid-e2e")
+        self.assertEqual(cap._last_source[self.ZONE], "library://radio/2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

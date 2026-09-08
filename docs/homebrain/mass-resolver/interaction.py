@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # AU-02/AU-03: interaction duck/restore for a media zone. Silent. Python 3.5 safe.
-import hashlib, logging, time, threading
+import hashlib, logging, re, time, threading
 from urllib.parse import urlparse, urlunparse
 import capability
 import command_result as cr
@@ -40,7 +40,14 @@ class InteractionCapability(capability.Capability):
         uri = params.get("uri") or params.get("media_content_id") or ""
         return {"mode": mode, "zone": zone, "uri": uri,
                 "text": (params.get("text") or "").strip(),
-                "step": params.get("step"), "volume": params.get("volume")}
+                "step": params.get("step"), "volume": params.get("volume"),
+                # AN-01 design 6.4: an ordered clip sequence for one reply-owned turn. All optional
+                # -- absent, _say behaves exactly as it did with a single `uri`. `.get` rather than
+                # `or` for volume_override, because 0.0 is a legitimate override.
+                "uris": params.get("uris"), "match_keys": params.get("match_keys"),
+                "finish_timeouts": params.get("finish_timeouts"),
+                "volume_override": params.get("volume_override"),
+                "deadline_from_now": params.get("deadline_from_now")}
 
     def validate(self, ctx, resolved):
         if resolved["mode"] not in _MODES:
@@ -257,10 +264,29 @@ class InteractionCapability(capability.Capability):
             return turn is not None and (self._clock() - turn.get("ts", 0)) <= window
 
     def _is_reply_uri(self, uri):
-        # Reply clips are Piper renders served from HA's tts_proxy, which MA wraps as
-        # "builtin://radio/<url>". They must never be treated as a resumable source.
+        """True for an EPHEMERAL clip -- something that must never be remembered or replayed as a
+        durable source.
+
+        Three forms, each measured rather than assumed:
+
+          * Piper renders served from HA's tts_proxy, which MA wraps as "builtin://radio/<url>".
+          * The announcement chime, which MA wraps as "builtin://track/<url>" -- MA wraps by MEDIA
+            TYPE, and nothing in this file anticipated `track` before AN-1. Narrowed to
+            "/media/local/" so a real library track stays resumable.
+          * Anything still carrying a signature. That is the unwrapped shape resolve_media_source
+            returns and _say hands to play_media, so it is what a capture read can see before MA has
+            wrapped it -- and a signature expires, so replaying such a URL later fails silently.
+
+        Left unguarded, `resume` would replay a spent chime instead of the operator's music, by a
+        URL whose signature has expired: a silent failure two layers from its symptom. Same class of
+        defect as the 2026-09-05 stop/replay bug in CHANGELOG.md, where a reply clip was resurrected
+        as though it were music.
+        """
         u = (uri or "").lower()
-        return ("tts_proxy" in u) or u.startswith("builtin://radio/http")
+        return ("tts_proxy" in u
+                or u.startswith("builtin://radio/http")
+                or (u.startswith("builtin://track/") and "/media/local/" in u)
+                or "authsig=" in u)
 
     def remember_source(self, zone, uri):
         """Record the last REAL media played on this zone, for `resume`. Ignores reply clips."""
@@ -336,7 +362,7 @@ class InteractionCapability(capability.Capability):
                                      timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
             self.note_playback(ctx, zone, uri)     # this turn started media: do not let the reply
                                                    #   clip replace what we just resumed
-            LOG.info("RESUME req=%s zone=%s replaying %s", rid, zone, uri)
+            LOG.info("RESUME req=%s zone=%s replaying %s", rid, zone, self._redact_uri(uri))
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": uri, "how": "replay", "zone": zone})
         # Nothing remembered (e.g. the resolver restarted). Do NOT blind-call media_play: on an idle
@@ -359,7 +385,8 @@ class InteractionCapability(capability.Capability):
                                      {"entity_id": zone, "media_id": cid},
                                      timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
             self.note_playback(ctx, zone, cid)
-            LOG.info("RESUME req=%s zone=%s replaying the loaded source %s", rid, zone, cid)
+            LOG.info("RESUME req=%s zone=%s replaying the loaded source %s",
+                     rid, zone, self._redact_uri(cid))
             return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                          metadata={"resumed": True, "uri": cid, "how": "loaded", "zone": zone})
         LOG.info("RESUME req=%s zone=%s nothing to resume (state=%s had_reply_clip=%s)",
@@ -385,7 +412,8 @@ class InteractionCapability(capability.Capability):
         self.remember_source(zone, cid)         # keep `resume` able to bring this station back
         self.note_stopped(zone)                 # BEFORE the call: the reply must never race the mark
         ctx.ha.call_service_rest("media_player", "media_pause", {"entity_id": zone})
-        LOG.info("PAUSE req=%s zone=%s was=%s source=%s", rid, zone, st.get("state"), cid or None)
+        LOG.info("PAUSE req=%s zone=%s was=%s source=%s",
+                 rid, zone, st.get("state"), self._redact_uri(cid) or None)
         return cr.ok(self.name, rid, "Paused.", spoken_text=None,
                      metadata={"paused": True, "was": st.get("state"), "zone": zone})
 
@@ -489,6 +517,29 @@ class InteractionCapability(capability.Capability):
                                parts.query, parts.fragment))
         except Exception:
             return uri
+
+    # authSig is HA's signed-media parameter; the rest are the shapes a credential arrives in
+    # elsewhere. Anchored with \b so it cannot fire inside an unrelated word -- "design=ok" is not
+    # a signature -- and the longer names come first so `token` cannot shadow `access_token`.
+    _SECRET_PARAM_RE = re.compile(r"\b(authSig|signature|access_token|token|sig)=[^&\s]*",
+                                  re.IGNORECASE)
+
+    def _redact_uri(self, value):
+        """Strip credential parameters out of a URI before it can reach a log.
+
+        A signed media URL is a BEARER CREDENTIAL, and it travels inside the media_content_id that
+        HA reports back on every poll -- a path design 6.1 did not consider. The finish-poll used to
+        log `cid[:60]`, which for the URL measured at AN-1 stops just short of `authSig`. That is
+        luck, not a guarantee: a shorter host or path writes a live credential into resolver.log,
+        which is world-readable on the host and quoted freely in CHANGELOG.md.
+
+        A truncation is not a redaction, so this is applied to every log line that emits a
+        media_content_id or a resolved URL. Truncation may still follow it, for brevity.
+        """
+        try:
+            return self._SECRET_PARAM_RE.sub(r"\1=REDACTED", value or "")
+        except Exception:
+            return "<unredactable>"
 
     def _clip_id(self, uri):
         # Short fingerprint of the reply clip, for correlating log lines WITHOUT logging the URI
@@ -679,8 +730,11 @@ class InteractionCapability(capability.Capability):
                 # trigger the restore+replay that is heard as a cut-off.
                 ended_seen += 1
                 if ended_seen >= 2:
+                    # Redact BEFORE truncating: the truncation is for brevity and guarantees
+                    # nothing on its own.
                     LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
-                             rid, zone, clip, elapsed, state.get("state"), cid[:60])
+                             rid, zone, clip, elapsed, state.get("state"),
+                             self._redact_uri(cid)[:80])
                     break
             else:
                 ended_seen = 0
@@ -703,7 +757,8 @@ class InteractionCapability(capability.Capability):
                 started = turn.get("playback")
             if started:
                 LOG.info("SAY req=%s zone=%s clip=%s SKIPPED: this turn started %s -- the reply would "
-                         "replace it (media command is confirmed by the action)", rid, zone, clip, started)
+                         "replace it (media command is confirmed by the action)",
+                         rid, zone, clip, self._redact_uri(started))
                 return cr.ok(self.name, rid, "Said.", spoken_text=None,
                              metadata={"said": False, "reply_started": False, "likely_silent": False,
                                         "replayed": False, "superseded": False,
@@ -800,7 +855,12 @@ class InteractionCapability(capability.Capability):
             poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
             start_timeout = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
             reply_timeout = int(getattr(ctx.settings, "say_reply_timeout_ms", 30000)) / 1000.0
-            reply_volume = float(getattr(ctx.settings, "reply_volume", 0.40))
+            # `is None`, never `or`: 0.0 is a legitimate override that `or` would silently
+            # discard, restoring the ordinary reply volume and making a deliberately silent clip
+            # audible.
+            override = resolved.get("volume_override")
+            reply_volume = (float(override) if override is not None
+                            else float(getattr(ctx.settings, "reply_volume", 0.40)))
             call_timeout = int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0
 
             LOG.info("SAY start req=%s zone=%s clip=%s baseline=%s prev=%s reply_volume=%s",
@@ -831,21 +891,48 @@ class InteractionCapability(capability.Capability):
                         # device in agreement and restore the baseline -- not read our reply volume
                         # as a human override, keep it, and discard the baseline (the ratchet).
                         snap["target"] = reply_volume
-            # 5-7. play the reply clip and wait it out.
+            # 5-7. play the clip SEQUENCE and wait each one out (design 8.1-8.3). One clip is
+            # just the degenerate case, which is how say/say_text keep their existing behaviour.
             #
-            # deadline=None keeps say/say_text on accumulated-sleep bounding, which design 6.5
-            # preserves deliberately: converting a live, proven path to wall-clock deadlines would
-            # be a timing change with no defect motivating it. match_key equals norm_uri here, so
-            # matching stays byte-for-byte what it was before the extraction.
-            opts = {"start_timeout": start_timeout, "finish_timeout": reply_timeout,
-                    "call_timeout": call_timeout, "poll_secs": poll_secs,
-                    "blank_grace": int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
-                    "deadline": None,
-                    "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0}
-            res = self._play_clip_and_wait(ctx, rid, zone, norm_uri, norm_uri, clip, opts,
-                                           superseded)
-            play_issued[0] = res["issued"]
-            reply_started = res["started"]
+            # Every clip's match_key is its full normalised URI. Design 8.2 specified a path-only
+            # key for the chime on the assumption that MA strips the query; AN-1 measured the query
+            # as PRESERVED, so no clip needs a different rule. The `match_keys` list stays in the
+            # interface anyway -- it costs nothing, keeps per-clip matching explicit rather than
+            # implied, and leaves a seam if MA's wrapping ever changes.
+            #
+            # deadline_from_now is absent for say/say_text, which keeps them on accumulated-sleep
+            # bounding: design 6.5 preserves that deliberately, since converting a live, proven path
+            # to wall-clock deadlines would be a timing change with no defect motivating it. One
+            # deadline spans the WHOLE sequence -- a two-clip announcement must not get two budgets.
+            uris = resolved.get("uris") or [uri]
+            match_keys = resolved.get("match_keys") or uris
+            finish_timeouts = resolved.get("finish_timeouts") or ([reply_timeout] * len(uris))
+            dl = resolved.get("deadline_from_now")
+            deadline = (self._clock() + float(dl)) if dl is not None else None
+            internal_base = getattr(ctx.settings, "say_internal_base", "")
+            base_opts = {"start_timeout": start_timeout, "call_timeout": call_timeout,
+                         "poll_secs": poll_secs,
+                         "blank_grace": int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
+                         "deadline": deadline,
+                         "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0}
+            clip_results = []
+            for i, one in enumerate(uris):
+                one_uri = self._normalise_uri(one, internal_base)
+                one_key = self._normalise_uri(match_keys[i], internal_base)
+                one_clip = self._clip_id(one_uri)
+                opts = dict(base_opts)
+                opts["finish_timeout"] = finish_timeouts[i]
+                res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
+                                               opts, superseded)
+                play_issued[0] = play_issued[0] or res["issued"]
+                clip_results.append({"clip": one_clip, "started": res["started"],
+                                     "issued": res["issued"]})
+                if superseded():
+                    return superseded_result()
+            # reply_started tracks the LAST clip -- the message. Design 8.3 makes that asymmetry
+            # explicit: a chime that never starts is a degraded announcement, not a silent one, and
+            # reporting the whole turn as silent would send the operator looking for the wrong fault.
+            reply_started = bool(clip_results) and clip_results[-1]["started"]
             likely_silent = not reply_started
 
             if superseded():
@@ -900,7 +987,8 @@ class InteractionCapability(capability.Capability):
                      rid, zone, clip, reply_started, likely_silent, replayed)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
-                                    "replayed": replayed, "superseded": False, "zone": zone})
+                                    "replayed": replayed, "superseded": False, "zone": zone,
+                                    "clips": clip_results})
         finally:
             # The zone must never be handed back sitting at reply_volume. If we raised after
             # raising the volume (e.g. play_media 500s, or a read blip in the poll), restore the
