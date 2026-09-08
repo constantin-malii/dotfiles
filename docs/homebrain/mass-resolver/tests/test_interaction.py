@@ -17,11 +17,17 @@ class FakeHA(object):
         self.tts_calls = []                          # (engine_id, message)
         self.tts_boom = None
         self.state_timeouts = []                     # per-read timeout, as get_entity_state got it
+        self.media_url = None                        # what resolve_media_source() should return
+        self.resolve_calls = []                      # media-source URIs asked for
     def tts_get_url(self, engine_id, message, timeout=10):
         self.tts_calls.append((engine_id, message))
         if self.tts_boom is not None:
             raise self.tts_boom
         return self.tts_url
+    def resolve_media_source(self, uri, timeout=10):
+        self.resolve_calls.append(uri)
+        return self.media_url
+
     def set_states(self, states):
         self._states = list(states)
     def get_entity_state(self, entity_id, timeout=None):
@@ -3513,6 +3519,556 @@ class MicDeadManTest(unittest.TestCase):
             raise RuntimeError("kaboom")
         cap._mic_release = boom
         FakeTimer.created[0].fire()                   # must not raise
+
+
+
+class AnnounceEndToEndTest(unittest.TestCase):
+    """AN-01 Task 15: design 5, 7, 8.5, 10.
+
+    Ordering (design 7) puts every cheap failure before anything is touched: A validate, B render
+    and bound, C resolve TTS, D resolve chime, E claim generation, F lease and mute, G confirm by
+    reading, H one reply-owned turn, I map the outcome, finally release. C before F is deliberate --
+    a TTS failure is the likeliest failure here, and paying for it with a muted microphone and a
+    raised volume would be gratuitous.
+
+    Clocks advance here. _play_clip_and_wait's deadline-driven poll has no accumulated-sleep
+    fallback, so a frozen clock never satisfies its exit condition; driving the clock from the
+    sleeper is both realistic and terminating.
+    """
+
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        # A signed media URL is a bearer credential; the fixture is an obvious placeholder.
+        self.chime_signed = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig="
+                             + FAKE_SIG)
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        clock = MovingClock()
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                 sleeper=AdvancingSleeper(clock))
+
+    def _ha(self):
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.media_url = self.chime_signed
+        return ha
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        return ctx
+
+    def _states(self):
+        return [{"state": "off", "attributes": {}},                            # mic prev
+                {"state": "on", "attributes": {}},                             # mic confirm
+                playing_with_id(0.36, "library://radio/2"),                    # capture
+                playing_with_id(0.80, "builtin://track/" + self.chime_signed), # chime start
+                idle_state(), idle_state(),                                    # chime end
+                playing_with_id(0.80, "builtin://radio/" + self.tts),          # tts start
+                idle_state(), idle_state(),                                    # tts end
+                playing(0.80)]                                                 # restore read
+
+    def _no_chime_states(self):
+        return [{"state": "off", "attributes": {}},
+                {"state": "on", "attributes": {}},
+                playing_with_id(0.36, "library://radio/2"),
+                playing_with_id(0.80, "builtin://radio/" + self.tts),
+                idle_state(), idle_state(), playing(0.80)]
+
+    # ---- the golden order ---------------------------------------------------
+
+    def test_golden_announce_call_order(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([(d, sv) for d, sv, _ in ha.calls],
+                         [("switch", "turn_on"),
+                          ("media_player", "media_pause"),
+                          ("media_player", "volume_set"),
+                          ("music_assistant", "play_media"),
+                          ("music_assistant", "play_media"),
+                          ("media_player", "volume_set"),
+                          ("music_assistant", "play_media"),
+                          ("switch", "turn_off")])
+        self.assertEqual(ha.calls[2][2]["volume_level"], 0.80)
+        self.assertEqual(ha.calls[5][2]["volume_level"], 0.36)
+        self.assertEqual(ha.calls[3][2]["media_id"], self.chime_signed)
+        self.assertEqual(ha.calls[4][2]["media_id"], self.tts)
+        self.assertEqual(ha.calls[6][2]["media_id"], "library://radio/2")
+
+    def test_the_mic_is_muted_before_the_first_audio_call(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        svcs = [sv for _, sv, _ in ha.calls]
+        self.assertLess(svcs.index("turn_on"), svcs.index("play_media"))
+        self.assertLess(svcs.index("turn_on"), svcs.index("volume_set"))
+
+    def test_both_urls_are_resolved_before_the_microphone_is_touched(self):
+        # design 7's whole point: the cheap failures come first.
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        order = []
+        real_tts = ha.tts_get_url
+        real_res = ha.resolve_media_source
+        real_call = ha.call_service_rest
+        ha.tts_get_url = lambda e, m, timeout=10: (order.append("tts"), real_tts(e, m))[1]
+        ha.resolve_media_source = lambda u, timeout=10: (order.append("chime"), real_res(u))[1]
+
+        def call(domain, service, data, timeout=5):
+            order.append(domain + "." + service)
+            return real_call(domain, service, data, timeout=timeout)
+        ha.call_service_rest = call
+        run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertLess(order.index("tts"), order.index("switch.turn_on"))
+        self.assertLess(order.index("chime"), order.index("switch.turn_on"))
+        self.assertLess(order.index("tts"), order.index("chime"))
+
+    def test_success_chat_text_is_announced_not_said(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertEqual(r["chat_text"], "Announced.")
+        self.assertIsNone(r["spoken_text"])
+        self.assertTrue(r["metadata"]["announced"])
+
+    def test_the_rendered_text_handed_to_tts_is_the_bounded_one(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_prefix = "Announcement."
+        run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertEqual(ha.tts_calls, [("tts.piper", "Announcement. dinner is ready")])
+
+    def test_an_over_long_message_is_rejected_before_anything_is_touched(self):
+        cap = self._cap()
+        ha = self._ha()
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "x" * 400})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "invalid_input")
+        self.assertEqual(ha.calls, [])
+        self.assertEqual(ha.tts_calls, [])
+
+    def test_a_dropped_prefix_is_reported_in_the_metadata(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_prefix = "P" * 100
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["metadata"]["prefix_dropped"])
+        self.assertEqual(ha.tts_calls, [("tts.piper", "dinner is ready")])
+
+    # ---- the chime degrades, it does not fail -------------------------------
+
+    def test_the_chime_match_key_is_the_full_signed_uri(self):
+        # post-G1 correction 1: AN-1 measured the query as PRESERVED in MA's echo, so there is no
+        # path-only special case. The chime here is matched through the track wrapper WITH its query.
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["metadata"]["chime"]["played"])
+        self.assertTrue(r["metadata"]["clips"][0]["started"])
+
+    def test_a_stale_signature_on_the_same_chime_path_is_NOT_a_match(self):
+        # The discriminating case for correction 1, and the reason a path-only key is wrong rather
+        # than merely redundant. Matching is by CONTAINMENT, so a path-only key matches the full
+        # echoed cid too -- asserting only that "the chime started" cannot tell the two contracts
+        # apart.
+        #
+        # Here the player is still echoing the SAME chime file from an earlier turn, under that
+        # turn's now-expired signature. A path-only key matches it and the announcement would report
+        # a chime that never played this turn. The full URI does not match, so the chime is honestly
+        # reported as never started.
+        stale = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=STALE-EXPIRED-SIG")
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")]
+                      + [playing_with_id(0.80, "builtin://track/" + stale)] * 10
+                      + [playing_with_id(0.80, "builtin://radio/" + self.tts),
+                         idle_state(), idle_state(), playing(0.80)])
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["metadata"]["chime"]["played"])
+        self.assertEqual(r["metadata"]["chime"]["reason"], "never_started")
+
+    def test_a_chime_resolve_failure_degrades_and_still_speaks(self):
+        cap = self._cap()
+        ha = self._ha()
+
+        def boom(uri, timeout=10):
+            raise IOError("resolve failed")
+        ha.resolve_media_source = boom
+        ha.set_states(self._no_chime_states())
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["metadata"]["chime"]["played"])
+        self.assertEqual(r["metadata"]["chime"]["reason"], "resolve_failed")
+        self.assertEqual(len([c for c in ha.calls if c[1] == "play_media"]), 2)   # tts + replay
+
+    def test_an_empty_chime_uri_is_a_configured_skip(self):
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ctx.settings.announce_chime_uri = ""
+        ha.set_states(self._no_chime_states())
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["chime"]["reason"], "disabled")
+        self.assertEqual(ha.resolve_calls, [])
+
+    def test_a_chime_that_resolves_but_never_starts_is_reported(self):
+        cap = self._cap()
+        ha = self._ha()
+        # The chime's own start poll burns its budget, then the message plays normally.
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 10
+                      + [playing_with_id(0.80, "builtin://radio/" + self.tts),
+                         idle_state(), idle_state(), playing(0.80)])
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["metadata"]["chime"]["played"])
+        self.assertEqual(r["metadata"]["chime"]["reason"], "never_started")
+
+    def test_the_chime_is_resolved_every_turn_and_never_cached(self):
+        # The signature expires, so a cached URL is a silent failure two layers from its symptom.
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        for _ in range(2):
+            ha.set_states(self._states())
+            run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertEqual(len(ha.resolve_calls), 2)
+
+    # ---- honest failure mapping (design 8.5) --------------------------------
+
+    def test_a_tts_failure_touches_nothing(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.tts_boom = IOError("tts down")
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "upstream_error")
+        self.assertEqual(ha.calls, [])                 # no mute, no volume, no audio
+        self.assertEqual(ha.resolve_calls, [])         # not even the chime
+
+    def test_an_empty_tts_url_is_a_failure_not_a_silent_success(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.tts_url = ""
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "upstream_error")
+        self.assertEqual(ha.calls, [])
+
+    def test_a_silent_message_is_an_honest_failure_not_a_success(self):
+        # say_text returns ok with likely_silent; for a broadcast that is "claimed success, did
+        # nothing" -- the exact class this stack keeps producing (design 8.5).
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 30 + [playing(0.80)])
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "upstream_error")
+        self.assertEqual(r["chat_text"], "I couldn't play the announcement.")
+
+    def test_say_text_with_the_same_condition_still_returns_ok(self):
+        # The divergence is intentional and pinned: a reply is confirmed by the action, a broadcast
+        # is not.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.set_states([playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 12 + [playing(0.40)])
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "hello"})
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["likely_silent"])
+
+    def test_every_failure_path_uses_a_valid_code_and_readable_text(self):
+        import command_result as cr_mod
+        cases = []
+
+        def tts_down(ha, ctx):
+            ha.tts_boom = IOError("x")
+
+        def tts_empty(ha, ctx):
+            ha.tts_url = ""
+
+        def mic_missing(ha, ctx):
+            ctx.settings.announce_mic_mute_entity = ""
+
+        def too_long(ha, ctx):
+            pass
+        for setup, text in ((tts_down, "hi"), (tts_empty, "hi"), (mic_missing, "hi"),
+                            (too_long, "z" * 400)):
+            cap = self._cap()
+            ha = self._ha()
+            ctx = self._ctx(ha)
+            setup(ha, ctx)
+            r = run(cap, ctx, {"mode": "announce", "text": text})
+            self.assertFalse(r["ok"], setup.__name__)
+            self.assertIn(r["error"]["code"], cr_mod.ERROR_CODES, setup.__name__)
+            self.assertTrue(r["chat_text"], setup.__name__)
+            r["chat_text"].encode("ascii")             # the console cannot print non-ASCII
+            self.assertNotIn("authSig", r["chat_text"])
+            self.assertNotIn(FAKE_SIG, repr(r["metadata"]))
+
+    def test_no_result_metadata_carries_the_signed_url(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertNotIn(FAKE_SIG, repr(r))
+
+    def test_no_log_line_of_a_successful_announcement_carries_the_signature(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        joined = "\n".join(cm.output)
+        self.assertTrue(joined)
+        self.assertNotIn(FAKE_SIG, joined)
+
+    # ---- the microphone across every exit path ------------------------------
+
+    def test_an_unconfirmed_mic_refuses_and_plays_nothing(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "off", "attributes": {}}] * 20)
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "unavailable")
+        self.assertNotIn("play_media", [sv for _, sv, _ in ha.calls])
+        self.assertNotIn("volume_set", [sv for _, sv, _ in ha.calls])
+        self.assertFalse(r["metadata"]["mic"]["confirmed"])
+
+    def test_an_unconfirmed_mic_is_still_released(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "off", "attributes": {}}] * 20)
+        run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+
+    def test_an_unmutable_mic_refuses_before_any_audio(self):
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ctx.settings.announce_mic_mute_entity = ""
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "unavailable")
+        self.assertEqual(ha.calls, [])
+
+    def test_the_mic_is_released_even_when_the_message_never_starts(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 30 + [playing(0.80)])
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertFalse(r["ok"])
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertEqual(cap._mic, {})
+
+    def test_the_mic_is_released_when_the_turn_raises(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        ctx = self._ctx(ha)
+        real = cap._say
+
+        def boom(c, resolved, rid):
+            raise RuntimeError("turn exploded")
+        cap._say = boom
+        self.assertRaises(RuntimeError, cap._announce, ctx, cap.resolve(ctx, {
+            "mode": "announce", "text": "dinner is ready"}), "rid-x")
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertEqual(cap._mic, {})
+        cap._say = real
+
+    def test_the_mic_lease_is_gone_after_a_successful_announcement(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states(self._states())
+        run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertEqual(cap._mic, {})
+
+    def test_an_operator_muted_mic_is_left_muted_afterwards(self):
+        cap = self._cap()
+        ha = self._ha()
+        ha.set_states([{"state": "on", "attributes": {}}] + self._states()[1:])
+        r = run(cap, self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertNotIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertEqual(cap._mic, {})
+
+    def test_require_false_broadcasts_with_an_unconfirmed_mic(self):
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ctx.settings.announce_require_mic_mute = False
+        ha.set_states([{"state": "off", "attributes": {}}] * 10 + self._states()[2:])
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"], r)
+        self.assertFalse(r["metadata"]["mic"]["confirmed"])
+        self.assertTrue(r["metadata"]["mic"]["muted"])
+
+
+class AnnounceSupersessionTest(unittest.TestCase):
+    """AN-01 Task 15: design 9.6. Only a newer ANNOUNCEMENT transfers the mic lease.
+
+    A satellite reply or a say_text turn bumps _say_gen but never writes _mic, so the announcement
+    unmutes immediately. Rev 1 of the design asserted the opposite and accepted a deaf period that
+    the design does not actually produce.
+    """
+
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        clock = MovingClock()
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                 sleeper=AdvancingSleeper(clock))
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        ctx.settings.announce_chime_uri = ""          # one clip, so the read counting is legible
+        return ctx
+
+    def _ha(self):
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        return ha
+
+    def _bump_on_nth_zone_read(self, cap, ha, n):
+        """Simulate a NON-announcement turn superseding the zone mid-announcement."""
+        seen = [0]
+        real = ha.get_entity_state
+
+        def watch(entity_id, timeout=None):
+            if entity_id == self.zone:
+                seen[0] += 1
+                if seen[0] == n:
+                    cap._say_gen[self.zone] = cap._say_gen.get(self.zone, 0) + 5
+            return real(entity_id, timeout=timeout)
+        ha.get_entity_state = watch
+
+    def test_supersession_before_adoption_aborts_without_touching_the_zone(self):
+        # The first zone read is _say's pre-turn capture, so the bump lands before adoption. Task
+        # 13's revalidation then aborts before publishing OR raising anything -- strictly better
+        # than raising and restoring, and the microphone still comes back.
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts)])
+        self._bump_on_nth_zone_read(cap, ha, 1)
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        svcs = [sv for _, sv, _ in ha.calls]
+        self.assertIn("turn_off", svcs)                            # the mic IS restored
+        self.assertEqual([sv for sv in svcs if sv == "volume_set"], [])
+        self.assertNotIn("play_media", svcs)
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["superseded"])
+
+    def test_supersession_after_adoption_leaves_the_zone_to_the_newer_turn(self):
+        # The second zone read is the clip's start poll, so the announcement has already adopted,
+        # published and raised. It then hands the zone over WITHOUT restoring: the superseding turn
+        # owns the volume now, and restoring would undo what it just set.
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts)])
+        self._bump_on_nth_zone_read(cap, ha, 2)
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        svcs = [sv for _, sv, _ in ha.calls]
+        self.assertIn("turn_off", svcs)                            # the mic IS restored
+        self.assertEqual(len([sv for sv in svcs if sv == "volume_set"]), 1)   # raise only
+        self.assertTrue(r["metadata"]["superseded"])
+
+    def test_a_superseded_announcement_is_not_reported_as_a_failure(self):
+        # Being superseded is a person talking; it is not a fault to surface to the operator.
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts)])
+        self._bump_on_nth_zone_read(cap, ha, 2)
+        r = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["chat_text"], "Announced.")
+        self.assertIsNone(r["error"])
+
+    def test_zone_supersession_does_not_transfer_the_mic_lease(self):
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-a")
+        cap._say_gen[self.zone] = gen + 9                      # a non-announcement turn
+        self.assertEqual(cap._mic[self.zone]["gen"], gen)
+        self.assertTrue(cap._mic_release(ctx, self.zone, gen, "rid-a"))
+
+    def test_the_mic_is_released_on_a_superseded_exit(self):
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts)])
+        self._bump_on_nth_zone_read(cap, ha, 1)
+        run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertEqual(cap._mic, {})
+
+    def test_a_second_announcement_takes_the_lease_from_the_first(self):
+        # The one case that DOES transfer: the newer announcement owns the restore, and the older
+        # one's release becomes a no-op so it cannot unmute under the newer broadcast.
+        cap = self._cap()
+        ha = self._ha()
+        ctx = self._ctx(ha)
+        first = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, first, "rid-a")
+        second = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, second, "rid-b")
+        self.assertFalse(cap._mic_release(ctx, self.zone, first, "rid-a"))
+        self.assertEqual(cap._mic[self.zone]["gen"], second)
+        self.assertTrue(cap._mic_release(ctx, self.zone, second, "rid-b"))
+        self.assertEqual(cap._mic, {})
 
 
 if __name__ == "__main__":

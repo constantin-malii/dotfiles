@@ -133,6 +133,8 @@ class InteractionCapability(capability.Capability):
             return self._say(ctx, resolved, rid)
         if resolved["mode"] == "say_text":
             return self._say_text(ctx, resolved, rid)
+        if resolved["mode"] == "announce":
+            return self._announce(ctx, resolved, rid)
         if resolved["mode"] == "resume":
             return self._resume(ctx, resolved["zone"], rid)
         if resolved["mode"] == "pause":
@@ -825,6 +827,155 @@ class InteractionCapability(capability.Capability):
         # silently while still reporting "Said.".
         resolved["skip_on_fresh_playback"] = False
         return self._say(ctx, resolved, rid)
+
+    def _announce(self, ctx, resolved, rid):
+        """Broadcast a sentence on the zone: chime + speech, as ONE reply-owned turn.
+
+        Ordering (design 7) puts every cheap failure before anything is touched:
+
+            A validate       (done by validate(), before we get here)
+            B render + bound
+            C resolve the TTS clip
+            D resolve the chime
+            E claim the generation
+            F lease + mute the microphone
+            G CONFIRM the mute by reading it back
+            H one reply-owned turn through _say
+            I map the outcome
+            finally: release the lease
+
+        C before F is deliberate. A TTS failure is the likeliest failure in this sequence, and
+        paying for it with a muted microphone and a raised volume would be gratuitous.
+        """
+        zone = resolved["zone"]
+
+        # B. Render and bound. Rejection, never truncation -- see _render_announcement_text.
+        rendered, err, prefix_dropped = self._render_announcement_text(ctx, resolved.get("text"))
+        if err is not None:
+            return cr.err(self.name, rid, err["code"], err["reason"], err["chat_text"],
+                          spoken_text=None,
+                          metadata={"announced": False, "zone": zone,
+                                    "prefix_dropped": prefix_dropped})
+
+        # C. TTS clip. Nothing has been touched yet, so a failure here is free.
+        engine = getattr(ctx.settings, "tts_engine", "") or "tts.piper"
+        try:
+            tts_uri = ctx.ha.tts_get_url(engine, rendered)
+        except Exception as e:
+            LOG.warning("ANNOUNCE req=%s zone=%s could not resolve text to a clip (%r)",
+                        rid, zone, e)
+            return cr.err(self.name, rid, "upstream_error", "tts_get_url failed",
+                          "I couldn't say that.", spoken_text=None,
+                          metadata={"announced": False, "zone": zone})
+        if not tts_uri:
+            # Defence in depth: an empty uri would make _say a silent no-op that still reports
+            # success -- the exact "claimed success, did nothing" class design 8.5 rules out.
+            LOG.warning("ANNOUNCE req=%s zone=%s resolved to an empty clip uri", rid, zone)
+            return cr.err(self.name, rid, "upstream_error", "no clip uri",
+                          "I couldn't say that.", spoken_text=None,
+                          metadata={"announced": False, "zone": zone})
+
+        # D. Chime. A failure DEGRADES: an announcement without its chime is still an
+        #    announcement. Resolved every turn and never cached -- the signature expires, and a
+        #    cached URL would fail silently two layers from its symptom.
+        chime_uri = (getattr(ctx.settings, "announce_chime_uri", "") or "").strip()
+        chime = {"played": False, "reason": None}
+        chime_resolved = None
+        if not chime_uri:
+            chime["reason"] = "disabled"
+        else:
+            try:
+                chime_resolved = ctx.ha.resolve_media_source(chime_uri)
+            except Exception as e:
+                # Never log the resolved URL: it carries a signature, which is a bearer credential.
+                LOG.warning("ANNOUNCE req=%s zone=%s chime resolve failed (%r); continuing "
+                            "without a chime", rid, zone, e)
+                chime["reason"] = "resolve_failed"
+            if chime_resolved is None and chime["reason"] is None:
+                LOG.warning("ANNOUNCE req=%s zone=%s chime resolved to nothing; continuing "
+                            "without a chime", rid, zone)
+                chime["reason"] = "resolve_failed"
+
+        uris = ([chime_resolved] if chime_resolved else []) + [tts_uri]
+        # Every clip's match key is its FULL URI, query included. Design 8.2 specified a path-only
+        # key for the chime on the assumption that MA strips the query; AN-1 measured the query as
+        # PRESERVED, so that special case is withdrawn (post-G1 correction 1). The list is still
+        # passed explicitly: it keeps per-clip matching visible and leaves a seam if MA's wrapping
+        # changes.
+        match_keys = list(uris)
+        finish_timeouts = (
+            ([int(getattr(ctx.settings, "announce_chime_finish_timeout_ms", 15000)) / 1000.0]
+             if chime_resolved else [])
+            + [int(getattr(ctx.settings, "announce_message_finish_timeout_ms", 45000)) / 1000.0])
+
+        # E. Claim the generation BEFORE touching the microphone (requirement 1). Muting first and
+        #    only then discovering we were superseded would leave the mic dead through the newer
+        #    turn's own wake word.
+        my_gen = self._claim_gen(zone)
+
+        # F. Lease + mute.
+        lease, mic_err = self._mic_claim(ctx, zone, my_gen, rid, clips=len(uris))
+        if mic_err is not None:
+            return cr.err(self.name, rid, mic_err["code"], mic_err["reason"],
+                          mic_err["chat_text"], spoken_text=None,
+                          metadata={"announced": False, "zone": zone,
+                                    "mic": {"muted": False, "confirmed": False}})
+        muted = lease is not None
+        try:
+            # G. CONFIRM by reading. A 200 from switch.turn_on is an accepted request, not a muted
+            #    microphone.
+            confirmed = False
+            if muted:
+                confirmed, conf_err = self._mic_confirm(ctx, zone, my_gen, rid)
+                if conf_err is not None:
+                    return cr.err(self.name, rid, conf_err["code"], conf_err["reason"],
+                                  conf_err["chat_text"], spoken_text=None,
+                                  metadata={"announced": False, "zone": zone,
+                                            "mic": {"muted": True, "confirmed": False}})
+
+            # H. One reply-owned turn: one baseline, one raise, N clips, one restore, one replay.
+            seq = dict(resolved)
+            seq["uri"] = tts_uri
+            seq["uris"] = uris
+            seq["match_keys"] = match_keys
+            seq["finish_timeouts"] = finish_timeouts
+            seq["volume_override"] = float(getattr(ctx.settings, "announce_volume", 0.80))
+            seq["gen"] = my_gen
+            seq["deadline_from_now"] = sum(finish_timeouts) + (
+                len(uris) * int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0)
+            # A pushed sentence is NOT confirmed by unrelated playback starting in the same turn,
+            # so it must not inherit _say's media-confirmation skip.
+            seq["skip_on_fresh_playback"] = False
+            LOG.info("ANNOUNCE req=%s zone=%s clips=%d chars=%d volume=%s",
+                     rid, zone, len(uris), len(rendered), seq["volume_override"])
+            res = self._say(ctx, seq, rid)
+
+            # I. Map the outcome. A silent announcement is a FAILURE, not a success: the caller is
+            #    broadcasting to a room they may not be in, so "Announced." when nothing came out
+            #    is the one answer they cannot check (design 8.5).
+            meta = dict(res.get("metadata") or {})
+            clips = meta.get("clips") or []
+            if chime_resolved and clips:
+                chime["played"] = bool(clips[0].get("started"))
+                if not chime["played"] and chime["reason"] is None:
+                    chime["reason"] = "never_started"
+            meta["chime"] = chime
+            meta["mic"] = {"muted": muted, "confirmed": confirmed}
+            meta["prefix_dropped"] = prefix_dropped
+            meta["announced"] = bool(meta.get("said")) and not meta.get("likely_silent")
+            if meta.get("superseded"):
+                # Being superseded is a person talking to the satellite. That is not a fault to
+                # surface to the operator as a failed announcement.
+                return cr.ok(self.name, rid, "Announced.", spoken_text=None, metadata=meta)
+            if not meta["announced"]:
+                return cr.err(self.name, rid, "upstream_error", "announcement did not start",
+                              "I couldn't play the announcement.", spoken_text=None, metadata=meta)
+            return cr.ok(self.name, rid, "Announced.", spoken_text=None, metadata=meta)
+        finally:
+            # Every exit path, including an exception: a stuck-muted microphone is a deaf satellite,
+            # which is a silent open-ended failure nobody finds until they try to talk to it.
+            if muted:
+                self._mic_release(ctx, zone, my_gen, rid)
 
     def _play_clip_and_wait(self, ctx, rid, zone, norm_uri, match_key, clip, opts, superseded):
         """Play ONE clip on the zone and wait for it: play_media -> start-poll -> finish-poll.
