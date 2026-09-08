@@ -7,7 +7,7 @@ import command_result as cr
 
 LOG = logging.getLogger("resolver")
 _MODES = ("duck", "restore", "say", "say_text", "resume", "pause", "volume_up", "volume_down",
-          "set_volume")
+          "set_volume", "announce")
 
 
 class InteractionCapability(capability.Capability):
@@ -52,7 +52,60 @@ class InteractionCapability(capability.Capability):
             return {"code": "invalid_input", "reason": "no uri", "chat_text": "No reply audio."}
         if resolved["mode"] == "say_text" and not resolved.get("text"):
             return {"code": "invalid_input", "reason": "no text", "chat_text": "Nothing to say."}
+        if resolved["mode"] == "announce" and not resolved.get("text"):
+            # resolve() has already stripped, so a whitespace-only message lands here and is
+            # refused before any HA call -- AN-01 design 7 step B.
+            return {"code": "invalid_input", "reason": "no text",
+                    "chat_text": "Nothing to announce."}
         return None
+
+    def _render_announcement_text(self, ctx, text):
+        """AN-01 design 6.3: build the text the announcement clip will speak.
+
+        Returns (rendered, err, prefix_dropped):
+          * rendered -- the bounded "prefix message", or None when err is set.
+          * err      -- a validate()-shaped dict, or None.
+          * prefix_dropped -- True when a misconfigured prefix was discarded. The caller logs it
+            alongside the request id; it is deliberately NOT an error (see below).
+
+        Two rules this encodes, both deliberate:
+
+        1. The bound is on the RENDERED text, prefix included. The prefix is configurable and is
+           synthesised into the same clip, so bounding only the message would let config.json
+           inflate the real clip length past what design 6.5's timing model assumes.
+
+        2. Over-length is REJECTED, never truncated. A household announcement clipped at a word
+           boundary can read as fluent and mean the opposite -- "do not let the dog out the back
+           gate" becomes "do not let the dog out" -- and nobody in the room can tell it was cut.
+           Refusing audibly is recoverable; a silently inverted instruction is not.
+        """
+        msg = (text or "").strip()
+        if not msg:
+            return None, {"code": "invalid_input", "reason": "no text",
+                          "chat_text": "Nothing to announce."}, False
+
+        prefix = (getattr(ctx.settings, "announce_prefix", "") or "").strip()
+        max_prefix = int(getattr(ctx.settings, "announce_max_prefix_chars", 40))
+        dropped = False
+        if prefix and len(prefix) > max_prefix:
+            # A mistyped prefix in config.json must not disable every announcement in the house,
+            # so the prefix is dropped and the message still goes out. It also must not eat the
+            # message's budget on its way out -- hence the drop happens before the limit maths.
+            LOG.error("ANNOUNCE prefix is %d chars, over the %d limit -- dropping the prefix",
+                      len(prefix), max_prefix)
+            prefix = ""
+            dropped = True
+
+        max_chars = int(getattr(ctx.settings, "announce_max_chars", 300))
+        limit = max_chars - (len(prefix) + 1 if prefix else 0)
+        if len(msg) > limit:
+            # The EFFECTIVE limit is quoted, not the configured one: with a prefix set they differ,
+            # and a caller told "300" while the real ceiling is 289 cannot fix their message.
+            return None, {"code": "invalid_input", "reason": "text too long",
+                          "chat_text": ("That announcement is too long - keep it to %d "
+                                        "characters or fewer." % limit)}, dropped
+
+        return (prefix + " " + msg if prefix else msg), None, dropped
 
     def execute(self, ctx, resolved, rid):
         if resolved["mode"] == "duck":

@@ -48,6 +48,24 @@ class FakeSettings(object):
     say_poll_ms = 500
     say_internal_base = "192.168.122.10:8123"
     say_owns_restore = True
+    # AN-01 Task 9 tunables. Mirrored here so announce tests run against production values rather
+    # than getattr() fallbacks. Note announce_mic_mute_entity is EMPTY in config.py by design and
+    # populated only in config.json, so a value is set here explicitly for tests that need one.
+    announce_volume = 0.80
+    announce_prefix = ""
+    announce_max_prefix_chars = 40
+    announce_chime_uri = "media-source://media_source/local/timer_chime.wav"   # no "./" -- AN-1/D4
+    announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+    announce_require_mic_mute = True
+    announce_mic_confirm_timeout_ms = 2000
+    announce_mic_confirm_poll_ms = 250
+    announce_mic_deadman_ms = 0
+    announce_volume_deadman_ms = 0
+    announce_volume_deadman_retries = 3
+    announce_chime_finish_timeout_ms = 15000
+    announce_message_finish_timeout_ms = 45000
+    announce_max_chars = 300
+    announce_min_call_timeout_ms = 500
 
 
 class FakeSleeper(object):
@@ -1889,6 +1907,172 @@ class GoldenSequenceTest(unittest.TestCase):
         self.assertEqual(ha.calls[2][2]["media_id"], self.norm_uri)
         self.assertEqual(ha.calls[3][2]["volume_level"], 0.36)
         self.assertEqual(ha.calls[4][2]["media_id"], "library://radio/2")
+
+
+
+class AnnounceResolveValidateTest(unittest.TestCase):
+    """AN-01 Task 10: design 6.3 and 7 step B.
+
+    The length bound is on the RENDERED text (prefix + message), not the message alone: the prefix
+    is configurable and is synthesised into the same clip, so bounding only the message would let
+    config.json defeat design 6.5's whole timing model.
+
+    Over-long is REJECTED, never truncated. Truncating a household message can invert its meaning
+    -- "do not let the dog out the back gate" clipped at a word boundary becomes "do not let the dog
+    out", still fluent, opposite intent, and nobody in the room can tell it was cut.
+    """
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ctx(self):
+        ctx = FakeCtx(FakeHA())
+        ctx.settings = FakeSettings()          # a per-test instance, so edits do not leak
+        return ctx
+
+    # ---- mode surface -------------------------------------------------------
+
+    def test_announce_is_a_valid_mode(self):
+        cap = self._cap()
+        self.assertIsNone(cap.validate(self._ctx(),
+                                       {"mode": "announce", "zone": "z", "text": "hi"}))
+
+    def test_announce_without_text_is_rejected(self):
+        cap = self._cap()
+        err = cap.validate(self._ctx(), {"mode": "announce", "zone": "z", "text": ""})
+        self.assertEqual(err["code"], "invalid_input")
+        self.assertIn("announce", err["chat_text"].lower())
+
+    def test_existing_modes_still_validate(self):
+        # Guard: extending _MODES must not disturb the modes already in production.
+        cap = self._cap()
+        ctx = self._ctx()
+        for mode in ("duck", "restore", "resume", "pause",
+                     "volume_up", "volume_down", "set_volume"):
+            self.assertIsNone(cap.validate(ctx, {"mode": mode, "zone": "z"}), mode)
+        self.assertIsNone(cap.validate(ctx, {"mode": "say", "zone": "z", "uri": "http://x"}))
+        self.assertIsNone(cap.validate(ctx, {"mode": "say_text", "zone": "z", "text": "x"}))
+
+    def test_an_unknown_mode_is_still_rejected(self):
+        cap = self._cap()
+        err = cap.validate(self._ctx(), {"mode": "annonce", "zone": "z", "text": "hi"})
+        self.assertEqual(err["code"], "invalid_input")
+
+    def test_blank_text_rejected_before_any_ha_call(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ctx = FakeCtx(ha)
+        r = run(cap, ctx, {"mode": "announce", "text": "   "})
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "invalid_input")
+        self.assertEqual(ha.calls, [])
+
+    # ---- rendering and the bound -------------------------------------------
+
+    def test_a_message_at_exactly_the_limit_is_accepted(self):
+        cap = self._cap()
+        rendered, err, dropped = cap._render_announcement_text(self._ctx(), "x" * 300)
+        self.assertIsNone(err)
+        self.assertEqual(rendered, "x" * 300)
+        self.assertFalse(dropped)
+
+    def test_no_code_path_truncates_the_message(self):
+        cap = self._cap()
+        rendered, err, dropped = cap._render_announcement_text(self._ctx(), "y" * 301)
+        self.assertIsNone(rendered)
+        self.assertEqual(err["code"], "invalid_input")
+
+    def test_the_bound_is_on_prefix_plus_message(self):
+        cap = self._cap()
+        ctx = self._ctx()
+        ctx.settings.announce_prefix = "A" * 40
+        ok, err, _ = cap._render_announcement_text(ctx, "m" * 259)     # 40 + 1 + 259 == 300
+        self.assertIsNone(err)
+        self.assertEqual(ok, "A" * 40 + " " + "m" * 259)
+        bad, err2, _ = cap._render_announcement_text(ctx, "m" * 260)   # 301
+        self.assertIsNone(bad)
+        self.assertEqual(err2["code"], "invalid_input")
+
+    def test_the_rejection_quotes_the_effective_limit(self):
+        cap = self._cap()
+        ctx = self._ctx()
+        ctx.settings.announce_prefix = "Attention."                    # 10 chars + one space
+        _, err, _ = cap._render_announcement_text(ctx, "m" * 295)
+        self.assertIn("289", err["chat_text"])                         # 300 - 10 - 1
+
+    def test_the_prefix_is_joined_with_a_single_space(self):
+        cap = self._cap()
+        ctx = self._ctx()
+        ctx.settings.announce_prefix = "Announcement."
+        rendered, err, _ = cap._render_announcement_text(ctx, "dinner is ready")
+        self.assertIsNone(err)
+        self.assertEqual(rendered, "Announcement. dinner is ready")
+
+    def test_surrounding_whitespace_is_stripped(self):
+        cap = self._cap()
+        rendered, err, _ = cap._render_announcement_text(self._ctx(), "  dinner is ready  ")
+        self.assertIsNone(err)
+        self.assertEqual(rendered, "dinner is ready")
+
+    def test_an_over_long_prefix_is_dropped_not_fatal(self):
+        # A misconfigured prefix must not disable every announcement in the house.
+        cap = self._cap()
+        ctx = self._ctx()
+        ctx.settings.announce_prefix = "P" * 41
+        rendered, err, dropped = cap._render_announcement_text(ctx, "dinner is ready")
+        self.assertIsNone(err)
+        self.assertTrue(dropped)
+        self.assertEqual(rendered, "dinner is ready")
+
+    def test_a_dropped_prefix_does_not_eat_the_message_budget(self):
+        cap = self._cap()
+        ctx = self._ctx()
+        ctx.settings.announce_prefix = "P" * 100
+        rendered, err, dropped = cap._render_announcement_text(ctx, "m" * 300)
+        self.assertIsNone(err)
+        self.assertTrue(dropped)
+        self.assertEqual(rendered, "m" * 300)
+
+    def test_empty_text_is_reported_as_nothing_to_announce(self):
+        cap = self._cap()
+        rendered, err, _ = cap._render_announcement_text(self._ctx(), "   ")
+        self.assertIsNone(rendered)
+        self.assertEqual(err["code"], "invalid_input")
+
+    def test_none_text_is_handled(self):
+        cap = self._cap()
+        rendered, err, _ = cap._render_announcement_text(self._ctx(), None)
+        self.assertIsNone(rendered)
+        self.assertEqual(err["code"], "invalid_input")
+
+    def test_the_rejection_chat_text_is_ascii_only(self):
+        # ONBOARDING section 3: the console throws UnicodeEncodeError on non-ASCII output, so a
+        # plain hyphen rather than an en dash.
+        cap = self._cap()
+        _, err, _ = cap._render_announcement_text(self._ctx(), "z" * 400)
+        err["chat_text"].encode("ascii")            # raises if a non-ASCII char slipped in
+
+    # ---- error-code contract -----------------------------------------------
+
+    def test_every_error_code_used_is_in_ERROR_CODES(self):
+        # cr.err raises ValueError on an unknown code, so an invalid one turns a handled failure
+        # into a crash. An earlier design draft used "precondition_failed", which is not valid.
+        import command_result as cr_mod
+        for code in ("invalid_input", "unavailable", "upstream_error"):
+            self.assertIn(code, cr_mod.ERROR_CODES)
+        self.assertNotIn("precondition_failed", cr_mod.ERROR_CODES)
+
+    def test_the_render_helpers_error_codes_are_valid(self):
+        import command_result as cr_mod
+        cap = self._cap()
+        ctx = self._ctx()
+        for text in (None, "   ", "q" * 400):
+            _, err, _ = cap._render_announcement_text(ctx, text)
+            self.assertIsNotNone(err)
+            self.assertIn(err["code"], cr_mod.ERROR_CODES)
+            self.assertTrue(err["reason"])
+            self.assertTrue(err["chat_text"])
 
 
 if __name__ == "__main__":
