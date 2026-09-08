@@ -74,8 +74,8 @@
   "triggers": [
     {
       "entity_id": "media_player.respeaker_living_room_media_player",
-      "platform": "state",
-      "to": "playing"
+      "to": "playing",
+      "trigger": "state"
     }
   ]
 }

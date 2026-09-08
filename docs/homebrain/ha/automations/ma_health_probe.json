@@ -47,7 +47,7 @@
   "triggers": [
     {
       "minutes": "/3",
-      "platform": "time_pattern"
+      "trigger": "time_pattern"
     }
   ]
 }

@@ -21,7 +21,7 @@
         "PUT"
       ],
       "local_only": true,
-      "platform": "webhook",
+      "trigger": "webhook",
       "webhook_id": "lidarr_import"
     }
   ]

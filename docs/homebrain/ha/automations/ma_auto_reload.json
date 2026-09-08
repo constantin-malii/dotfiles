@@ -24,12 +24,12 @@
   "triggers": [
     {
       "event": "start",
-      "platform": "homeassistant"
+      "trigger": "homeassistant"
     },
     {
       "entity_id": "media_player.ceiling_speakers",
       "from": "unavailable",
-      "platform": "state"
+      "trigger": "state"
     }
   ]
 }
