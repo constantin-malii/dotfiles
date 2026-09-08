@@ -1729,30 +1729,30 @@ class ReplyBumpTest(unittest.TestCase):
         run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertNotIn("media_pause", [c[1] for c in ha.calls])
 
-    def test_if_the_clip_never_goes_out_the_music_is_un_paused(self):
-        # Otherwise silencing the music would leave the zone silent with nothing replayed.
+    def test_if_the_clip_never_goes_out_the_source_is_replayed_not_un_paused(self):
+        # Was: test_if_the_clip_never_goes_out_the_music_is_un_paused, which asserted media_play.
+        # AN-01 design 8.3a: a play_media that raised may still have LANDED, so the queue is
+        # ambiguous and un-pausing could restart the reply clip instead of the music. The captured
+        # source is replayed instead. This fake refuses that replay too, so nothing resumes -- the
+        # zone is left paused at its baseline and the operator recovers with "resume".
         cap = self._cap()
-        ha = FakeHA(playing(0.15)); ctx = FakeCtx(ha)
+        ha = FakeHA(playing(0.15))
+        ctx = FakeCtx(ha)
+        attempts = []
         real = ha.call_service_rest
 
         def boom(domain, service, data, timeout=None):
             if service == "play_media":
+                attempts.append(data.get("media_id"))     # a REFUSED call reaches no ha.calls entry
                 raise IOError("MA refused")
             real(domain, service, data)
         ha.call_service_rest = boom
         ha.set_states([playing_with_id(0.15, "library://radio/2")])
         r = run(cap, ctx, {"mode": "say", "uri": self.norm_uri})
         self.assertFalse(r["ok"])
-        self.assertIn("media_play", [c[1] for c in ha.calls])       # un-paused on the way out
-
-
-
-class SayTextTest(unittest.TestCase):
-    """`say` needs a clip URI, so nothing in the house could ask the ceiling to speak a SENTENCE.
-    The obvious route -- tts.speak -> MA play_announcement -- is broken on this player: MA's own
-    docs require correct state + elapsed-time reporting, which the Universal->Squeezelite pair does
-    not provide, and it fails with 'Failed to stream audio' (HA log, 2026-09-05). say_text therefore
-    resolves the text to a clip URL and hands it to the PROVEN play_media route."""
+        self.assertNotIn("media_play", [c[1] for c in ha.calls])   # no blind un-pause
+        # The replay WAS attempted with the captured source, even though the fake refused it.
+        self.assertIn("library://radio/2", attempts)
 
     def setUp(self):
         self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/t.mp3"
@@ -4318,6 +4318,338 @@ class LostAckVolumeTest(unittest.TestCase):
                          [0.80, 0.36])
         self.assertNotIn(self.zone, cap._snaps)
         self.assertEqual(cap._mic, {})                # and the microphone came back
+
+
+
+class AmbiguousPlayRecoveryTest(unittest.TestCase):
+    """AN-01 Task 17: design 8.3a.
+
+    A multi-clip turn creates a failure a single-clip turn cannot: the chime replaces the queue and
+    the message dies. The old finalizer restored the volume and un-paused, and neither helped -- the
+    replay lived only in step 9, which an exception skips, and the un-pause was gated on "no play
+    was issued", which the chime's success falsifies. Even the un-pause would have been useless: the
+    queue then holds a spent chime, not the music.
+
+    The flag is claimed BEFORE each play, so any raising play leaves it set. "We may have changed
+    the queue" is the only thing the caller can honestly know: a landed-but-unacknowledged play
+    changes the queue while any success-gated flag stays False. So "no play was ever issued" has to
+    mean the turn died before REACHING a play_media at all.
+
+    Note on the fakes: a refused call never reaches ha.calls, so tests that need to observe an
+    ATTEMPT record it themselves.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.chime = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig="
+                      + FAKE_SIG)
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _two_clip(self, cap, ha, rid):
+        return capability.run(cap, FakeCtx(ha), {
+            "mode": "say", "uri": self.tts,
+            "uris": [self.chime, self.tts],
+            "match_keys": [self.chime, self.tts],      # full URIs -- post-G1 correction 1
+            "finish_timeouts": [15.0, 45.0],
+            "volume_override": 0.80}, rid)
+
+    def _plays(self, ha):
+        return [c[2].get("media_id") for c in ha.calls if c[1] == "play_media"]
+
+    def _svcs(self, ha):
+        return [sv for _, sv, _ in ha.calls]
+
+    # ---- the chime-first failure this task exists for -----------------------
+
+    def test_chime_played_then_message_raises_replays_the_source(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state()])
+        real = ha.call_service_rest
+        n = {"plays": 0}
+
+        def second_play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 2:                       # the MESSAGE
+                    raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = second_play_boom
+        r = self._two_clip(cap, ha, "rid-amb")
+        self.assertFalse(r["ok"])
+        self.assertIn("library://radio/2", self._plays(ha))       # the station is back
+        self.assertNotIn("media_play", self._svcs(ha))            # no useless un-pause
+
+    def test_the_chime_is_not_left_as_the_queue(self):
+        # The concrete harm: without the replay the zone sits holding a spent chime.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state()])
+        real = ha.call_service_rest
+        n = {"plays": 0}
+
+        def second_play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 2:
+                    raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = second_play_boom
+        self._two_clip(cap, ha, "rid-amb2")
+        self.assertEqual(self._plays(ha)[-1], "library://radio/2")   # the LAST thing played
+
+    # ---- replay versus un-pause --------------------------------------------
+
+    def test_no_replay_when_the_turn_dies_before_any_play(self):
+        # The step-4 volume_set raises, so no play_media was ever attempted and the flag is clear.
+        # This CANNOT be written as "the first play_media raises": the flag is claimed before that
+        # call, so a raising first play is an AMBIGUOUS failure and must replay.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+
+        def volume_boom(domain, service, data, timeout=5):
+            if service == "volume_set":
+                raise IOError("refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = volume_boom
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-pre")
+        self.assertFalse(r["ok"])
+        self.assertEqual(self._plays(ha), [])
+        self.assertIn("media_play", self._svcs(ha))      # un-pause, queue certainly intact
+
+    def test_a_raising_first_play_replays_rather_than_unpausing(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        n = {"plays": 0}
+
+        def first_play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 1:
+                    raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = first_play_boom
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-first")
+        self.assertFalse(r["ok"])
+        self.assertIn("library://radio/2", self._plays(ha))
+        self.assertNotIn("media_play", self._svcs(ha))
+
+    def test_lost_ack_on_the_chime_play_still_replays_the_source(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        n = {"plays": 0}
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 1:
+                    real(domain, service, data, timeout)     # the request LANDS
+                    raise IOError("reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        r = self._two_clip(cap, ha, "rid-lack")
+        self.assertFalse(r["ok"])
+        self.assertIn("library://radio/2", self._plays(ha))
+        self.assertNotIn("media_play", self._svcs(ha))
+
+    def test_lost_ack_on_the_message_play_when_it_is_the_only_clip(self):
+        # The chime is disabled, so the message is the first and only play: the flag must already
+        # be set when it raises.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "play_media":
+                real(domain, service, data, timeout)
+                raise IOError("reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-monly")
+        self.assertFalse(r["ok"])
+        self.assertIn("library://radio/2", self._plays(ha))
+
+    def test_the_flag_is_set_before_the_call_not_after(self):
+        # White-box: a success-gated flag passes every other test here and fails this one.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        seen = {"flag_at_call": None}
+        real = ha.call_service_rest
+
+        def probe(domain, service, data, timeout=5):
+            if service == "play_media" and seen["flag_at_call"] is None:
+                seen["flag_at_call"] = True                # reached only if claimed beforehand
+                raise IOError("stop here")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = probe
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-probe")
+        self.assertIn("library://radio/2", self._plays(ha))
+
+    def test_no_replay_when_superseded(self):
+        # A newer turn owns the zone and is about to play its own thing; replaying into it is the
+        # CHANGELOG 2026-09-06 clobber defect from the other direction.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+
+        n = {"plays": 0}
+
+        def boom_then_supersede(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 1:
+                    cap._say_gen[self.zone] = cap._say_gen.get(self.zone, 0) + 5
+                    raise IOError("MA refused")
+            # Any LATER play is allowed through and recorded. Refusing every play would hide a
+            # wrongly-attempted replay, and the test could not tell the two behaviours apart.
+            real(domain, service, data, timeout)
+        ha.call_service_rest = boom_then_supersede
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-sup")
+        self.assertEqual(self._plays(ha), [])
+        self.assertEqual(n["plays"], 1)                  # the replay was never even attempted
+        self.assertNotIn("media_play", self._svcs(ha))
+
+    def test_exactly_one_replay_on_the_success_path(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.40)])
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-one")
+        self.assertEqual(len([m for m in self._plays(ha) if m == "library://radio/2"]), 1)
+
+    def test_a_successful_two_clip_turn_still_replays_exactly_once(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state(),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.80)])
+        r = self._two_clip(cap, ha, "rid-2ok")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(len([m for m in self._plays(ha) if m == "library://radio/2"]), 1)
+        self.assertNotIn("media_play", self._svcs(ha))
+
+    # ---- design 8.3a's own no-source fallback -------------------------------
+
+    def test_unpause_fallback_when_there_is_nothing_to_replay(self):
+        # design 8.3a's own fallback: the flag is set, but the capture read gave no
+        # media_content_id, so there is no source to replay. Without the un-pause the zone would be
+        # left paused and silent. was_playing is true (volume present) while source_id is empty.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing(0.36)])          # playing, but NO media_content_id
+        real = ha.call_service_rest
+
+        def play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = play_boom
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-nosrc")
+        self.assertFalse(r["ok"])
+        self.assertEqual(self._plays(ha), [])
+        self.assertIn("media_play", self._svcs(ha))
+
+    def test_no_unpause_when_we_did_not_pause(self):
+        # The un-pause is only ever undoing OUR pause. An idle zone was never paused by us, so
+        # starting playback would be inventing music nobody asked for.
+        cap = self._cap()
+        ha = FakeHA(idle_state())
+        ha.set_states([idle_state()])
+        real = ha.call_service_rest
+
+        def play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = play_boom
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-idle")
+        self.assertNotIn("media_play", self._svcs(ha))
+
+    # ---- the doubly failed recovery, and the rejected addendum --------------
+
+    def test_a_doubly_failed_recovery_leaves_the_zone_paused_rather_than_guessing(self):
+        # design 8.3a as approved: a replay that RAISED may still have landed, so a following
+        # media_play could resume the announcement clip instead of the music. The zone is left
+        # paused at its restored baseline; the operator recovers with "resume".
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        attempts = []
+        real = ha.call_service_rest
+
+        def all_plays_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                attempts.append(data.get("media_id"))
+                raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = all_plays_boom
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-both")
+        self.assertFalse(r["ok"])
+        self.assertNotIn("media_play", self._svcs(ha))   # no blind un-pause: the rejected addendum
+        # The replay WAS attempted, and the volume still came back to the baseline.
+        self.assertIn("library://radio/2", attempts)
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"][-1], 0.36)
+
+    def test_the_doubly_failed_zone_is_recoverable_by_resume(self):
+        # The accepted residual is only acceptable because a documented recovery exists: `resume`
+        # un-pauses a paused zone. Pinned here so the residual cannot quietly become a dead end.
+        cap = self._cap()
+        ha = FakeHA({"state": "paused", "attributes": {"volume_level": 0.36}})
+        r = capability.run(cap, FakeCtx(ha), {"mode": "resume"}, "rid-rec")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["resumed"])
+        self.assertIn("media_play", [sv for _, sv, _ in ha.calls])
+
+    def test_an_announcement_whose_message_dies_replays_the_station(self):
+        # The end-to-end shape of the failure that motivated 8.3a, through the announce path.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.media_url = self.chime
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.chime),
+                       idle_state(), idle_state()])
+        real = ha.call_service_rest
+        n = {"plays": 0}
+
+        def second_play_boom(domain, service, data, timeout=5):
+            if service == "play_media":
+                n["plays"] += 1
+                if n["plays"] == 2:
+                    raise IOError("MA refused")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = second_play_boom
+        r = capability.run(cap, ctx, {"mode": "announce", "text": "dinner is ready"}, "rid-anb")
+        self.assertFalse(r["ok"])
+        self.assertIn("library://radio/2", self._plays(ha))
+        self.assertNotIn("media_play", self._svcs(ha))
+        self.assertEqual(cap._mic, {})                    # and the microphone still came back
 
 
 if __name__ == "__main__":

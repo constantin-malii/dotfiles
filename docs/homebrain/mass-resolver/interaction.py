@@ -1244,7 +1244,14 @@ class InteractionCapability(capability.Capability):
         pending_restore = [False]               # True once the zone sits at reply_volume and we still
                                                # owe it a restore (list: rebound in the finally block)
         paused_by_us = [False]                  # we silenced the outgoing music before raising volume
-        play_issued = [False]                   # the reply play_media actually went out
+        queue_may_be_replaced = [False]         # design 8.3a: claimed BEFORE each play_media.
+                                                #   "We may have changed the queue" is the only
+                                                #   thing we can honestly know -- a landed-but-
+                                                #   unacknowledged play changes it while any
+                                                #   success-gated flag stays False. So a clear flag
+                                                #   has to mean the turn died before REACHING a
+                                                #   play_media at all.
+        replay_done = [False]                   # step 9 already put the source back
         try:
             # 3. normalise the reply URI to the MA-reachable internal base
             norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
@@ -1325,9 +1332,9 @@ class InteractionCapability(capability.Capability):
                 one_clip = self._clip_id(one_uri)
                 opts = dict(base_opts)
                 opts["finish_timeout"] = finish_timeouts[i]
+                queue_may_be_replaced[0] = True
                 res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
                                                opts, superseded)
-                play_issued[0] = play_issued[0] or res["issued"]
                 clip_results.append({"clip": one_clip, "started": res["started"],
                                      "issued": res["issued"]})
                 if superseded():
@@ -1380,9 +1387,11 @@ class InteractionCapability(capability.Capability):
             replayed = False
             if was_playing and source_id and not superseded():
                 try:
+                    queue_may_be_replaced[0] = True
                     self._say_call(ctx, rid, zone, "music_assistant", "play_media",
                                    {"entity_id": zone, "media_id": source_id}, timeout=call_timeout)
                     replayed = True
+                    replay_done[0] = True       # the finally must not replay a second time
                 except Exception as e:
                     LOG.warning("SAY req=%s zone=%s replay failed (%r); source NOT resumed", rid, zone, e)
 
@@ -1406,12 +1415,36 @@ class InteractionCapability(capability.Capability):
                 except Exception as e:
                     LOG.error("SAY req=%s zone=%s abort-restore failed (%r); dead-man must reconcile",
                               rid, zone, e)
-            # If we silenced the music and the clip never went out, un-pause it: the queue still holds
-            # the music, so this restores the zone rather than leaving it silent.
-            if paused_by_us[0] and not play_issued[0] and not superseded():
+            # design 8.3a: an earlier clip may have replaced the queue, so un-pausing could restart
+            # a spent chime instead of the music. On an AMBIGUOUS failure, replaying the captured
+            # source is the safer recovery: if the play landed, replay is the only fix; if it did
+            # not, replay re-plays the station that was already there.
+            replayed_here = False
+            if (queue_may_be_replaced[0] and not replay_done[0] and was_playing
+                    and source_id and not superseded()):
+                try:
+                    ctx.ha.call_service_rest(
+                        "music_assistant", "play_media",
+                        {"entity_id": zone, "media_id": source_id},
+                        timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                    replayed_here = True
+                    LOG.warning("SAY req=%s zone=%s aborted after a play; replayed the source",
+                                rid, zone)
+                except Exception as e:
+                    LOG.error("SAY req=%s zone=%s abort-replay failed (%r)", rid, zone, e)
+            # design 8.3a: un-pause ONLY when the queue is certainly intact -- i.e. no play_media was
+            # ever attempted, or there was no source to replay. A replay that RAISED may still have
+            # landed, so un-pausing after one would resume either the source or the announcement
+            # clip. That ambiguity is why there is no blind last-resort un-pause here: when a play
+            # and its replay both fail, the zone is left paused at its baseline and the operator
+            # recovers with "resume" (interaction mode resume un-pauses a paused zone).
+            if (paused_by_us[0] and not superseded()
+                    and not replay_done[0] and not replayed_here
+                    and (not queue_may_be_replaced[0] or not source_id)):
                 try:
                     ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
-                    LOG.warning("SAY req=%s zone=%s reply never issued; un-paused the source", rid, zone)
+                    LOG.warning("SAY req=%s zone=%s un-paused the source (queue intact, or nothing "
+                                "to replay)", rid, zone)
                 except Exception as e:
                     LOG.error("SAY req=%s zone=%s un-pause failed (%r)", rid, zone, e)
             release_reply()
