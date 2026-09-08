@@ -204,5 +204,116 @@ class TtsGetUrlAbsoluteTest(unittest.TestCase):
         self.assertRaises(IOError, h.tts_get_url, "tts.piper", "hello")
 
 
+
+class StateResponse(object):
+    def __init__(self, status, body):
+        self.status = status
+        self._body = body
+
+    def read(self):
+        return self._body
+
+
+class StateConnection(object):
+    """Self-contained fake for get_entity_state.
+
+    Deliberately NOT an extension of FakeHTTPConnection: that fake has no response body (its
+    FakeResponse.read returns b""), and get_entity_state json-parses what it reads. Monkeypatching
+    the shared fake -- as CallServiceRestTest.test_non_2xx_raises does -- would put every other
+    test using it in the blast radius for no benefit.
+    """
+
+    created = []
+    status = 200
+    body = b'{"entity_id": "switch.x", "state": "on", "attributes": {"volume_level": 0.4}}'
+
+    def __init__(self, host, port, timeout=None):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.requests = []
+        self.closed = False
+        StateConnection.created.append(self)
+
+    def request(self, method, path, body=None, headers=None):
+        self.requests.append({"method": method, "path": path, "body": body,
+                              "headers": headers or {}})
+
+    def getresponse(self):
+        return StateResponse(StateConnection.status, StateConnection.body)
+
+    def close(self):
+        self.closed = True
+
+
+class GetEntityStateTimeoutTest(unittest.TestCase):
+    """AN-01 Task 7: deadline clipping needs a per-call timeout (design 6.5).
+
+    get_entity_state is the read used by every clip poll and by the mic-mute confirmation, so it is
+    the call most likely to be started with only a fraction of a phase budget left. With the timeout
+    hardcoded at 10s there was no way to clip it.
+
+    The default stays 10s, so the existing callers -- _duck, _restore, _resume, _pause, _volume,
+    _say's captures and polls -- are unchanged.
+    """
+
+    def setUp(self):
+        StateConnection.created = []
+        StateConnection.status = 200
+        StateConnection.body = (b'{"entity_id": "switch.x", "state": "on", '
+                                b'"attributes": {"volume_level": 0.4}}')
+        self._real = haconn.http.client.HTTPConnection
+        haconn.http.client.HTTPConnection = StateConnection
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        haconn.http.client.HTTPConnection = self._real
+
+    def test_default_is_still_10s(self):
+        haconn.HA("host", 1, "tok").get_entity_state("switch.x")
+        self.assertEqual(StateConnection.created[0].timeout, 10)
+
+    def test_explicit_timeout_is_passed_to_the_connection(self):
+        haconn.HA("host", 1, "tok").get_entity_state("switch.x", timeout=2.5)
+        self.assertEqual(StateConnection.created[0].timeout, 2.5)
+
+    def test_a_clipped_timeout_below_one_second_is_honoured(self):
+        # design 6.5 clips to the remaining deadline, which is routinely sub-second near the floor.
+        haconn.HA("host", 1, "tok").get_entity_state("switch.x", timeout=0.5)
+        self.assertEqual(StateConnection.created[0].timeout, 0.5)
+
+    def test_still_returns_the_parsed_state(self):
+        d = haconn.HA("host", 1, "tok").get_entity_state("switch.x")
+        self.assertEqual(d["state"], "on")
+        self.assertEqual(d["attributes"]["volume_level"], 0.4)
+
+    def test_still_requests_the_right_path_with_bearer_and_accept(self):
+        haconn.HA("host", 1, "tok").get_entity_state("media_player.ceiling_speakers")
+        req = StateConnection.created[0].requests[0]
+        self.assertEqual(req["method"], "GET")
+        self.assertEqual(req["path"], "/api/states/media_player.ceiling_speakers")
+        self.assertEqual(req["headers"]["Authorization"], "Bearer tok")
+        self.assertEqual(req["headers"]["Accept"], "application/json")
+
+    def test_non_200_still_raises(self):
+        StateConnection.status = 404
+        self.assertRaises(IOError,
+                          haconn.HA("host", 1, "tok").get_entity_state, "switch.nope")
+
+    def test_the_connection_is_closed_even_when_it_raises(self):
+        StateConnection.status = 500
+        self.assertRaises(IOError,
+                          haconn.HA("host", 1, "tok").get_entity_state, "switch.x")
+        self.assertTrue(StateConnection.created[0].closed)
+
+    def test_never_touches_the_shared_websocket(self):
+        # Same rule as call_service_rest: a fresh per-call connection, so this is safe from the
+        # HTTP server thread and never interleaves with the subscribe_events read loop.
+        ha = haconn.HA("host", 1, "tok")
+        self.assertIsNone(ha.s)
+        ha.get_entity_state("switch.x", timeout=1)
+        self.assertIsNone(ha.s)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

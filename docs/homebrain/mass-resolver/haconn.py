@@ -37,14 +37,21 @@ class HA(object):
             wsutil.ws_send(self.s, {"id": self.cmd_id, "type": "call_service",
                                     "domain": domain, "service": service, "service_data": data})
 
-    def get_entity_state(self, entity_id):
+    def get_entity_state(self, entity_id, timeout=10):
         """Read-only HA REST GET /api/states/<entity_id>.
 
         Uses a FRESH per-call HTTP connection (NOT the shared event WebSocket self.s), so it never
         interleaves with the subscribe_events read loop and is safe to call from the HTTP server
         thread. Returns the parsed state dict on HTTP 200; raises on any failure. Never logs the token.
+
+        `timeout` is a PER-OPERATION socket inactivity timeout, not a deadline for the whole
+        request -- connect, send, headers and body each get their own allowance. Callers that
+        hold a phase deadline clip it to what is left rather than blocking on the default
+        (AN-01 design 6.5). The default of 10s is unchanged, so every existing caller --
+        _duck, _restore, _resume, _pause, _volume and _say's captures and polls -- behaves
+        exactly as before.
         """
-        conn = http.client.HTTPConnection(self.host, self.port, timeout=10)
+        conn = http.client.HTTPConnection(self.host, self.port, timeout=timeout)
         try:
             headers = {"Authorization": "Bearer " + (self.token or ""), "Accept": "application/json"}
             conn.request("GET", "/api/states/" + entity_id, headers=headers)
