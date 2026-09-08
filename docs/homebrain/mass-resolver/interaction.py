@@ -47,7 +47,10 @@ class InteractionCapability(capability.Capability):
                 "uris": params.get("uris"), "match_keys": params.get("match_keys"),
                 "finish_timeouts": params.get("finish_timeouts"),
                 "volume_override": params.get("volume_override"),
-                "deadline_from_now": params.get("deadline_from_now")}
+                "deadline_from_now": params.get("deadline_from_now"),
+                # A generation claimed by the caller BEFORE the slow work (design 9.2). `.get`, so
+                # an absent key stays None and _say claims its own exactly as it always has.
+                "gen": params.get("gen")}
 
     def validate(self, ctx, resolved):
         if resolved["mode"] not in _MODES:
@@ -464,6 +467,23 @@ class InteractionCapability(capability.Capability):
             return reply["baseline"]
         return fallback
 
+    def _claim_gen(self, zone):
+        """Claim this zone's next turn generation up front, and return it.
+
+        _announce needs turn ownership BEFORE it touches the microphone (requirement 1), which is
+        earlier than _say's step 2 -- an announcement that muted the mic and only then discovered it
+        had been superseded would have to unmute again, and the mic would have been dead for the
+        newer turn's own wake word. One counter, one meaning; _say revalidates on adoption.
+
+        Read and write stay under _lock together: HTTP threads and the timer thread claim against
+        the same counter, and a read-then-write without the lock hands two turns the same generation
+        -- neither would ever see itself superseded.
+        """
+        with self._lock:
+            my_gen = self._say_gen.get(zone, 0) + 1
+            self._say_gen[zone] = my_gen
+            return my_gen
+
     def _restore(self, ctx, zone, rid):
         with self._lock:
             if self._reply_active(ctx, zone) is not None:
@@ -791,9 +811,39 @@ class InteractionCapability(capability.Capability):
         #    Same critical section resolves and publishes the restore baseline: capturing it HERE
         #    (not at the restore step) means a mid-reply snapshot discard cannot strip it, and
         #    publishing it in _replies makes this zone reply-owned for _restore/_duck.
+        supplied_gen = resolved.get("gen")
         with self._lock:
-            my_gen = self._say_gen.get(zone, 0) + 1
-            self._say_gen[zone] = my_gen
+            if supplied_gen is not None:
+                # A pre-claimed gen is STALE by the time we see it: the caller spent up to ~17s on
+                # the mic state capture, the switch write and the confirmation (design 9.2, steps
+                # F-G; the two URL resolutions happen at C/D, before the claim, so they are outside
+                # this window). If a turn arrived in that gap, publishing our marker would overwrite
+                # ITS ownership -- the ratchet the S1b-2 ownership decision exists to prevent, where
+                # a superseded turn hands back its own stale baseline over the live one.
+                #
+                # The check and the publish are ONE critical section on purpose. Checking outside
+                # the lock is the same race one instruction later.
+                #
+                # `is None`, not a truthiness test: a supplied 0 is a bogus claim that must abort,
+                # and `if supplied_gen:` would fall through to claiming our own and play the whole
+                # announcement instead.
+                if self._say_gen.get(zone) != supplied_gen:
+                    LOG.info("SAY req=%s zone=%s adoption aborted: gen %s is stale (now %s)",
+                             rid, zone, supplied_gen, self._say_gen.get(zone))
+                    # A literal cr.ok, not superseded_result(): that closure is defined further
+                    # down. The metadata shape is identical. Nothing has been published yet, so
+                    # there is nothing to release -- and the caller's own finally still unmutes.
+                    return cr.ok(self.name, rid, "Said.", spoken_text=None,
+                                 metadata={"said": False, "reply_started": False,
+                                           "likely_silent": False, "replayed": False,
+                                           "superseded": True, "zone": zone})
+                # Adopt the claim rather than claiming again: a second bump would leave the caller's
+                # own superseded() comparing against a generation it does not hold, so every later
+                # check would read as superseded and the turn would abort mid-sequence.
+                my_gen = supplied_gen
+            else:
+                my_gen = self._say_gen.get(zone, 0) + 1
+                self._say_gen[zone] = my_gen
             baseline = self._reply_baseline(zone, prev_volume)
             my_snap = self._snaps.get(zone)
             # If the zone is already sitting somewhere WE did not put it, a third party moved it

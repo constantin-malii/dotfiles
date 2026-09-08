@@ -2846,5 +2846,227 @@ class EphemeralChimeSourceTest(unittest.TestCase):
         self.assertEqual(cap._last_source[self.ZONE], "library://radio/2")
 
 
+
+class GenerationAdoptionTest(unittest.TestCase):
+    """AN-01 Task 13: design 9.2. A pre-claimed gen is stale by the time _say adopts it.
+
+    _announce has to own the turn BEFORE it touches the microphone, which is earlier than _say's
+    step 2. Between the claim and the adoption it spends up to ~17s on the mic state capture (10s),
+    the switch.turn_on write (5s) and up to 2s of confirmation -- steps F-G only; the two URL
+    resolutions happen at C/D, before the claim, so they are outside that window.
+
+    Adopting such a gen unchecked lets a stale announcement overwrite a NEWER turn's ownership
+    marker: the ratchet the S1b-2 ownership decision exists to prevent, where a superseded turn
+    restores its own baseline over the live one and the zone craters or sticks loud.
+
+    The check and the publish must happen under ONE lock. A check outside it is the same race, one
+    instruction later.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _happy_states(self):
+        return [playing_with_id(0.36, "library://radio/2"),
+                playing_with_id(0.40, "builtin://radio/" + self.tts),
+                idle_state(), idle_state(), playing(0.40)]
+
+    # ---- the helper ---------------------------------------------------------
+
+    def test_claim_gen_bumps_and_returns_the_new_generation(self):
+        cap = self._cap()
+        self.assertEqual(cap._claim_gen(self.zone), 1)
+        self.assertEqual(cap._claim_gen(self.zone), 2)
+
+    def test_claim_gen_records_the_claim_so_say_can_see_it(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        self.assertEqual(cap._say_gen[self.zone], mine)
+
+    def test_claim_gen_counts_per_zone(self):
+        cap = self._cap()
+        self.assertEqual(cap._claim_gen("media_player.a"), 1)
+        self.assertEqual(cap._claim_gen("media_player.b"), 1)
+        self.assertEqual(cap._claim_gen("media_player.a"), 2)
+
+    def test_claim_gen_is_atomic_under_concurrent_callers(self):
+        # "Atomic" is the whole point of the helper: HTTP threads and the timer thread claim against
+        # the same counter. A read-then-write without the lock hands two turns the same generation,
+        # and neither would ever see itself superseded.
+        cap = self._cap()
+        got = []
+        guard = threading.Lock()
+
+        def claim():
+            g = cap._claim_gen(self.zone)
+            with guard:
+                got.append(g)
+
+        threads = [threading.Thread(target=claim) for _ in range(50)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(sorted(got), list(range(1, 51)))
+
+    # ---- a stale claim ------------------------------------------------------
+
+    def test_a_stale_gen_aborts_before_publishing_anything(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        cap._claim_gen(self.zone)                       # a newer turn arrives
+        ha = FakeHA(playing(0.36))
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st")
+        self.assertTrue(r["ok"])
+        self.assertTrue(r["metadata"]["superseded"])
+        self.assertEqual(ha.calls, [])                  # no volume_set, no play_media
+        self.assertNotIn(self.zone, cap._replies)       # the marker was never published
+
+    def test_a_stale_gen_does_not_overwrite_a_newer_turns_marker(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        newer = cap._claim_gen(self.zone)
+        cap._replies[self.zone] = {"gen": newer, "baseline": 0.42, "ts": 1000.0, "rid": "newer"}
+        ha = FakeHA(playing(0.36))
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st2")
+        self.assertEqual(cap._replies[self.zone]["gen"], newer)
+        self.assertEqual(cap._replies[self.zone]["baseline"], 0.42)
+        self.assertEqual(cap._replies[self.zone]["rid"], "newer")
+
+    def test_a_stale_gen_does_not_disturb_the_newer_turns_snapshot(self):
+        # The other half of the ratchet: retiring someone else's duck snapshot strips the baseline
+        # and its dead-man, so nothing is left to put the zone back.
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        cap._claim_gen(self.zone)
+        snap = {"volume": 0.55, "target": 0.15, "ts": 999.0, "timer": None}
+        cap._snaps[self.zone] = snap
+        ha = FakeHA(playing(0.36))
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st3")
+        self.assertIs(cap._snaps[self.zone], snap)
+        self.assertEqual(cap._snaps[self.zone]["target"], 0.15)
+
+    def test_a_stale_gen_does_not_end_the_newer_turn(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        cap._claim_gen(self.zone)
+        turn = {"ts": 1000.0, "playback": None, "stopped": False}
+        cap._turns[self.zone] = turn
+        ha = FakeHA(playing(0.36))
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st4")
+        self.assertIs(cap._turns.get(self.zone), turn)
+
+    def test_a_stale_gen_does_not_move_the_generation_counter(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        newer = cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st5")
+        self.assertEqual(cap._say_gen[self.zone], newer)
+
+    def test_the_abort_is_logged_with_both_generations(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts, "gen": mine}, "rid-st6")
+        self.assertTrue(any("stale" in m for m in cm.output), cm.output)
+
+    def test_a_gen_that_was_never_claimed_is_treated_as_stale(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts, "gen": 7}, "rid-ghost")
+        self.assertTrue(r["metadata"]["superseded"])
+        self.assertEqual(ha.calls, [])
+
+    def test_a_supplied_gen_of_zero_is_checked_not_ignored(self):
+        # `is None`, never a truthiness test: `if supplied_gen:` would silently fall through to
+        # "claim my own" for 0, so a bogus claim would play a full announcement instead of aborting.
+        cap = self._cap()
+        cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts, "gen": 0}, "rid-zero")
+        self.assertTrue(r["metadata"]["superseded"])
+        self.assertEqual(ha.calls, [])
+
+    # ---- a current claim ----------------------------------------------------
+
+    def test_a_current_gen_is_adopted_and_publishes_normally(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._happy_states())
+        r = capability.run(cap, FakeCtx(ha),
+                           {"mode": "say", "uri": self.tts, "gen": mine}, "rid-ok")
+        self.assertTrue(r["ok"])
+        self.assertFalse(r["metadata"]["superseded"])
+        self.assertIn("play_media", [c[1] for c in ha.calls])
+
+    def test_adopting_a_current_gen_does_not_bump_the_counter_again(self):
+        # Adoption must reuse the claim, not claim again. A second bump would leave the caller's own
+        # superseded() comparing against a generation it does not hold, so every later check would
+        # read as "superseded" and the turn would abort mid-sequence.
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._happy_states())
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-nobump")
+        self.assertEqual(cap._say_gen[self.zone], mine)
+
+    def test_an_adopted_turn_releases_ownership_on_the_way_out(self):
+        cap = self._cap()
+        mine = cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._happy_states())
+        capability.run(cap, FakeCtx(ha),
+                       {"mode": "say", "uri": self.tts, "gen": mine}, "rid-rel")
+        self.assertNotIn(self.zone, cap._replies)
+
+    # ---- the no-generation path stays exactly as it was ---------------------
+
+    def test_no_supplied_gen_bumps_its_own_exactly_as_today(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._happy_states())
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-own")
+        self.assertEqual(cap._say_gen[self.zone], 1)
+
+    def test_no_supplied_gen_still_supersedes_an_earlier_claim(self):
+        # An ordinary reply must keep winning over an in-flight one; adoption must not have turned
+        # the bump into a no-op.
+        cap = self._cap()
+        cap._claim_gen(self.zone)
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._happy_states())
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-own2")
+        self.assertEqual(cap._say_gen[self.zone], 2)
+
+    def test_say_text_without_a_gen_is_unaffected(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.set_states(self._happy_states())
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say_text", "text": "dinner is ready"},
+                           "rid-txt")
+        self.assertTrue(r["ok"])
+        self.assertEqual(cap._say_gen[self.zone], 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
