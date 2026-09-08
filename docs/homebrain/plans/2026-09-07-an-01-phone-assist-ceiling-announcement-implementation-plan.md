@@ -806,8 +806,21 @@ class ResolveMediaSourceTest(unittest.TestCase):
         self.assertRaises(IOError, self.ha.resolve_media_source, "media-source://x")
 
     def test_a_non_http_result_is_rejected(self):
+        # Must NOT be laundered into "http://host:port/ftp://nope/x.wav" -- see the corrected rule.
         self.reads[-1]["result"]["url"] = "ftp://nope/x.wav"
         self.assertRaises(IOError, self.ha.resolve_media_source, "media-source://x")
+
+    def test_a_lookalike_scheme_is_rejected(self):
+        self.reads[-1]["result"]["url"] = "httpfoo://nope/x.wav"
+        self.assertRaises(IOError, self.ha.resolve_media_source, "media-source://x")
+
+    def test_the_outbound_resolve_request_contains_no_dot_segment(self):
+        # REQUIRED. The './' must be gone from what HA is asked to sign, not from what it returns.
+        self.ha.resolve_media_source("media-source://media_source/local/./timer_chime.wav")
+        sent = [m for m in self.sent if m.get("type") == "media_source/resolve_media"][0]
+        self.assertNotIn("/./", sent["media_content_id"])
+        self.assertEqual(sent["media_content_id"],
+                         "media-source://media_source/local/timer_chime.wav")
 
     def test_an_unsuccessful_result_raises(self):
         self.reads[-1] = {"id": 1, "type": "result", "success": False,
@@ -858,6 +871,28 @@ Expected: FAIL — `AttributeError: 'HA' object has no attribute 'resolve_media_
 > auth”. **Never construct or accept a media_content_id with a `./` segment**, and if a future
 > resolve 401s, check for path normalisation before anything else.
 
+> **⚠ CORRECTED RULE — URL validation (2026-09-07).** An earlier revision of this task instructed
+> `if not str(url).startswith("http"): url = base + url`, then re-checked `startswith("http")`.
+> **That is wrong and was implemented before a test caught it.** `ftp://nope/x.wav` does not start
+> with `http`, so it fell into the prepend branch, became
+> `http://192.168.122.10:8123ftp://nope/x.wav`, and then **satisfied the follow-up guard** and was
+> returned as valid. Blind prepending launders a bad scheme into a plausible URL.
+>
+> The exact rule, in this order:
+>
+> | Result from HA | Action |
+> |---|---|
+> | starts `http://` or `https://` | **accept** unchanged |
+> | starts `/` (rooted path) | **absolutise** against `self.host:self.port` |
+> | anything else — `ftp:`, `data:`, `httpfoo:`, garbage, empty after the `no url` check | **reject** with `IOError` |
+>
+> The strict two-scheme prefix also rejects `httpfoo://`, which a bare `startswith("http")` accepts.
+>
+> **And normalise `/./` in the media-source identifier BEFORE calling HA's resolution, not after
+> receiving the URL.** After the fact is impossible: HA has already signed the un-normalised path,
+> so the signature is wrong no matter what the caller does to the returned string. A test must
+> assert the outbound `media_source/resolve_media` request carries no `/./`.
+
 - [ ] **Step 3: Implement.** Add to `haconn.py` after `tts_get_url`, and add `import wsutil` if the
   module-level import is not already present (it is — `haconn.py:6`):
 
@@ -876,6 +911,17 @@ Expected: FAIL — `AttributeError: 'HA' object has no attribute 'resolve_media_
 
         The returned URL is a bearer credential. NEVER log it; log self-fingerprints instead.
         """
+        # Normalise './' BEFORE asking HA to resolve -- not after receiving the url. HA signs the
+        # UN-normalised path and returns a NORMALISED url, so a './' yields a signature that cannot
+        # validate against the url it is attached to (AN-1 root cause). Fixing it after the fact is
+        # impossible: the signature is already wrong.
+        clean = uri
+        while "/./" in clean:
+            clean = clean.replace("/./", "/")
+        if clean != uri:
+            LOG.warning("MEDIA_SOURCE %r contained a './' segment; resolving %r instead "
+                        "(a './' yields a signature HA cannot validate)", uri, clean)
+
         s = None
         try:
             s, box = wsutil.ws_connect(self.host, self.port, "/api/websocket", timeout=timeout)
@@ -886,7 +932,7 @@ Expected: FAIL — `AttributeError: 'HA' object has no attribute 'resolve_media_
             if (wsutil.ws_read(s, box) or {}).get("type") != "auth_ok":
                 raise IOError("HA auth failed resolving a media source")
             wsutil.ws_send(s, {"id": 1, "type": "media_source/resolve_media",
-                               "media_content_id": uri})
+                               "media_content_id": clean})     # NOT `uri` -- see above
             msg = wsutil.ws_read(s, box) or {}
             if not msg.get("success"):
                 err = (msg.get("error") or {}).get("code", "unknown")
@@ -894,12 +940,20 @@ Expected: FAIL — `AttributeError: 'HA' object has no attribute 'resolve_media_
             url = (msg.get("result") or {}).get("url")
             if not url:
                 raise IOError("HA resolve_media returned no url")
-            if not str(url).startswith("http"):
-                # HA usually returns a RELATIVE signed path. Absolutise against our own
-                # host:port, which is already the MA-reachable NAT base from ha_url.
-                url = "http://%s:%s%s" % (self.host, self.port, url)
-            if not str(url).startswith("http"):
-                raise IOError("HA resolve_media returned a non-absolute url")
+            # Three cases, and they MUST be told apart -- see the CORRECTED RULE note below.
+            u = str(url)
+            if u.startswith("http://") or u.startswith("https://"):
+                pass                                    # already absolute
+            elif u.startswith("/"):
+                # HA returns a RELATIVE signed path. Absolutise against our own host:port, which
+                # is already the MA-reachable NAT base from ha_url.
+                u = "http://%s:%s%s" % (self.host, self.port, u)
+            else:
+                raise IOError("HA resolve_media returned a url that is neither absolute http(s) "
+                              "nor a rooted path")
+            url = u
+            LOG.info("MEDIA_SOURCE resolved %s -> clip=%s (%s)",
+                     clean, self._fingerprint(url), (msg.get("result") or {}).get("mime_type"))
             return url
         finally:
             if s is not None:

@@ -434,7 +434,15 @@ class ResolveMediaSourceTest(unittest.TestCase):
         self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
 
     def test_a_non_http_result_is_rejected(self):
+        # Must NOT be laundered into "http://host:port/ftp://nope/x.wav": a bare
+        # startswith("http") check sent this down the prepend branch and the result then satisfied
+        # the follow-up guard. Caught by this test before it shipped.
         self.reads[-1]["result"]["url"] = "ftp://nope/x.wav"
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    def test_a_lookalike_scheme_is_rejected(self):
+        # "httpfoo://" satisfies startswith("http") but is not a usable scheme.
+        self.reads[-1]["result"]["url"] = "httpfoo://nope/x.wav"
         self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
 
     def test_an_unsuccessful_result_raises(self):
