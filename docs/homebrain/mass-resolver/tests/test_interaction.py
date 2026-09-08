@@ -1821,5 +1821,75 @@ class SayTextFreshPlaybackTest(unittest.TestCase):
         self.assertEqual([c for c in ha.calls if c[1] == "play_media"], [])
 
 
+
+class GoldenSequenceTest(unittest.TestCase):
+    """AN-01 Task 5: byte-level pin on the calls `say` and `say_text` emit on the SUCCESS path.
+
+    Written BEFORE the AN-01 clip-loop refactor, deliberately. The _play_clip_and_wait extraction
+    and the shared-_say fixes must not change these sequences, and a 300-line extraction is not
+    proven safe by reading it -- only by asserting on what actually goes out to HA.
+
+    Scope note: this pins the SUCCESS path only. AN-01 intentionally changes one FAILURE path
+    (design 8.3a: an ambiguous play_media failure replays the captured source instead of
+    un-pausing), which is asserted by its own tests rather than here.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.norm_uri = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        # MA does not echo the raw URL back; it wraps it.
+        self.reply_mid = "builtin://radio/" + self.norm_uri
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _states(self):
+        return [playing_with_id(0.36, "library://radio/2"),   # step 1 capture
+                playing_with_id(0.40, self.reply_mid),        # start-poll: clip is playing
+                idle_state(), idle_state(),                   # finish-poll debounce (ended_seen>=2)
+                playing(0.40)]                                # step 8 restore read
+
+    EXPECTED = [("media_player", "media_pause"),
+                ("media_player", "volume_set"),
+                ("music_assistant", "play_media"),
+                ("media_player", "volume_set"),
+                ("music_assistant", "play_media")]
+
+    def test_say_success_path_call_sequence(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36)); ha.set_states(self._states())
+        r = run(cap, FakeCtx(ha), {"mode": "say", "uri": self.norm_uri})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([(d, s) for d, s, _ in ha.calls], self.EXPECTED)
+        self.assertEqual(ha.calls[1][2]["volume_level"], 0.40)      # reply_volume
+        self.assertEqual(ha.calls[2][2]["media_id"], self.norm_uri)  # the clip
+        self.assertEqual(ha.calls[3][2]["volume_level"], 0.36)      # baseline restored
+        self.assertEqual(ha.calls[4][2]["media_id"], "library://radio/2")  # source replayed
+
+    def test_say_success_path_timeouts(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36)); ha.set_states(self._states())
+        run(cap, FakeCtx(ha), {"mode": "say", "uri": self.norm_uri})
+        # play_media gets the long call timeout; the volume writes keep the REST default.
+        self.assertEqual([t for s, t in ha.timeouts if s == "play_media"], [20.0, 20.0])
+        self.assertEqual([t for s, t in ha.timeouts if s == "volume_set"], [5, 5])
+        self.assertEqual([t for s, t in ha.timeouts if s == "media_pause"], [5])
+
+    def test_say_text_success_path_call_sequence(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36)); ha.set_states(self._states())
+        ha.tts_url = self.norm_uri
+        r = run(cap, FakeCtx(ha), {"mode": "say_text", "text": "Your timer is finished."})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(ha.tts_calls, [("tts.piper", "Your timer is finished.")])
+        self.assertEqual([(d, s) for d, s, _ in ha.calls], self.EXPECTED)
+        self.assertEqual(ha.calls[1][2]["volume_level"], 0.40)
+        self.assertEqual(ha.calls[2][2]["media_id"], self.norm_uri)
+        self.assertEqual(ha.calls[3][2]["volume_level"], 0.36)
+        self.assertEqual(ha.calls[4][2]["media_id"], "library://radio/2")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
