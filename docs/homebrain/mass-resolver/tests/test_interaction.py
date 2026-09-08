@@ -3068,5 +3068,452 @@ class GenerationAdoptionTest(unittest.TestCase):
         self.assertEqual(cap._say_gen[self.zone], 1)
 
 
+
+class MicLeaseTest(unittest.TestCase):
+    """AN-01 Task 14: design 9.1-9.5.
+
+    A successful switch.turn_on is an accepted REQUEST, not a muted microphone: HA may accept it for
+    a device that never receives it (this satellite drops its ESPHome API with Errno 113). AN-2 also
+    measured HA answering the write in about 1ms while the state took ~255ms to report back. So the
+    state is read back before any audio plays, and announce_require_mic_mute means what it says.
+    """
+
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()               # per-test instance, so edits cannot leak
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        return ctx
+
+    def _off(self):
+        return {"state": "off", "attributes": {}}
+
+    def _on(self):
+        return {"state": "on", "attributes": {}}
+
+    # ---- claim --------------------------------------------------------------
+
+    def test_claim_reads_prev_then_writes_turn_on(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        lease, err = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(err)
+        self.assertFalse(lease["prev"])
+        self.assertEqual([(d, sv) for d, sv, _ in ha.calls], [("switch", "turn_on")])
+        self.assertEqual(ha.calls[0][2]["entity_id"], self.ENT)
+
+    def test_prev_true_is_recorded_when_the_operator_already_muted(self):
+        cap = self._cap()
+        ha = FakeHA(self._on())
+        lease, err = cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(err)
+        self.assertTrue(lease["prev"])
+
+    def test_the_lease_is_published_under_the_zone(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(self._ctx(ha), self.zone, gen, "rid-m")
+        self.assertEqual(cap._mic[self.zone]["gen"], gen)
+        self.assertEqual(cap._mic[self.zone]["rid"], "rid-m")
+        self.assertFalse(cap._mic[self.zone]["confirmed"])
+
+    def test_a_second_announcement_inherits_prev_and_does_not_read_the_switch(self):
+        # Without inheritance the second reads the live switch -- which the first set to `on` --
+        # concludes muted was the operator's preference, and leaves the satellite deaf forever.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-a")
+        ha._state = self._on()
+        reads = []
+        real = ha.get_entity_state
+        ha.get_entity_state = lambda e, timeout=10: (reads.append(e), real(e))[1]
+        lease2, err = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-b")
+        self.assertIsNone(err)
+        self.assertFalse(lease2["prev"])              # inherited from rid-a, not re-read
+        self.assertEqual(reads, [])
+
+    def test_an_inherited_prev_of_false_still_counts_as_inherited(self):
+        # `is None`, not truthiness: prev=False is a real inherited value. A truthiness check would
+        # re-read the switch -- which is exactly the bug inheritance exists to prevent.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-a")
+        ha._state = self._on()
+        lease2, _ = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-b")
+        self.assertFalse(lease2["prev"])
+
+    def test_an_unresolved_entity_refuses(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_mic_mute_entity = ""
+        lease, err = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(lease)
+        self.assertEqual(err["code"], "unavailable")
+        self.assertEqual(ha.calls, [])
+
+    def test_an_unresolved_entity_with_require_false_proceeds_without_a_lease(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_mic_mute_entity = ""
+        ctx.settings.announce_require_mic_mute = False
+        lease, err = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(lease)
+        self.assertIsNone(err)
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_a_read_failure_refuses(self):
+        cap = self._cap()
+        ha = FakeHA(boom=IOError("HA down"))
+        lease, err = cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(lease)
+        self.assertEqual(err["code"], "unavailable")
+
+    def test_a_write_failure_refuses(self):
+        cap = self._cap()
+        ha = FakeHA(self._off(), write_boom=IOError("no route"))
+        lease, err = cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertIsNone(lease)
+        self.assertEqual(err["code"], "unavailable")
+
+    def test_a_write_failure_leaves_no_lease_behind(self):
+        # Nothing was muted, so a lingering lease would make the NEXT announcement inherit a prev it
+        # never observed, and would give the dead-man a phantom to unmute.
+        cap = self._cap()
+        ha = FakeHA(self._off(), write_boom=IOError("no route"))
+        cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_every_refusal_uses_a_valid_error_code(self):
+        import command_result as cr_mod
+        cap = self._cap()
+        for ha, tweak in ((FakeHA(boom=IOError("x")), None),
+                          (FakeHA(self._off(), write_boom=IOError("x")), None),
+                          (FakeHA(self._off()), "blank")):
+            ctx = self._ctx(ha)
+            if tweak == "blank":
+                ctx.settings.announce_mic_mute_entity = ""
+            _, err = cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+            self.assertIn(err["code"], cr_mod.ERROR_CODES)
+            self.assertTrue(err["reason"])
+            err["chat_text"].encode("ascii")          # console cannot print non-ASCII
+
+    # ---- confirm ------------------------------------------------------------
+
+    def test_confirmation_polls_until_on_then_proceeds(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ha.set_states([self._off(), self._off(), self._on()])
+        ok, err = cap._mic_confirm(ctx, self.zone, gen, "rid-m")
+        self.assertTrue(ok)
+        self.assertIsNone(err)
+        self.assertTrue(cap._mic[self.zone]["confirmed"])
+
+    def test_confirm_timeout_refuses_and_is_bounded(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ok, err = cap._mic_confirm(ctx, self.zone, gen, "rid-m")
+        self.assertFalse(ok)
+        self.assertEqual(err["code"], "unavailable")
+
+    def test_confirm_terminates_even_if_the_clock_never_advances(self):
+        # This is not merely a test convenience. time.time is NOT monotonic: an NTP step backwards
+        # mid-confirm keeps `deadline - now` large, and a purely wall-clock loop would keep polling.
+        # The poll count derived from budget/step is the belt to that braces.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        before = len(ha.state_timeouts)
+        ok, err = cap._mic_confirm(ctx, self.zone, gen, "rid-m")
+        self.assertFalse(ok)
+        polls = len(ha.state_timeouts) - before
+        self.assertGreater(polls, 1)                  # it really did poll
+        self.assertLessEqual(polls, 9)                # 2000ms / 250ms, plus one
+
+    def test_a_raising_confirm_read_refuses_rather_than_propagating(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ha._boom = IOError("read blip")
+        ok, err = cap._mic_confirm(ctx, self.zone, gen, "rid-m")   # must not raise
+        self.assertFalse(ok)
+        self.assertEqual(err["code"], "unavailable")
+
+    def test_require_false_proceeds_unconfirmed(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_require_mic_mute = False
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ok, err = cap._mic_confirm(ctx, self.zone, gen, "rid-m")
+        self.assertFalse(ok)
+        self.assertIsNone(err)                        # no refusal: broadcast anyway
+        self.assertFalse(cap._mic[self.zone]["confirmed"])
+
+    def test_confirm_does_not_mark_a_lease_that_is_no_longer_ours(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        first = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, first, "rid-a")
+        second = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, second, "rid-b")
+        ha.set_states([self._on()])
+        ok, _ = cap._mic_confirm(ctx, self.zone, first, "rid-a")
+        self.assertTrue(ok)                           # the switch IS on
+        self.assertFalse(cap._mic[self.zone]["confirmed"])   # but rid-b's lease is untouched
+
+    # ---- release ------------------------------------------------------------
+
+    def test_release_restores_prev_and_clears_the_lease(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        self.assertTrue(cap._mic_release(ctx, self.zone, gen, "rid-m"))
+        self.assertEqual([(d, sv) for d, sv, _ in ha.calls],
+                         [("switch", "turn_on"), ("switch", "turn_off")])
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_release_leaves_an_already_muted_switch_on(self):
+        cap = self._cap()
+        ha = FakeHA(self._on())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        cap._mic_release(ctx, self.zone, gen, "rid-m")
+        self.assertNotIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_release_without_any_lease_is_a_no_op(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        self.assertFalse(cap._mic_release(self._ctx(ha), self.zone, 1, "rid-none"))
+        self.assertEqual(ha.calls, [])
+
+    def test_release_is_a_no_op_when_a_newer_announcement_holds_the_lease(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        first = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, first, "rid-a")
+        second = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, second, "rid-b")
+        before = len(ha.calls)
+        self.assertFalse(cap._mic_release(ctx, self.zone, first, "rid-a"))
+        self.assertEqual(len(ha.calls), before)
+        self.assertEqual(cap._mic[self.zone]["gen"], second)
+
+    def test_the_second_release_restores_the_original_prev(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        first = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, first, "rid-a")
+        second = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, second, "rid-b")
+        cap._mic_release(ctx, self.zone, second, "rid-b")
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_a_write_failure_on_release_keeps_the_lease_for_the_dead_man(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ha._write_boom = IOError("no route")
+        self.assertFalse(cap._mic_release(ctx, self.zone, gen, "rid-m"))
+        self.assertIn(self.zone, cap._mic)
+
+    # ---- the ownership rule that makes supersession safe --------------------
+
+    def test_a_zone_supersession_that_is_not_an_announcement_leaves_the_lease_ours(self):
+        # design 9.4/9.6. The release check is on _mic, NOT on _say_gen. A satellite reply or a
+        # say_text turn bumps _say_gen but never writes _mic, so the lease is still ours and we
+        # unmute IMMEDIATELY -- which is what is wanted, because the superseding turn is a person
+        # talking to the satellite and they need the microphone back now.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        cap._claim_gen(self.zone)                     # a satellite reply supersedes the zone
+        self.assertTrue(cap._mic_release(ctx, self.zone, gen, "rid-m"))
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_no_other_mode_ever_writes_the_mic_lease(self):
+        # The single invariant the whole scheme rests on: _mic is written only by the announcement
+        # path. If any ordinary turn started touching it, a non-announcement supersession would
+        # strand the mute instead of releasing it.
+        tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+        for params in ({"mode": "duck"}, {"mode": "restore"}, {"mode": "resume"},
+                       {"mode": "pause"}, {"mode": "volume_up"}, {"mode": "volume_down"},
+                       {"mode": "set_volume", "volume": 0.3},
+                       {"mode": "say", "uri": tts},
+                       {"mode": "say_text", "text": "hello"}):
+            cap = self._cap()
+            ha = FakeHA(playing(0.36))
+            ha.tts_url = tts
+            ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                           playing_with_id(0.40, "builtin://radio/" + tts),
+                           idle_state(), idle_state(), playing(0.40)])
+            capability.run(cap, self._ctx(ha), params, "rid-inv")
+            self.assertEqual(cap._mic, {}, params["mode"])
+
+
+class MicDeadManTest(unittest.TestCase):
+    """AN-01 Task 14: design 9.5. A stuck-muted microphone is a DEAF satellite -- a silent,
+    open-ended failure nobody finds until they try to talk to it.
+
+    The duration is a POLICY CUTOFF derived from an engineered budget, not a wall-clock bound: a
+    pathologically slow-but-live turn could cross it. Firing early costs a few seconds of self-wake
+    exposure; never firing leaves the satellite deaf with nothing scheduled to fix it, so the
+    trade-off favours liveness.
+    """
+
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        return ctx
+
+    def _off(self):
+        return {"state": "off", "attributes": {}}
+
+    def test_claim_arms_a_timer(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertEqual(len(FakeTimer.created), 1)
+        self.assertTrue(FakeTimer.created[0].started)
+
+    def test_derived_mic_deadman_is_about_185s_with_shipped_defaults(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertAlmostEqual(FakeTimer.created[0].interval, 182.0, delta=6.0)
+
+    def test_a_single_clip_announcement_gets_a_shorter_budget(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        cap._mic_claim(self._ctx(ha), self.zone, cap._claim_gen(self.zone), "rid-m", clips=1)
+        two = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha2 = FakeHA(self._off())
+        two._mic_claim(self._ctx(ha2), self.zone, two._claim_gen(self.zone), "rid-n", clips=2)
+        self.assertLess(FakeTimer.created[0].interval, FakeTimer.created[1].interval)
+
+    def test_an_explicit_deadman_ms_overrides_the_derivation(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        ctx.settings.announce_mic_deadman_ms = 30000
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+        self.assertEqual(FakeTimer.created[0].interval, 30.0)
+
+    def test_release_cancels_it(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        cap._mic_release(ctx, self.zone, gen, "rid-m")
+        self.assertTrue(FakeTimer.created[0].cancelled)
+
+    def test_a_release_that_leaves_it_muted_also_cancels_it(self):
+        cap = self._cap()
+        ha = FakeHA({"state": "on", "attributes": {}})
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        cap._mic_release(ctx, self.zone, gen, "rid-m")
+        self.assertTrue(FakeTimer.created[0].cancelled)
+
+    def test_a_failed_unmute_does_NOT_cancel_the_dead_man(self):
+        # Otherwise the log's promise that "the dead-man must reconcile" is a lie: the lease stays,
+        # the microphone stays muted, and nothing is scheduled to ever fix it.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        gen = cap._claim_gen(self.zone)
+        cap._mic_claim(ctx, self.zone, gen, "rid-m")
+        ha._write_boom = IOError("no route")
+        cap._mic_release(ctx, self.zone, gen, "rid-m")
+        self.assertFalse(FakeTimer.created[0].cancelled)
+        self.assertIn(self.zone, cap._mic)
+
+    def test_firing_restores_prev(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+        FakeTimer.created[0].fire()
+        self.assertIn("turn_off", [sv for _, sv, _ in ha.calls])
+        self.assertNotIn(self.zone, cap._mic)
+
+    def test_firing_does_nothing_once_a_newer_announcement_owns_the_lease(self):
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-a")
+        stale = FakeTimer.created[0]
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-b")
+        before = len([sv for _, sv, _ in ha.calls if sv == "turn_off"])
+        stale.fire()
+        self.assertEqual(len([sv for _, sv, _ in ha.calls if sv == "turn_off"]), before)
+        self.assertIn(self.zone, cap._mic)
+
+    def test_a_raising_release_does_not_escape_the_timer_thread(self):
+        # The dead-man runs on the timer thread; an exception there is unhandled and kills nothing
+        # useful while the microphone stays muted.
+        cap = self._cap()
+        ha = FakeHA(self._off())
+        ctx = self._ctx(ha)
+        cap._mic_claim(ctx, self.zone, cap._claim_gen(self.zone), "rid-m")
+
+        def boom(*a, **k):
+            raise RuntimeError("kaboom")
+        cap._mic_release = boom
+        FakeTimer.created[0].fire()                   # must not raise
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

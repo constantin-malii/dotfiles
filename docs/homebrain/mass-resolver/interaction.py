@@ -33,6 +33,15 @@ class InteractionCapability(capability.Capability):
         self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
                                                       #   turn is in flight; _say owns the zone's volume for its
                                                       #   lifetime (S1b-2 decision (b)). Guarded by _lock.
+        self._mic = {}                                # zone -> {"gen", "prev", "confirmed",
+                                                      #          "rid", "ts", "timer"}
+                                                      #   WRITTEN ONLY BY THE ANNOUNCEMENT PATH.
+                                                      #   Nothing else in this class touches it --
+                                                      #   that invariant is why a NON-announcement
+                                                      #   supersession unmutes immediately instead
+                                                      #   of stranding the mute, since such a turn
+                                                      #   bumps _say_gen but leaves the lease ours
+                                                      #   (design 9.1/9.4/9.6). Guarded by _lock.
 
     def resolve(self, ctx, params):
         mode = (params.get("mode") or "").strip().lower()
@@ -483,6 +492,193 @@ class InteractionCapability(capability.Capability):
             my_gen = self._say_gen.get(zone, 0) + 1
             self._say_gen[zone] = my_gen
             return my_gen
+
+    def _mic_budget_s(self, ctx, clips):
+        """Policy cutoff for the mic dead-man, derived from the engineered phase budget (design
+        6.5).
+
+        NOT a wall-clock bound: the phase timeouts it sums are per-operation inactivity allowances,
+        so a pathologically slow-but-live turn can cross this. Firing early costs a few seconds of
+        self-wake exposure; never firing leaves the satellite deaf with nothing scheduled to fix it,
+        so the trade-off deliberately favours liveness.
+        """
+        explicit = int(getattr(ctx.settings, "announce_mic_deadman_ms", 0))
+        if explicit > 0:
+            return explicit / 1000.0
+        start = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
+        call = int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0
+        confirm = int(getattr(ctx.settings, "announce_mic_confirm_timeout_ms", 2000)) / 1000.0
+        chime_fin = int(getattr(ctx.settings, "announce_chime_finish_timeout_ms", 15000)) / 1000.0
+        msg_fin = int(getattr(ctx.settings, "announce_message_finish_timeout_ms", 45000)) / 1000.0
+        floor = int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0
+        # rows 5-16 of the design 6.5 table, then 30s of margin
+        total = (confirm + 5.0 + 5.0                       # confirm, pause, raise
+                 + call + start + chime_fin                # chime
+                 + call + start + msg_fin                  # message
+                 + 5.0 + call + 5.0                        # restore, replay, unmute
+                 + 5 * floor)
+        if clips < 2:
+            total -= (call + start + chime_fin)
+        return total + 30.0
+
+    def _mic_refusal(self):
+        return {"code": "unavailable", "reason": "mic mute unavailable",
+                "chat_text": "I can't announce without muting the microphone."}
+
+    def _mic_entity(self, ctx):
+        return (getattr(ctx.settings, "announce_mic_mute_entity", "") or "").strip()
+
+    def _mic_claim(self, ctx, zone, my_gen, rid, clips=2):
+        """Lease the microphone and mute it. Returns (lease, err); err is a dict for cr.err.
+
+        Muting is requirement 7's fail-safe: an unmuted satellite hears the announcement come out of
+        the ceiling and wakes on it. announce_require_mic_mute means what it says -- with it set, a
+        microphone we cannot mute is a refusal, not a warning.
+        """
+        entity = self._mic_entity(ctx)
+        require = bool(getattr(ctx.settings, "announce_require_mic_mute", True))
+        if not entity:
+            # config.py ships this EMPTY on purpose, so a machine with no config refuses rather
+            # than broadcasting with a live microphone.
+            LOG.warning("ANNOUNCE req=%s no announce_mic_mute_entity configured", rid)
+            return (None, self._mic_refusal() if require else None)
+        with self._lock:
+            existing = self._mic.get(zone)
+            inherited = existing["prev"] if existing is not None else None
+        if inherited is None:
+            # First claim: read the live state. A later announcement INHERITS this instead of
+            # re-reading, or it would see the `on` we just wrote and treat muted as the operator's
+            # standing preference -- leaving the satellite deaf forever (design 9.2). `is None`
+            # rather than a truthiness test, because an inherited False is a real value.
+            try:
+                st = ctx.ha.get_entity_state(entity) or {}
+            except Exception as e:
+                LOG.warning("ANNOUNCE req=%s could not read %s (%r)", rid, entity, e)
+                return (None, self._mic_refusal() if require else None)
+            inherited = (st.get("state") == "on")
+        lease = {"gen": my_gen, "prev": bool(inherited), "confirmed": False,
+                 "rid": rid, "ts": self._clock(), "timer": None}
+        with self._lock:
+            self._mic[zone] = lease            # published BEFORE the write, so a crash between the
+                                               #   write and the confirmation still leaves something
+                                               #   for the dead-man and the finally to reconcile
+        try:
+            ctx.ha.call_service_rest("switch", "turn_on", {"entity_id": entity})
+        except Exception as e:
+            LOG.warning("ANNOUNCE req=%s switch.turn_on %s failed (%r)", rid, entity, e)
+            with self._lock:
+                if self._mic.get(zone) is lease:
+                    del self._mic[zone]        # nothing was muted, so leaving a lease would make
+                                               #   the NEXT announcement inherit a prev nobody
+                                               #   observed, and hand the dead-man a phantom
+            return (None, self._mic_refusal() if require else None)
+        secs = self._mic_budget_s(ctx, clips)
+        t = self._timer_factory(secs, self._mic_deadman, [ctx, zone, my_gen])
+        lease["timer"] = t
+        t.start()
+        LOG.info("ANNOUNCE req=%s zone=%s mic leased gen=%s prev=%s deadman=%.0fs",
+                 rid, zone, my_gen, lease["prev"], secs)
+        return (lease, None)
+
+    def _mic_confirm(self, ctx, zone, my_gen, rid):
+        """Poll the switch until it reports `on`. Returns (confirmed, err).
+
+        A 200 from switch.turn_on means HA ACCEPTED the request, not that the microphone is muted:
+        this satellite drops its ESPHome API (Errno 113), and AN-2 measured HA answering the write
+        in about 1ms while the state took ~255ms to report back. Without the read-back,
+        requirement 7's fail-safe would be satisfied by an accepted request rather than an observed
+        state (design 9.3). AN-2 also confirmed HA does NOT fake `on` for an unreachable device,
+        which is what makes this read meaningful rather than decorative.
+        """
+        entity = self._mic_entity(ctx)
+        require = bool(getattr(ctx.settings, "announce_require_mic_mute", True))
+        if not entity:
+            return (False, self._mic_refusal() if require else None)
+        budget = int(getattr(ctx.settings, "announce_mic_confirm_timeout_ms", 2000)) / 1000.0
+        step = max(int(getattr(ctx.settings, "announce_mic_confirm_poll_ms", 250)) / 1000.0, 0.05)
+        floor = int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0
+        deadline = self._clock() + budget
+        # Bounded by the wall-clock deadline AND by a poll count. The count is not redundant:
+        # time.time is not monotonic, so an NTP step backwards mid-confirm keeps `deadline - now`
+        # large and a purely clock-driven loop would keep polling past its budget.
+        max_polls = int(budget / step) + 1
+        polls = 0
+        while polls < max_polls:
+            left = deadline - self._clock()
+            if left < floor:
+                break
+            try:
+                st = ctx.ha.get_entity_state(entity, timeout=min(10, max(left, floor))) or {}
+            except Exception as e:
+                # A read blip must produce the documented refusal, not a bare traceback out of a
+                # capability -- core would report it as an unattributed 500.
+                LOG.warning("ANNOUNCE req=%s confirm read of %s failed (%r)", rid, entity, e)
+                st = {}
+            polls += 1
+            if st.get("state") == "on":
+                with self._lock:
+                    lease = self._mic.get(zone)
+                    if lease is not None and lease.get("gen") == my_gen:
+                        lease["confirmed"] = True   # only OUR lease; a newer one is not ours to mark
+                LOG.info("ANNOUNCE req=%s zone=%s mic mute CONFIRMED after %d poll(s)",
+                         rid, zone, polls)
+                return (True, None)
+            self._sleeper(step)
+        LOG.warning("ANNOUNCE req=%s zone=%s mic mute NOT confirmed within %.1fs (require=%s)",
+                    rid, zone, budget, require)
+        if require:
+            return (False, {"code": "unavailable", "reason": "mic mute not confirmed",
+                            "chat_text": "I couldn't mute the microphone, so I didn't announce."})
+        return (False, None)
+
+    def _mic_release(self, ctx, zone, my_gen, rid):
+        """Restore the microphone -- only if the LEASE is still ours. Returns whether it restored.
+
+        The check is on _mic, NOT on _say_gen. Zone supersession by a satellite reply or a say_text
+        turn bumps _say_gen but never writes _mic, so the lease is still ours and we unmute
+        IMMEDIATELY -- which is exactly what is wanted: the superseding turn is a person talking to
+        the satellite, and they need the microphone back now (design 9.4/9.6). Only a newer
+        ANNOUNCEMENT takes the lease, and then it owns the restore.
+        """
+        entity = self._mic_entity(ctx)
+        with self._lock:
+            lease = self._mic.get(zone)
+            if lease is None or lease.get("gen") != my_gen:
+                LOG.info("ANNOUNCE req=%s zone=%s mic release skipped: lease is not ours", rid, zone)
+                return False
+        if lease.get("prev"):
+            # The operator already had it muted; leave it muted.
+            self._cancel_timer(lease)
+            with self._lock:
+                if self._mic.get(zone) is lease:
+                    del self._mic[zone]
+            LOG.info("ANNOUNCE req=%s zone=%s mic left muted (prev=on)", rid, zone)
+            return True
+        try:
+            ctx.ha.call_service_rest("switch", "turn_off", {"entity_id": entity})
+        except Exception as e:
+            # Deliberately BEFORE any cancel: the dead-man is the only thing left that can fix a
+            # microphone we failed to unmute, so cancelling it here would make this log line a lie
+            # and leave the satellite deaf with nothing scheduled.
+            LOG.error("ANNOUNCE req=%s zone=%s mic unmute FAILED (%r); dead-man must reconcile",
+                      rid, zone, e)
+            return False
+        self._cancel_timer(lease)
+        with self._lock:
+            if self._mic.get(zone) is lease:
+                del self._mic[zone]
+        LOG.info("ANNOUNCE req=%s zone=%s mic restored", rid, zone)
+        return True
+
+    def _mic_deadman(self, ctx, zone, my_gen):
+        LOG.warning("ANNOUNCE mic dead-man fired zone=%s gen=%s; restoring the microphone",
+                    zone, my_gen)
+        try:
+            self._mic_release(ctx, zone, my_gen, "mic-deadman")
+        except Exception as e:
+            # This runs on the timer thread, where an escaping exception is unhandled and fixes
+            # nothing while the microphone stays muted.
+            LOG.error("ANNOUNCE mic dead-man failed zone=%s (%r)", zone, e)
 
     def _restore(self, ctx, zone, rid):
         with self._lock:
