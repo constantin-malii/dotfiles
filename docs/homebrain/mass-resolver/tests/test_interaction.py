@@ -4652,5 +4652,348 @@ class AmbiguousPlayRecoveryTest(unittest.TestCase):
         self.assertEqual(cap._mic, {})                    # and the microphone still came back
 
 
+
+class MarkerBudgetTest(unittest.TestCase):
+    """AN-01 Task 18: design 8.4(a). The orphan threshold is
+    (say_start + say_reply)/1000 + 60 = ~95s with these settings. A turn owning the zone for two
+    clips can legitimately hold it longer, so it would declare its OWN marker stale and be
+    reclaimed mid-flight -- duck and restore would take the zone back while the announcement was
+    still speaking.
+
+    The marker carries its own budget: the step-2-to-finally span, NOT just the poll budgets. A
+    clip-count multiplier was the first draft and is worse -- with per-clip timeouts the clips are
+    different sizes, so clips x (start + reply) over-counts an announcement by roughly 3x.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self, now):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: now[0],
+                                                 sleeper=FakeSleeper())
+
+    def _marker(self, **over):
+        m = {"gen": 1, "baseline": 0.36, "ts": 1000.0, "rid": "r"}
+        m.update(over)
+        return m
+
+    # ---- _reply_active honours the published budget -------------------------
+
+    def test_a_marker_with_a_budget_is_not_stale_before_it_elapses(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=145.0)
+        now[0] = 1000.0 + 145.0 + 30.0            # inside 145 + 60
+        self.assertIsNotNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+
+    def test_a_marker_with_a_budget_is_stale_after_it_elapses(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=145.0)
+        now[0] = 1000.0 + 145.0 + 61.0
+        self.assertIsNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+
+    def test_a_marker_without_a_budget_keeps_todays_threshold(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker()
+        now[0] = 1000.0 + 240.0
+        # FakeSettings has say_reply_timeout_ms = 30000, so the legacy budget is 95s.
+        self.assertIsNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+        now[0] = 1000.0 + 50.0
+        cap._replies[self.zone]["ts"] = now[0]
+        self.assertIsNotNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+
+    def test_an_explicit_budget_of_none_falls_back_to_the_legacy_formula(self):
+        # say/say_text publish the key as None rather than omitting it, so the fallback has to be
+        # keyed on the VALUE, not on the key's presence.
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=None)
+        now[0] = 1000.0 + 96.0
+        self.assertIsNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+
+    def test_a_zero_budget_is_honoured_rather_than_treated_as_absent(self):
+        # `is None`, not truthiness: 0.0 means "no span of its own", which is still an answer.
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=0.0)
+        now[0] = 1000.0 + 61.0
+        self.assertIsNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+        cap._replies[self.zone]["ts"] = now[0]
+        self.assertIsNotNone(cap._reply_active(FakeCtx(FakeHA()), self.zone))
+
+    def test_say_owns_restore_off_still_disowns_the_zone_regardless_of_the_budget(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=145.0)
+        ctx = FakeCtx(FakeHA())
+        ctx.settings = FakeSettings()
+        ctx.settings.say_owns_restore = False
+        self.assertIsNone(cap._reply_active(ctx, self.zone))
+
+    # ---- what _say publishes ------------------------------------------------
+
+    def _spy_marker(self, cap):
+        seen = {}
+        real_play = cap._play_clip_and_wait
+
+        def spy(ctx, rid, zone, norm_uri, match_key, clip, opts, superseded):
+            # The marker is deleted by release_reply, so capture it WHILE in flight: the clip
+            # helper runs after step 2 has published it.
+            seen.setdefault("marker", dict(cap._replies.get(zone) or {}))
+            return real_play(ctx, rid, zone, norm_uri, match_key, clip, opts, superseded)
+        cap._play_clip_and_wait = spy
+        return seen
+
+    def test_say_publishes_a_budget_for_a_multi_clip_turn(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        seen = self._spy_marker(cap)
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "uris": [self.tts, self.tts],
+                                          "match_keys": [self.tts, self.tts],
+                                          "finish_timeouts": [15.0, 45.0]}, "rid-mb")
+        self.assertIsNotNone(seen["marker"].get("marker_budget_s"))
+        # 5 + 5 + sum(finish + start + call) + 5 + call, with FakeSettings' 5s start / 20s call.
+        self.assertAlmostEqual(seen["marker"]["marker_budget_s"], 145.0, delta=1.0)
+
+    def test_say_text_publishes_no_budget(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        seen = self._spy_marker(cap)
+        capability.run(cap, FakeCtx(ha), {"mode": "say_text", "text": "hello"}, "rid-st")
+        self.assertIsNone(seen["marker"].get("marker_budget_s"))
+
+    def test_plain_say_publishes_no_budget(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        seen = self._spy_marker(cap)
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-plain")
+        self.assertIsNone(seen["marker"].get("marker_budget_s"))
+
+    def test_an_announcement_publishes_a_budget_that_covers_its_own_span(self):
+        now = [1000.0]
+        cap = self._cap(now)
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ha.media_url = "http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=" + FAKE_SIG
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")])
+        seen = self._spy_marker(cap)
+        capability.run(cap, ctx, {"mode": "announce", "text": "dinner is ready"}, "rid-an")
+        budget = seen["marker"].get("marker_budget_s")
+        self.assertIsNotNone(budget)
+        self.assertGreater(budget, 95.0)          # i.e. beyond the legacy orphan threshold
+
+    def test_a_longer_message_timeout_widens_the_budget(self):
+        # The point of the whole task: announce_message_finish_timeout_ms is a tunable, and raising
+        # it must not silently reintroduce mid-flight reclaim. This is defence for the config, not
+        # for today's numbers.
+        budgets = []
+        for msg_ms in (45000, 240000):
+            now = [1000.0]
+            cap = self._cap(now)
+            ha = FakeHA(playing(0.36))
+            ha.tts_url = self.tts
+            ctx = FakeCtx(ha)
+            ctx.settings = FakeSettings()
+            ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+            ctx.settings.announce_chime_uri = ""
+            ctx.settings.announce_message_finish_timeout_ms = msg_ms
+            ha.set_states([{"state": "off", "attributes": {}},
+                           {"state": "on", "attributes": {}},
+                           playing_with_id(0.36, "library://radio/2")])
+            seen = self._spy_marker(cap)
+            capability.run(cap, ctx, {"mode": "announce", "text": "dinner is ready"}, "rid-w")
+            budgets.append(seen["marker"]["marker_budget_s"])
+        self.assertGreater(budgets[1], budgets[0] + 190.0)
+
+    def test_a_long_announcement_does_not_declare_its_own_marker_stale(self):
+        # The defect itself, end to end at the _reply_active level.
+        now = [1000.0]
+        cap = self._cap(now)
+        cap._replies[self.zone] = self._marker(marker_budget_s=145.0)
+        for offset in (100.0, 145.0, 200.0):
+            now[0] = 1000.0 + offset
+            self.assertIsNotNone(cap._reply_active(FakeCtx(FakeHA()), self.zone), offset)
+
+
+class ClipPollBoundTest(unittest.TestCase):
+    """AN-01 Task 18: the clip poll must be bounded by BOTH its accumulated sleep and its wall-clock
+    deadline.
+
+    A correction to something I reported after Task 15. I claimed the per-clip finish timeout was
+    only advisory once a turn deadline was set. That was wrong: the breaks are
+    min(start_deadline, deadline) and min(finish_deadline, deadline), so each clip's own budget is
+    enforced. The tests below pin that, so the claim cannot be made again.
+
+    The real defect in the same code is narrower. With a deadline set, the loop was PURELY
+    wall-clock: it dropped the accumulated-sleep test entirely. time.time is not monotonic, so a
+    clock that stalls or steps backwards leaves the poll unbounded -- which is also why the planned
+    Task 15 tests, written against a frozen clock, could not terminate. Enforcing both bounds costs
+    nothing under a sane clock, where the wall clock always fires first.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    URI = "http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+    WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+
+    def _opts(self, **over):
+        opts = {"start_timeout": 5.0, "finish_timeout": 10.0, "call_timeout": 20.0,
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
+        opts.update(over)
+        return opts
+
+    def _run(self, cap, ha, opts):
+        ctx = FakeCtx(ha)
+        return cap._play_clip_and_wait(ctx, "rid1", self.ZONE, self.URI, self.URI,
+                                       "clip", opts, lambda: False)
+
+    def _match(self):
+        return playing_with_id(0.70, self.WRAPPED)
+
+    # ---- the belt: a clock that does not advance ----------------------------
+
+    def test_a_start_poll_with_a_deadline_terminates_on_a_frozen_clock(self):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA(idle_state())
+        res = self._run(cap, ha, self._opts(deadline=1070.0, start_timeout=5.0, poll_secs=0.5))
+        self.assertFalse(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 10)      # 5.0s / 0.5s of accumulated sleep
+
+    def test_a_finish_poll_with_a_deadline_terminates_on_a_frozen_clock(self):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA(self._match())
+        res = self._run(cap, ha, self._opts(deadline=1070.0, finish_timeout=3.0, poll_secs=0.5))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 7)       # 1 start + 3.0s / 0.5s finish
+
+    def test_a_poll_terminates_when_the_clock_steps_backwards(self):
+        # An NTP correction mid-turn. A purely wall-clock loop keeps `deadline - now` large and
+        # never exits.
+        now = [1000.0]
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer,
+                                               clock=lambda: now[0],
+                                               sleeper=lambda secs: now.__setitem__(0, now[0] - 1))
+        ha = FakeHA(idle_state())
+        res = self._run(cap, ha, self._opts(deadline=1005.0, start_timeout=5.0, poll_secs=0.5))
+        self.assertFalse(res["started"])
+        self.assertLessEqual(len(ha.state_timeouts), 11)
+
+    # ---- the braces: each clip's own budget really is enforced --------------
+
+    def test_the_per_clip_finish_timeout_bounds_a_clip_inside_a_longer_turn_deadline(self):
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA(self._match())
+        res = self._run(cap, ha, self._opts(deadline=clock.t + 600.0, finish_timeout=2.0,
+                                            poll_secs=0.5))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 5)       # 1 start + 2.0s / 0.5s, NOT 600s worth
+
+    def test_the_per_clip_wall_clock_bound_is_not_masked_by_the_sleep_belt(self):
+        # The discriminating case for min(finish_deadline, deadline). With reads that cost no
+        # wall-clock time the two bounds fire together, so a test like the one above cannot tell
+        # whether the per-clip wall-clock bound exists at all -- the sleep belt would stop the poll
+        # either way.
+        #
+        # Here each read burns 1.5s while a poll sleeps 0.5s, so the wall clock runs 4x the
+        # accumulated sleep. This clip's own 2.0s budget is reached after a single read, long before
+        # the sleep belt would notice, and the 600s turn deadline is nowhere near.
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA()
+        reads = []
+        first = [True]
+
+        def watch(entity_id, timeout=None):
+            reads.append(timeout)
+            clock.advance(1.5)                            # a slow read
+            if first[0]:
+                first[0] = False
+                return self._match()                      # the clip starts immediately
+            return self._match()                          # ...and keeps playing
+        ha.get_entity_state = watch
+        res = self._run(cap, ha, self._opts(deadline=clock.t + 600.0, finish_timeout=2.0,
+                                            poll_secs=0.5))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(reads), 2)      # 1 start + 1 finish; NOT the 5 the sleep belt allows
+
+    def test_a_short_turn_deadline_still_wins_over_a_long_per_clip_timeout(self):
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA(self._match())
+        res = self._run(cap, ha, self._opts(deadline=clock.t + 1.0, finish_timeout=600.0,
+                                            poll_secs=0.5))
+        self.assertTrue(res["started"])
+        self.assertLessEqual(len(ha.state_timeouts), 4)
+
+    def test_the_wall_clock_bound_still_fires_first_under_a_normal_clock(self):
+        # No behaviour change where it matters: reads take real time, so the wall clock reaches the
+        # budget before the accumulated sleep does. The belt only bites when the clock misbehaves.
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA()
+        burn = []
+
+        def watch(entity_id, timeout=None):
+            burn.append(timeout)
+            clock.advance(0.5)                            # each read costs as much as a poll
+            return idle_state()
+        ha.get_entity_state = watch
+        res = self._run(cap, ha, self._opts(deadline=clock.t + 600.0, start_timeout=5.0,
+                                            poll_secs=0.5))
+        self.assertFalse(res["started"])
+        self.assertEqual(len(burn), 5)                    # 5.0s of WALL clock, not 10 sleeps
+
+    # ---- say / say_text timing semantics are untouched ---------------------
+
+    def test_with_no_deadline_a_slow_read_does_not_shorten_the_poll(self):
+        # say and say_text keep accumulated-sleep bounding: time spent inside the reads must NOT
+        # count against the budget, or their effective poll count would silently drop.
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA()
+        seen = []
+
+        def watch(entity_id, timeout=None):
+            seen.append(timeout)
+            clock.advance(30.0)                           # a very slow read
+            return idle_state()
+        ha.get_entity_state = watch
+        res = self._run(cap, ha, self._opts(deadline=None, start_timeout=5.0, poll_secs=0.5))
+        self.assertFalse(res["started"])
+        self.assertEqual(len(seen), 10)                   # still 5.0s / 0.5s of sleep
+
+    def test_with_no_deadline_reads_are_still_unclipped(self):
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ha = FakeHA(self._match())
+        self._run(cap, ha, self._opts(deadline=None))
+        self.assertEqual(set(ha.state_timeouts), set([10]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

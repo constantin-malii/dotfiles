@@ -252,8 +252,19 @@ class InteractionCapability(capability.Capability):
         reply = self._replies.get(zone)
         if reply is None:
             return None
-        budget = (int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) +
-                  int(getattr(ctx.settings, "say_reply_timeout_ms", 30000))) / 1000.0
+        # The marker's legitimate lifetime is step 2 -> finally: the pause and volume writes,
+        # every play_media at its call timeout, all the poll budgets, the restore write and the
+        # replay. A turn that knows its own span publishes it; older callers keep today's formula.
+        #
+        # Without this, a two-clip announcement outlives the legacy threshold and declares its OWN
+        # marker orphaned, so duck and restore reclaim the zone while it is still speaking.
+        #
+        # `is None`, not truthiness: say and say_text publish the key as None rather than omitting
+        # it, and a published 0.0 is an answer rather than an absence.
+        budget = reply.get("marker_budget_s")
+        if budget is None:
+            budget = (int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) +
+                      int(getattr(ctx.settings, "say_reply_timeout_ms", 30000))) / 1000.0
         ts = reply.get("ts")
         if ts is not None and (self._clock() - ts) > (budget + 60.0):
             LOG.warning("reply marker zone=%s from req=%s is stale (%ds); reclaiming the zone",
@@ -989,7 +1000,10 @@ class InteractionCapability(capability.Capability):
         say what a "this clip is playing" observation looks like.
 
         `opts` carries `start_timeout`, `finish_timeout`, `call_timeout`, `poll_secs`,
-        `blank_grace`, `floor` and `deadline` (float, or None for accumulated-sleep bounding).
+        `blank_grace`, `floor` and `deadline` (float, or None). Each poll is bounded by its own
+        accumulated sleep AND, when a deadline is given, by the earlier of that deadline and this
+        clip's own timeout -- so a generous turn budget never lets one clip overrun its allowance,
+        and a clock that stalls or steps backwards cannot leave the poll unbounded.
 
         Returns {"started", "issued", "clip"}. Propagates whatever play_media raises -- the caller's
         finally is the recovery path, and it owns the volume restore, so it has to see the failure.
@@ -1024,10 +1038,19 @@ class InteractionCapability(capability.Capability):
         while True:
             if superseded():
                 return out
-            if deadline is None:
-                if elapsed >= start_timeout:
-                    break
-            elif self._clock() >= min(start_deadline, deadline):
+            # Bounded by BOTH the accumulated sleep and, when there is one, the wall clock.
+            #
+            # The wall-clock test is what enforces this clip's own budget alongside the turn
+            # deadline -- min(start_deadline, deadline) means a long turn budget cannot let one clip
+            # poll past its own allowance, and a short turn budget still wins.
+            #
+            # The accumulated-sleep test is the belt. time.time is not monotonic, so a clock that
+            # stalls or steps backwards keeps `deadline - now` large and would leave a purely
+            # wall-clock loop unbounded. Under a sane clock the wall clock always reaches the budget
+            # first -- reads take real time while the sleep count does not -- so this costs nothing.
+            if elapsed >= start_timeout:
+                break
+            if deadline is not None and self._clock() >= min(start_deadline, deadline):
                 break
             rt = read_timeout(10)
             if rt is None:
@@ -1060,10 +1083,11 @@ class InteractionCapability(capability.Capability):
         while True:
             if superseded():
                 return out
-            if deadline is None:
-                if elapsed >= finish_timeout:
-                    break
-            elif self._clock() >= min(finish_deadline, deadline):
+            # Both bounds again -- see the start poll above for why the accumulated-sleep test is
+            # kept even when a deadline is set.
+            if elapsed >= finish_timeout:
+                break
+            if deadline is not None and self._clock() >= min(finish_deadline, deadline):
                 break
             rt = read_timeout(10)
             if rt is None:
@@ -1209,8 +1233,22 @@ class InteractionCapability(capability.Capability):
             # The duck floor as it stands NOW: step 4 overwrites snap["target"] with reply_volume,
             # so the restore check below must use this captured copy, not re-read the snapshot.
             duck_floor = my_snap.get("target") if my_snap is not None else None
+            # A caller that supplied per-clip finish timeouts knows its own span, so it
+            # publishes it rather than letting _reply_active guess from the single-clip formula. A
+            # clip-count multiplier was the first idea and is worse: with per-clip timeouts the
+            # clips are different sizes, so clips x (start + reply) over-counts an announcement by
+            # roughly 3x, which would keep a crashed turn owning the zone far too long.
+            marker_budget = None
+            if resolved.get("finish_timeouts"):
+                m_call = int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0
+                m_start = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
+                per_clip = sum(float(t) + m_start + m_call
+                               for t in resolved["finish_timeouts"])
+                # pause, raise, the clips, the restore, the replay
+                marker_budget = 5.0 + 5.0 + per_clip + 5.0 + m_call
             self._replies[zone] = {"gen": my_gen, "baseline": baseline,
-                                   "ts": self._clock(), "rid": rid}
+                                   "ts": self._clock(), "rid": rid,
+                                   "marker_budget_s": marker_budget}
 
         def superseded():
             return self._say_gen.get(zone) != my_gen
