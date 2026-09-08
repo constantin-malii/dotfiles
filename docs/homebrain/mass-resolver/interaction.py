@@ -33,6 +33,12 @@ class InteractionCapability(capability.Capability):
         self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
                                                       #   turn is in flight; _say owns the zone's volume for its
                                                       #   lifetime (S1b-2 decision (b)). Guarded by _lock.
+        self._vol_recovery = {}                       # zone -> {"gen", "baseline", "target",
+                                                      #          "rid", "ts", "timer"}
+                                                      #   design 9.7: an UNDUCKED turn has no duck
+                                                      #   snapshot, so _arm_timer never ran and
+                                                      #   max_duck_timeout is not its net. Written
+                                                      #   only by _say. Guarded by _lock.
         self._mic = {}                                # zone -> {"gen", "prev", "confirmed",
                                                       #          "rid", "ts", "timer"}
                                                       #   WRITTEN ONLY BY THE ANNOUNCEMENT PATH.
@@ -488,6 +494,88 @@ class InteractionCapability(capability.Capability):
         if reply is not None and reply.get("baseline") is not None:
             return reply["baseline"]
         return fallback
+
+    def _volume_recovery_secs(self, ctx):
+        explicit = int(getattr(ctx.settings, "announce_volume_deadman_ms", 0))
+        if explicit > 0:
+            return explicit / 1000.0
+        call = int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0
+        start = int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0
+        chime_fin = int(getattr(ctx.settings, "announce_chime_finish_timeout_ms", 15000)) / 1000.0
+        msg_fin = int(getattr(ctx.settings, "announce_message_finish_timeout_ms", 45000)) / 1000.0
+        # the same span as marker_budget_s (design 8.4a), plus 30s of margin
+        return (5.0 + 5.0 + call + start + chime_fin + call + start + msg_fin
+                + 5.0 + call) + 30.0
+
+    def _cancel_volume_recovery(self, zone, gen):
+        """Stand the net down -- but only ours. A newer turn's record must survive us."""
+        with self._lock:
+            rec = self._vol_recovery.get(zone)
+            if rec is None or rec.get("gen") != gen:
+                return
+            del self._vol_recovery[zone]
+        self._cancel_timer(rec)
+
+    def _volume_recovery(self, ctx, zone, gen, attempt):
+        """Last-resort restore for an UNDUCKED turn whose step-8 and finalizer writes both failed.
+
+        POLICY CUTOFF, not a wall-clock bound (design 9.7): a pathologically slow-but-live turn
+        could cross it. Two guards make an early fire cheap -- a newer turn owning the zone is left
+        alone, and a volume we did not write is left alone -- so the worst case is restoring the
+        baseline under a clip that is still playing, which beats an indefinitely stuck 0.80.
+        """
+        with self._lock:
+            rec = self._vol_recovery.get(zone)
+            if rec is None or rec.get("gen") != gen:
+                return
+        if self._say_gen.get(zone) != gen:
+            LOG.info("VOLUME-RECOVERY zone=%s gen=%s superseded; a newer turn owns the restore",
+                     zone, gen)
+            with self._lock:
+                if self._vol_recovery.get(zone) is rec:
+                    del self._vol_recovery[zone]
+            return
+        try:
+            live = ((ctx.ha.get_entity_state(zone) or {}).get("attributes") or {}).get("volume_level")
+        except Exception as e:
+            # Unreadable: we cannot confirm the level, and leaving the ceiling possibly loud is the
+            # worse error, so fall through and restore.
+            LOG.warning("VOLUME-RECOVERY zone=%s read failed (%r)", zone, e)
+            live = None
+        target = rec.get("target")
+        if live is not None and target is not None and abs(live - target) > 0.01:
+            LOG.info("VOLUME-RECOVERY zone=%s volume is %s, not the %s we wrote; leaving it",
+                     zone, live, target)
+            with self._lock:
+                if self._vol_recovery.get(zone) is rec:
+                    del self._vol_recovery[zone]
+            return
+        try:
+            ctx.ha.call_service_rest("media_player", "volume_set",
+                                     {"entity_id": zone, "volume_level": rec["baseline"]})
+            LOG.warning("VOLUME-RECOVERY zone=%s restored -> %s (attempt %d)",
+                        zone, rec["baseline"], attempt + 1)
+            with self._lock:
+                if self._vol_recovery.get(zone) is rec:
+                    del self._vol_recovery[zone]
+            return
+        except Exception as e:
+            retries = int(getattr(ctx.settings, "announce_volume_deadman_retries", 3))
+            if attempt + 1 >= retries:
+                # Terminal exhaustion is LOG-ONLY: /command has already answered, so this cannot
+                # reach the phone. The resolver log is the sole witness -- hence error, not warning.
+                LOG.error("VOLUME-RECOVERY zone=%s GAVE UP after %d attempts (%r); the ceiling may "
+                          "be left at %s", zone, attempt + 1, e, rec.get("target"))
+                with self._lock:
+                    if self._vol_recovery.get(zone) is rec:
+                        del self._vol_recovery[zone]
+                return
+            LOG.warning("VOLUME-RECOVERY zone=%s attempt %d failed (%r); re-arming",
+                        zone, attempt + 1, e)
+            secs = self._volume_recovery_secs(ctx)
+            t = self._timer_factory(secs, self._volume_recovery, [ctx, zone, gen, attempt + 1])
+            rec["timer"] = t
+            t.start()
 
     def _claim_gen(self, zone):
         """Claim this zone's next turn generation up front, and return it.
@@ -1282,6 +1370,14 @@ class InteractionCapability(capability.Capability):
         pending_restore = [False]               # True once the zone sits at reply_volume and we still
                                                # owe it a restore (list: rebound in the finally block)
         paused_by_us = [False]                  # we silenced the outgoing music before raising volume
+        volume_restore = ["deferred_to_deadman"]  # design 9.7. Answers "is a volume restore still
+                                                #   outstanding?" -- flipped to "restored" the
+                                                #   moment the obligation is discharged, whether by
+                                                #   putting the zone back on its baseline or by
+                                                #   deliberately keeping a level a third party set.
+                                                #   There is deliberately no "failed" value: the
+                                                #   result is serialised before the timer can run,
+                                                #   so a terminal failure cannot reach it.
         queue_may_be_replaced = [False]         # design 8.3a: claimed BEFORE each play_media.
                                                 #   "We may have changed the queue" is the only
                                                 #   thing we can honestly know -- a landed-but-
@@ -1337,6 +1433,19 @@ class InteractionCapability(capability.Capability):
                         # agrees with -- rather than reading our reply volume as a human override,
                         # keeping it, and discarding the baseline (the ratchet).
                         snap["target"] = reply_volume
+            if owns_restore and my_snap_ts is None and baseline is not None:
+                # No duck snapshot means _arm_timer never ran, so max_duck_timeout is not our net
+                # (design 8.4c/9.7). Armed BEFORE the write for the same reason the obligation is
+                # claimed before it: a write that lands without being acknowledged, whose finalizer
+                # retry then also fails, is exactly the case this exists for.
+                rec = {"gen": my_gen, "baseline": baseline, "target": reply_volume,
+                       "rid": rid, "ts": self._clock(), "timer": None}
+                with self._lock:
+                    self._vol_recovery[zone] = rec
+                t = self._timer_factory(self._volume_recovery_secs(ctx), self._volume_recovery,
+                                        [ctx, zone, my_gen, 0])
+                rec["timer"] = t
+                t.start()
             self._say_call(ctx, rid, zone, "media_player", "volume_set",
                            {"entity_id": zone, "volume_level": reply_volume})
             # 5-7. play the clip SEQUENCE and wait each one out (design 8.1-8.3). One clip is
@@ -1408,10 +1517,16 @@ class InteractionCapability(capability.Capability):
                         restore_to = None
                         pending_restore[0] = False
                         retire_snapshot(my_snap_ts)
+                        # Their level is the answer now, so nothing is owed and the net stands down
+                        # rather than overwriting their choice later.
+                        volume_restore[0] = "restored"
+                        self._cancel_volume_recovery(zone, my_gen)
                 if restore_to is not None:
                     ctx.ha.call_service_rest("media_player", "volume_set",
                                              {"entity_id": zone, "volume_level": restore_to})
                     pending_restore[0] = False
+                    volume_restore[0] = "restored"
+                    self._cancel_volume_recovery(zone, my_gen)
                     if owns_restore:
                         # As the reply-turn restore owner, retire the snapshot ourselves: leaving it
                         # armed carries a now-stale baseline into the next turn.
@@ -1438,7 +1553,8 @@ class InteractionCapability(capability.Capability):
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
                                     "replayed": replayed, "superseded": False, "zone": zone,
-                                    "clips": clip_results})
+                                    "clips": clip_results,
+                                    "volume_restore": volume_restore[0]})
         finally:
             # The zone must never be handed back sitting at reply_volume. If we raised after
             # raising the volume (e.g. play_media 500s, or a read blip in the poll), restore the
@@ -1448,6 +1564,8 @@ class InteractionCapability(capability.Capability):
                     ctx.ha.call_service_rest("media_player", "volume_set",
                                              {"entity_id": zone, "volume_level": baseline})
                     retire_snapshot(my_snap_ts)     # fulfilled: the zone is back on its baseline
+                    volume_restore[0] = "restored"
+                    self._cancel_volume_recovery(zone, my_gen)
                     LOG.warning("SAY req=%s zone=%s aborted at reply volume; restored -> %s",
                                 rid, zone, baseline)
                 except Exception as e:

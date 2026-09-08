@@ -4995,5 +4995,354 @@ class ClipPollBoundTest(unittest.TestCase):
         self.assertEqual(set(ha.state_timeouts), set([10]))
 
 
+
+class VolumeRecoveryTest(unittest.TestCase):
+    """AN-01 Task 19: design 9.7.
+
+    An unducked phone announcement has NO volume dead-man: no duck request means no snapshot, so
+    _arm_timer never ran and max_duck_timeout never applies. The finalizer gives one immediate
+    retry; if that also fails, nothing was scheduled to correct a ceiling stuck at 0.80.
+
+    The duration is a POLICY CUTOFF derived from an engineered budget, not a wall-clock bound: a
+    pathologically slow-but-live turn could cross it. Two guards make an early fire cheap -- it does
+    nothing if a newer turn owns the zone, and it leaves a volume we did not write alone -- so the
+    worst case is restoring the baseline under a clip that is still playing. Preferring that to an
+    indefinitely stuck 0.80 is liveness over waiting.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _states(self):
+        return [playing_with_id(0.36, "library://radio/2"),
+                playing_with_id(0.80, "builtin://radio/" + self.tts),
+                idle_state(), idle_state(), playing(0.80)]
+
+    def _rec(self, **over):
+        r = {"gen": 1, "baseline": 0.36, "target": 0.80, "rid": "r", "ts": 1000.0, "timer": None}
+        r.update(over)
+        return r
+
+    def _vr_timers(self):
+        return [t for t in FakeTimer.created if t.interval > 100]
+
+    # ---- arming conditions --------------------------------------------------
+
+    def test_an_unducked_turn_arms_a_volume_recovery_timer(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-vr")
+        self.assertTrue(self._vr_timers())
+
+    def test_a_ducked_reply_arms_no_second_timer(self):
+        # A ducked turn already has max_duck_timeout behind it; a second net would double-restore.
+        cap = self._cap()
+        cap._snaps[self.zone] = {"volume": 0.36, "target": 0.15, "ts": 900.0, "timer": None}
+        FakeTimer.created = []
+        ha = FakeHA(playing(0.15))
+        ha.set_states(self._states())
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-duck")
+        self.assertEqual(FakeTimer.created, [])
+
+    def test_the_timer_is_armed_before_the_volume_write(self):
+        # Same reasoning as design 8.4c: a write that lands without being acknowledged must already
+        # be covered. Arming after the write would leave the exact case this exists for uncovered.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        armed_at_write = []
+        real = ha.call_service_rest
+
+        def watch(domain, service, data, timeout=5):
+            if service == "volume_set" and not armed_at_write:
+                armed_at_write.append(self.zone in cap._vol_recovery)
+            real(domain, service, data, timeout)
+        ha.call_service_rest = watch
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-pre")
+        self.assertEqual(armed_at_write, [True])
+
+    def test_an_explicit_deadman_ms_overrides_the_derivation(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_volume_deadman_ms = 30000
+        capability.run(cap, ctx, {"mode": "say", "uri": self.tts,
+                                  "volume_override": 0.80}, "rid-exp")
+        self.assertIn(30.0, [t.interval for t in FakeTimer.created])
+
+    def test_no_timer_when_there_is_no_baseline_to_restore(self):
+        cap = self._cap()
+        ha = FakeHA(idle_state())
+        ha.set_states([idle_state()])
+        FakeTimer.created = []
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-nobase")
+        self.assertEqual(self._vr_timers(), [])
+
+    def test_no_timer_when_say_does_not_own_the_restore(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.say_owns_restore = False
+        FakeTimer.created = []
+        capability.run(cap, ctx, {"mode": "say", "uri": self.tts,
+                                  "volume_override": 0.80}, "rid-noown")
+        self.assertEqual(self._vr_timers(), [])
+
+    # ---- cancellation on the happy paths -----------------------------------
+
+    def test_a_successful_restore_cancels_it(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                         "volume_override": 0.80}, "rid-vr2")
+        vr = self._vr_timers()
+        self.assertTrue(vr and vr[0].cancelled)
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_the_finalizers_abort_restore_also_cancels_it(self):
+        # The lost-ack path from design 8.4c: step 8 is never reached, and the finalizer puts the
+        # zone back. Leaving the timer armed would restore a baseline over a later turn.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        state = {"raised": False}
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "volume_set" and not state["raised"]:
+                state["raised"] = True
+                real(domain, service, data, timeout)
+                raise IOError("reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-la")
+        vr = self._vr_timers()
+        self.assertTrue(vr and vr[0].cancelled)
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_a_doubly_failed_restore_leaves_the_timer_armed(self):
+        # Exactly the gap design 9.7 exists to close: both writes failed, so the timer must survive
+        # as the only remaining net.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+
+        def all_volume_boom(domain, service, data, timeout=5):
+            if service == "volume_set":
+                raise IOError("no route")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = all_volume_boom
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-both")
+        vr = self._vr_timers()
+        self.assertTrue(vr)
+        self.assertFalse(vr[0].cancelled)
+        self.assertIn(self.zone, cap._vol_recovery)
+
+    def test_a_human_changed_volume_discharges_the_obligation(self):
+        # Step 8 deliberately keeps a level a third party set. Nothing is owed, so the net is stood
+        # down rather than left to overwrite their choice later.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(),
+                       playing(0.55)])              # someone moved it during the reply
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                          "volume_override": 0.80}, "rid-human")
+        vr = self._vr_timers()
+        self.assertTrue(vr and vr[0].cancelled)
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    # ---- firing behaviour and its ownership guards -------------------------
+
+    def test_cancelling_only_stands_down_our_own_record(self):
+        # Ownership, same rule as the mic lease and the duck snapshot: a newer turn's net must
+        # survive an older turn's cleanup. Dropping someone else's record leaves THEIR unducked
+        # announcement with nothing scheduled to bring the ceiling back.
+        cap = self._cap()
+        newer = self._rec(gen=9, rid="newer")
+        cap._vol_recovery[self.zone] = newer
+        cap._cancel_volume_recovery(self.zone, 1)         # an older turn tidying up
+        self.assertIs(cap._vol_recovery.get(self.zone), newer)
+        cap._cancel_volume_recovery(self.zone, 9)         # its own owner
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_cancelling_when_there_is_no_record_is_a_no_op(self):
+        cap = self._cap()
+        cap._cancel_volume_recovery(self.zone, 1)         # must not raise
+        self.assertEqual(cap._vol_recovery, {})
+
+    def test_cancelling_cancels_the_timer_it_drops(self):
+        cap = self._cap()
+        t = FakeTimer(175.0, lambda: None)
+        cap._vol_recovery[self.zone] = self._rec(timer=t)
+        cap._cancel_volume_recovery(self.zone, 1)
+        self.assertTrue(t.cancelled)
+
+    def test_firing_restores_the_baseline_when_still_at_announce_volume(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.80))
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"], [0.36])
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_firing_does_nothing_when_a_newer_turn_owns_the_zone(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 7
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.80))
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual(ha.calls, [])
+
+    def test_firing_leaves_a_human_changed_volume_alone(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.55))                 # not the 0.80 we wrote
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual(ha.calls, [])
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_firing_with_no_record_is_a_no_op(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.80))
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual(ha.calls, [])
+
+    def test_firing_for_a_record_of_another_generation_is_a_no_op(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 4
+        cap._vol_recovery[self.zone] = self._rec(gen=4)
+        ha = FakeHA(playing(0.80))
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)   # our gen is 1, the record is 4
+        self.assertEqual(ha.calls, [])
+        self.assertIn(self.zone, cap._vol_recovery)          # and we did not clear someone else's
+
+    def test_an_unreadable_volume_still_restores(self):
+        # We cannot confirm the level, and leaving the ceiling possibly loud is the worse error.
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(boom=IOError("read failed"))
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"], [0.36])
+
+    # ---- retry policy -------------------------------------------------------
+
+    def test_retries_are_bounded_then_it_stops(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.80), write_boom=IOError("no route"))
+        FakeTimer.created = []
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 0)
+        self.assertEqual(len(FakeTimer.created), 1)         # re-armed
+        cap._volume_recovery(FakeCtx(ha), self.zone, 1, 3)  # attempt == retries
+        self.assertEqual(len(FakeTimer.created), 1)         # no further re-arm
+
+    def test_the_terminal_give_up_is_logged_as_an_error(self):
+        # Terminal exhaustion is LOG-ONLY: /command has already answered, so this cannot reach the
+        # phone. The resolver log is the sole witness -- hence error, not warning.
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.80), write_boom=IOError("no route"))
+        with self.assertLogs("resolver", level="ERROR") as cm:
+            cap._volume_recovery(FakeCtx(ha), self.zone, 1, 3)
+        self.assertTrue(any("GAVE UP" in m for m in cm.output), cm.output)
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    def test_the_retry_count_is_configurable(self):
+        cap = self._cap()
+        cap._say_gen[self.zone] = 1
+        cap._vol_recovery[self.zone] = self._rec()
+        ha = FakeHA(playing(0.80), write_boom=IOError("no route"))
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_volume_deadman_retries = 1
+        FakeTimer.created = []
+        cap._volume_recovery(ctx, self.zone, 1, 0)          # attempt 1 of 1 -> terminal
+        self.assertEqual(FakeTimer.created, [])
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+    # ---- deferred metadata --------------------------------------------------
+
+    def test_returned_metadata_is_only_restored_or_deferred_to_deadman(self):
+        # There is deliberately NO "failed" value: the result is serialised before the timer can
+        # run, so a terminal failure cannot reach it (design 9.7).
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                             "volume_override": 0.80}, "rid-md")
+        self.assertIn(r["metadata"]["volume_restore"], ("restored", "deferred_to_deadman"))
+
+    def test_a_successful_turn_reports_restored(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states(self._states())
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                             "volume_override": 0.80}, "rid-ok")
+        self.assertEqual(r["metadata"]["volume_restore"], "restored")
+
+    def test_a_failed_restore_reports_deferred(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.80)])
+        real = ha.call_service_rest
+        n = {"v": 0}
+
+        def second_volume_boom(domain, service, data, timeout=5):
+            if service == "volume_set":
+                n["v"] += 1
+                if n["v"] == 2:                       # the restore
+                    raise IOError("no route")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = second_volume_boom
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts,
+                                             "volume_override": 0.80}, "rid-def")
+        self.assertEqual(r["metadata"]["volume_restore"], "deferred_to_deadman")
+
+    def test_an_announcement_carries_the_field_through(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.tts_url = self.tts
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        ctx.settings.announce_chime_uri = ""
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.80)])
+        r = capability.run(cap, ctx, {"mode": "announce", "text": "dinner is ready"}, "rid-an")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["metadata"]["volume_restore"], "restored")
+        self.assertNotIn(self.zone, cap._vol_recovery)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
