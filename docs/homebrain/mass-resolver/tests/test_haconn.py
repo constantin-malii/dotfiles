@@ -315,5 +315,205 @@ class GetEntityStateTimeoutTest(unittest.TestCase):
         self.assertIsNone(ha.s)
 
 
+
+class ResolveMediaSourceTest(unittest.TestCase):
+    """AN-01 Task 8: media-source:// -> an absolute, MA-fetchable URL.
+
+    Why it exists: MA rejects media-source:// outright and cannot fetch HA's authenticated
+    /media/local/... paths. HA's own resolver hands back a SIGNED path, which is the only form MA
+    can fetch -- proven at AN-1, where the corrected URI played on the ceiling.
+
+    Two hard rules this class pins:
+      * a FRESH WebSocket per call. media_source/resolve_media has no REST route, and self.s is the
+        shared subscribe_events socket -- reusing it would interleave with that read loop.
+      * the returned URL is a BEARER CREDENTIAL and must never be logged.
+    """
+
+    GOOD = "media-source://media_source/local/timer_chime.wav"
+    DOTTED = "media-source://media_source/local/./timer_chime.wav"
+    SIGNED = "/media/local/timer_chime.wav?authSig=REDACTED-NOT-A-REAL-SIGNATURE"
+
+    def setUp(self):
+        self.sent = []
+        self.connects = []
+        self.closed = []
+        self.reads = [{"type": "auth_required"},
+                      {"type": "auth_ok"},
+                      {"id": 1, "type": "result", "success": True,
+                       "result": {"url": self.SIGNED, "mime_type": "audio/x-wav"}}]
+        outer = self
+
+        class FakeSock(object):
+            def close(self):
+                outer.closed.append(True)
+
+        def fake_connect(host, port, path, timeout=15):
+            outer.connects.append({"host": host, "port": port, "path": path, "timeout": timeout})
+            return FakeSock(), {"b": b""}
+
+        def fake_send(sock, obj):
+            outer.sent.append(obj)
+
+        def fake_read(sock, box):
+            return outer.reads.pop(0) if outer.reads else None
+
+        for name, fn in (("ws_connect", fake_connect), ("ws_send", fake_send),
+                         ("ws_read", fake_read)):
+            real = getattr(haconn.wsutil, name)
+            setattr(haconn.wsutil, name, fn)
+            self.addCleanup(setattr, haconn.wsutil, name, real)
+
+        self.ha = haconn.HA("192.168.122.10", 8123, "tok")
+
+    # ---- happy path ---------------------------------------------------------
+
+    def test_sends_the_resolve_command_and_returns_an_absolute_url(self):
+        url = self.ha.resolve_media_source(self.GOOD)
+        self.assertEqual(url, "http://192.168.122.10:8123" + self.SIGNED)
+        self.assertIn({"id": 1, "type": "media_source/resolve_media",
+                       "media_content_id": self.GOOD}, self.sent)
+
+    def test_authenticates_before_resolving(self):
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertEqual(self.sent[0]["type"], "auth")
+        self.assertEqual(self.sent[0]["access_token"], "tok")
+        self.assertEqual(self.sent[1]["type"], "media_source/resolve_media")
+
+    def test_connects_to_the_websocket_path(self):
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertEqual(self.connects[0]["path"], "/api/websocket")
+        self.assertEqual(self.connects[0]["host"], "192.168.122.10")
+        self.assertEqual(self.connects[0]["port"], 8123)
+
+    # ---- URL normalisation --------------------------------------------------
+
+    def test_an_absolute_url_is_returned_unchanged(self):
+        self.reads[-1]["result"]["url"] = "http://1.2.3.4:8123/m.wav?authSig=REDACTED"
+        self.assertEqual(self.ha.resolve_media_source(self.GOOD),
+                         "http://1.2.3.4:8123/m.wav?authSig=REDACTED")
+
+    def test_a_relative_url_is_absolutised_against_the_internal_base(self):
+        # HA returns a RELATIVE signed path; MA cannot fetch that.
+        url = self.ha.resolve_media_source(self.GOOD)
+        self.assertTrue(url.startswith("http://192.168.122.10:8123/"))
+
+    # ---- the './' trap ------------------------------------------------------
+
+    def test_a_dotted_uri_is_normalised_before_it_is_sent(self):
+        # AN-1 root cause: HA signs the UN-normalised path but returns a NORMALISED url, so a './'
+        # segment yields a signature that cannot validate against the url it is attached to.
+        # Normalising here means a caller pasting the media-browser form still gets a working url.
+        self.ha.resolve_media_source(self.DOTTED)
+        sent = [m for m in self.sent if m.get("type") == "media_source/resolve_media"][0]
+        self.assertEqual(sent["media_content_id"], self.GOOD)
+        self.assertNotIn("/./", sent["media_content_id"])
+
+    # ---- timeout propagation -----------------------------------------------
+
+    def test_the_timeout_is_passed_through_to_ws_connect(self):
+        # design 6.5: without this the call cannot be clipped to a phase deadline at all.
+        self.ha.resolve_media_source(self.GOOD, timeout=4)
+        self.assertEqual(self.connects[0]["timeout"], 4)
+
+    def test_the_default_timeout_is_10s(self):
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertEqual(self.connects[0]["timeout"], 10)
+
+    # ---- connection isolation ----------------------------------------------
+
+    def test_never_touches_the_shared_websocket(self):
+        sentinel = object()
+        self.ha.s = sentinel
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertIs(self.ha.s, sentinel)
+
+    # ---- failure modes ------------------------------------------------------
+
+    def test_missing_url_raises_rather_than_returning_none(self):
+        self.reads[-1]["result"] = {"mime_type": "audio/x-wav"}
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    def test_a_non_http_result_is_rejected(self):
+        self.reads[-1]["result"]["url"] = "ftp://nope/x.wav"
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    def test_an_unsuccessful_result_raises(self):
+        self.reads[-1] = {"id": 1, "type": "result", "success": False,
+                          "error": {"code": "not_found", "message": "no such media"}}
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    def test_a_bad_hello_raises(self):
+        self.reads[0] = {"type": "something_else"}
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    def test_failed_auth_raises(self):
+        self.reads[1] = {"type": "auth_invalid"}
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+
+    # ---- cleanup ------------------------------------------------------------
+
+    def test_closes_its_connection_on_success(self):
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertEqual(len(self.closed), 1)
+
+    def test_closes_its_connection_on_failure(self):
+        self.reads[-1]["result"] = {}
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+        self.assertEqual(len(self.closed), 1)
+
+    # ---- the signed URL must never be logged --------------------------------
+
+    def test_the_signed_url_is_never_logged(self):
+        import logging
+        recs = []
+
+        class Grab(logging.Handler):
+            def emit(self, r):
+                try:
+                    recs.append(r.getMessage())
+                except Exception:
+                    recs.append("<unformattable>")
+
+        log = logging.getLogger("resolver")
+        h = Grab()
+        log.addHandler(h)
+        self.addCleanup(log.removeHandler, h)
+        old = log.level
+        log.setLevel(logging.DEBUG)
+        self.addCleanup(log.setLevel, old)
+
+        self.ha.resolve_media_source(self.GOOD)
+        self.assertTrue(recs, "expected at least one log record, so this test is not vacuous")
+        for m in recs:
+            self.assertNotIn("authSig", m)
+            self.assertNotIn(self.SIGNED, m)
+            self.assertNotIn("REDACTED-NOT-A-REAL-SIGNATURE", m)
+
+    def test_a_failure_does_not_log_the_signed_url_either(self):
+        import logging
+        recs = []
+
+        class Grab(logging.Handler):
+            def emit(self, r):
+                try:
+                    recs.append(r.getMessage())
+                except Exception:
+                    recs.append("<unformattable>")
+
+        log = logging.getLogger("resolver")
+        h = Grab()
+        log.addHandler(h)
+        self.addCleanup(log.removeHandler, h)
+        old = log.level
+        log.setLevel(logging.DEBUG)
+        self.addCleanup(log.setLevel, old)
+
+        self.reads[-1]["result"]["url"] = "ftp://nope/x.wav?authSig=REDACTED-NOT-A-REAL-SIGNATURE"
+        self.assertRaises(IOError, self.ha.resolve_media_source, self.GOOD)
+        for m in recs:
+            self.assertNotIn("authSig", m)
+            self.assertNotIn("REDACTED-NOT-A-REAL-SIGNATURE", m)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
