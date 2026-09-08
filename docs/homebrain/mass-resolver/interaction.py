@@ -559,6 +559,135 @@ class InteractionCapability(capability.Capability):
         resolved["skip_on_fresh_playback"] = False
         return self._say(ctx, resolved, rid)
 
+    def _play_clip_and_wait(self, ctx, rid, zone, norm_uri, match_key, clip, opts, superseded):
+        """Play ONE clip on the zone and wait for it: play_media -> start-poll -> finish-poll.
+
+        Everything a TURN owns stays with the caller -- generation ownership, baseline capture, the
+        single volume raise, the single restore, the single replay, the release. This method owns
+        exactly one clip, which is what lets a caller sequence several of them over one turn.
+
+        `match_key` is separate from `norm_uri` because MA does not echo back what it plays: it
+        wraps it, and wraps it differently per media type. The caller therefore has to be able to
+        say what a "this clip is playing" observation looks like.
+
+        `opts` carries `start_timeout`, `finish_timeout`, `call_timeout`, `poll_secs`,
+        `blank_grace`, `floor` and `deadline` (float, or None for accumulated-sleep bounding).
+
+        Returns {"started", "issued", "clip"}. Propagates whatever play_media raises -- the caller's
+        finally is the recovery path, and it owns the volume restore, so it has to see the failure.
+        """
+        out = {"started": False, "issued": False, "clip": clip}
+        deadline = opts.get("deadline")
+        poll_secs = opts["poll_secs"]
+        floor = opts["floor"]
+
+        def read_timeout(default_timeout):
+            # Clip a blocking read to what is left of this phase (design 6.5). A socket timeout is a
+            # per-operation inactivity timeout, not a request deadline, so this reduces overshoot
+            # rather than proving a limit. None means: do not start another blocking call at all --
+            # a read begun with less than `floor` left buys nothing and only overshoots the phase.
+            if deadline is None:
+                return default_timeout
+            left = deadline - self._clock()
+            if left < floor:
+                return None
+            return min(default_timeout, left)
+
+        # MA's play_media regularly outruns the 5s REST default; a client-side timeout here aborts
+        # the turn while the clip still starts server-side (audible, unsequenced).
+        self._say_call(ctx, rid, zone, "music_assistant", "play_media",
+                       {"entity_id": zone, "media_id": norm_uri}, timeout=opts["call_timeout"])
+        out["issued"] = True
+
+        # Confirm start: poll until the clip is actually playing, or the start budget runs out.
+        start_timeout = opts["start_timeout"]
+        start_deadline = self._clock() + start_timeout
+        elapsed = 0.0
+        while True:
+            if superseded():
+                return out
+            if deadline is None:
+                if elapsed >= start_timeout:
+                    break
+            elif self._clock() >= min(start_deadline, deadline):
+                break
+            rt = read_timeout(10)
+            if rt is None:
+                break
+            try:
+                state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
+                state = {}
+            attrs = state.get("attributes") or {}
+            # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
+            # "builtin://radio/<url>". Match by containment, not equality.
+            if state.get("state") == "playing" and match_key in (attrs.get("media_content_id") or ""):
+                out["started"] = True
+                break
+            self._sleeper(poll_secs)
+            elapsed += poll_secs
+
+        if not out["started"]:
+            LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)", rid, zone, clip)
+            return out
+
+        # Wait for finish: poll until the clip stops playing (or the caller is superseded).
+        finish_timeout = opts["finish_timeout"]
+        finish_deadline = self._clock() + finish_timeout
+        blank_grace = max(opts["blank_grace"], poll_secs)
+        elapsed = 0.0
+        ended_seen = 0
+        blank_for = 0.0
+        while True:
+            if superseded():
+                return out
+            if deadline is None:
+                if elapsed >= finish_timeout:
+                    break
+            elif self._clock() >= min(finish_deadline, deadline):
+                break
+            rt = read_timeout(10)
+            if rt is None:
+                break
+            try:
+                state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
+                state = {}
+            attrs = state.get("attributes") or {}
+            cid = attrs.get("media_content_id") or ""
+            # MA transiently reports an EMPTY media_content_id while the clip is still playing.
+            # Treating that as "the clip ended" cut the reply off after 0.5-1.0s and replayed the
+            # source over it -- so an empty cid is NOT an ending while the player still says
+            # `playing`. Only a cid that names something ELSE counts.
+            ended = (state.get("state") != "playing") or (cid != "" and match_key not in cid)
+            if not ended and cid == "":
+                # Unknown, not "still playing": tolerate the flicker, but only for a bounded grace.
+                # Beyond that we cannot tell, and holding the zone at reply volume for the full
+                # finish timeout is worse than finishing.
+                blank_for += poll_secs
+                if blank_for >= blank_grace:
+                    LOG.info("SAY req=%s zone=%s clip=%s finish-poll: cid stayed empty for %.1fs "
+                             "(state=playing); treating the clip as finished",
+                             rid, zone, clip, blank_for)
+                    break
+            elif cid != "":
+                blank_for = 0.0
+            if ended:
+                # Require two consecutive observations: a single flicker of state or cid must not
+                # trigger the restore+replay that is heard as a cut-off.
+                ended_seen += 1
+                if ended_seen >= 2:
+                    LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
+                             rid, zone, clip, elapsed, state.get("state"), cid[:60])
+                    break
+            else:
+                ended_seen = 0
+            self._sleeper(poll_secs)
+            elapsed += poll_secs
+        return out
+
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
         clip = self._clip_id(uri)
@@ -702,81 +831,22 @@ class InteractionCapability(capability.Capability):
                         # device in agreement and restore the baseline -- not read our reply volume
                         # as a human override, keep it, and discard the baseline (the ratchet).
                         snap["target"] = reply_volume
-            # MA's play_media regularly outruns the 5s REST default; a client-side timeout here
-            # aborts the turn while the clip still starts server-side (audible, unsequenced).
-            self._say_call(ctx, rid, zone, "music_assistant", "play_media",
-                           {"entity_id": zone, "media_id": norm_uri}, timeout=call_timeout)
-            play_issued[0] = True
-
-            # 6. confirm start: poll until the clip is actually playing, or the start budget runs out
-            reply_started = False
-            elapsed = 0.0
-            while elapsed < start_timeout:
-                if superseded():
-                    return superseded_result()
-                try:
-                    state = ctx.ha.get_entity_state(zone) or {}
-                except Exception as e:
-                    LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
-                    state = {}
-                attrs = state.get("attributes") or {}
-                # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
-                # "builtin://radio/<url>". Match by containment, not equality.
-                if state.get("state") == "playing" and norm_uri in (attrs.get("media_content_id") or ""):
-                    reply_started = True
-                    break
-                self._sleeper(poll_secs)
-                elapsed += poll_secs
-
+            # 5-7. play the reply clip and wait it out.
+            #
+            # deadline=None keeps say/say_text on accumulated-sleep bounding, which design 6.5
+            # preserves deliberately: converting a live, proven path to wall-clock deadlines would
+            # be a timing change with no defect motivating it. match_key equals norm_uri here, so
+            # matching stays byte-for-byte what it was before the extraction.
+            opts = {"start_timeout": start_timeout, "finish_timeout": reply_timeout,
+                    "call_timeout": call_timeout, "poll_secs": poll_secs,
+                    "blank_grace": int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
+                    "deadline": None,
+                    "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0}
+            res = self._play_clip_and_wait(ctx, rid, zone, norm_uri, norm_uri, clip, opts,
+                                           superseded)
+            play_issued[0] = res["issued"]
+            reply_started = res["started"]
             likely_silent = not reply_started
-            if likely_silent:
-                LOG.warning("SAY req=%s reply did not start (likely silent)", rid)
-            else:
-                # 7. wait for finish: poll until the clip stops playing (or gets superseded)
-                elapsed = 0.0
-                ended_seen = 0
-                blank_for = 0.0
-                blank_grace = max(int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
-                                  poll_secs)
-                while elapsed < reply_timeout:
-                    if superseded():
-                        return superseded_result()
-                    try:
-                        state = ctx.ha.get_entity_state(zone) or {}
-                    except Exception as e:
-                        LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
-                        state = {}
-                    attrs = state.get("attributes") or {}
-                    cid = attrs.get("media_content_id") or ""
-                    # MA transiently reports an EMPTY media_content_id while the clip is still
-                    # playing. Treating that as "the clip ended" cut the reply off after 0.5-1.0s
-                    # and replayed the source over it -- so an empty cid is NOT an ending while the
-                    # player still says `playing`. Only a cid that names something ELSE counts.
-                    ended = (state.get("state") != "playing") or (cid != "" and norm_uri not in cid)
-                    if not ended and cid == "":
-                        # Unknown, not "still playing": tolerate the flicker, but only for a bounded
-                        # grace. Beyond that we cannot tell, and holding the zone at reply volume for
-                        # the full reply timeout is worse than finishing.
-                        blank_for += poll_secs
-                        if blank_for >= blank_grace:
-                            LOG.info("SAY req=%s zone=%s clip=%s finish-poll: cid stayed empty for %.1fs "
-                                     "(state=playing); treating the clip as finished",
-                                     rid, zone, clip, blank_for)
-                            break
-                    elif cid != "":
-                        blank_for = 0.0
-                    if ended:
-                        # Require two consecutive observations: a single flicker of state or cid
-                        # must not trigger the restore+replay that is heard as a cut-off.
-                        ended_seen += 1
-                        if ended_seen >= 2:
-                            LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
-                                     rid, zone, clip, elapsed, state.get("state"), cid[:60])
-                            break
-                    else:
-                        ended_seen = 0
-                    self._sleeper(poll_secs)
-                    elapsed += poll_secs
 
             if superseded():
                 return superseded_result()

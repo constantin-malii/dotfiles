@@ -16,6 +16,7 @@ class FakeHA(object):
         self.tts_url = None                          # what tts_get_url() should return
         self.tts_calls = []                          # (engine_id, message)
         self.tts_boom = None
+        self.state_timeouts = []                     # per-read timeout, as get_entity_state got it
     def tts_get_url(self, engine_id, message, timeout=10):
         self.tts_calls.append((engine_id, message))
         if self.tts_boom is not None:
@@ -23,7 +24,11 @@ class FakeHA(object):
         return self.tts_url
     def set_states(self, states):
         self._states = list(states)
-    def get_entity_state(self, entity_id):
+    def get_entity_state(self, entity_id, timeout=None):
+        # AN-01 Task 7 gave the real get_entity_state a per-call timeout so a read can be clipped
+        # to what is left of a phase deadline. Mirrored here, and recorded, because Task 11's
+        # _play_clip_and_wait is the caller that actually does the clipping.
+        self.state_timeouts.append(timeout)
         if self._boom is not None:
             raise self._boom
         if self._states:
@@ -2073,6 +2078,271 @@ class AnnounceResolveValidateTest(unittest.TestCase):
             self.assertIn(err["code"], cr_mod.ERROR_CODES)
             self.assertTrue(err["reason"])
             self.assertTrue(err["chat_text"])
+
+
+
+class MovingClock(object):
+    """A clock the test drives. Paired with AdvancingSleeper so a poll loop's simulated sleeps move
+    it, which is what makes the deadline arithmetic in _play_clip_and_wait observable at all."""
+
+    def __init__(self, t=1000.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+    def advance(self, secs):
+        self.t += secs
+
+
+class AdvancingSleeper(object):
+    def __init__(self, clock, hook=None):
+        self.clock = clock
+        self.calls = 0
+        self._hook = hook
+
+    def __call__(self, secs):
+        self.calls += 1
+        self.clock.advance(secs)
+        if self._hook is not None:
+            self._hook(self.calls)
+
+
+def superseded_after(n):
+    """A superseded() that reports False for its first n calls, then True."""
+    box = [0]
+
+    def sup():
+        box[0] += 1
+        return box[0] > n
+    return sup
+
+
+class PlayClipAndWaitTest(unittest.TestCase):
+    """AN-01 Task 11: the per-clip play/start-poll/finish-poll body, extracted out of _say.
+
+    Task 5's GoldenSequenceTest is the acceptance criterion for the extraction being
+    behaviour-preserving. THIS class covers the surface the extraction newly exposes and which _say
+    does not exercise, because _say passes deadline=None deliberately:
+
+      * match_key independent of the played URI -- MA does not echo back what it plays, it wraps it,
+        and wraps it differently per media type, so the caller must be able to say what to match on.
+      * deadline clipping and the floor -- a read must not be started with less than the floor left.
+      * the {"started", "issued", "clip"} return contract, which is how the caller's recovery path
+        learns whether the clip actually went out.
+
+    A note on what a deadline is NOT: clipping a socket read bounds that read's inactivity, not the
+    wall-clock duration of the call. These tests pin the clipping arithmetic, not a guarantee.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    URI = "http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+    WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+
+    def _cap(self, clock, sleeper):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                 sleeper=sleeper)
+
+    def _opts(self, **over):
+        opts = {"start_timeout": 5.0, "finish_timeout": 10.0, "call_timeout": 20.0,
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
+        opts.update(over)
+        return opts
+
+    def _play(self, states, opts=None, superseded=None, match_key=None, ha=None, clock=None):
+        clock = clock or MovingClock()
+        sleeper = AdvancingSleeper(clock)
+        cap = self._cap(clock, sleeper)
+        ha = ha if ha is not None else FakeHA()
+        if states is not None:
+            ha.set_states(states)
+        ctx = FakeCtx(ha)
+        res = cap._play_clip_and_wait(ctx, "rid1", self.ZONE, self.URI,
+                                      match_key if match_key is not None else self.URI,
+                                      cap._clip_id(self.URI), opts or self._opts(),
+                                      superseded or (lambda: False))
+        return res, ha, cap, clock, sleeper
+
+    def _match(self):
+        return playing_with_id(0.70, self.WRAPPED)
+
+    def _blank(self):
+        return {"state": "playing", "attributes": {"volume_level": 0.70,
+                                                   "media_content_id": ""}}
+
+    # ---- play_media -----------------------------------------------------------
+
+    def test_it_issues_play_media_with_the_uri_and_the_call_timeout(self):
+        res, ha, _, _, _ = self._play([self._match(), idle_state(), idle_state()])
+        self.assertIn(("music_assistant", "play_media",
+                       {"entity_id": self.ZONE, "media_id": self.URI}), ha.calls)
+        self.assertIn(("play_media", 20.0), ha.timeouts)
+        self.assertTrue(res["issued"])
+
+    def test_a_play_media_failure_propagates_rather_than_being_swallowed(self):
+        # The caller's finally is the recovery path -- it owns the volume restore and the un-pause,
+        # so it must see the exception. Handling it here would strand the zone at reply volume.
+        clock = MovingClock()
+        cap = self._cap(clock, AdvancingSleeper(clock))
+        ctx = FakeCtx(FakeHA(write_boom=IOError("MA 500")))
+        self.assertRaises(IOError, cap._play_clip_and_wait, ctx, "rid1", self.ZONE, self.URI,
+                          self.URI, "clip", self._opts(), lambda: False)
+
+    def test_the_clip_fingerprint_is_returned_untouched(self):
+        res, _, cap, _, _ = self._play([self._match(), idle_state(), idle_state()])
+        self.assertEqual(res["clip"], cap._clip_id(self.URI))
+
+    # ---- start poll -----------------------------------------------------------
+
+    def test_started_is_true_when_the_cid_merely_CONTAINS_the_match_key(self):
+        # MA does not echo the URL back; it wraps it. Equality matching never fires.
+        res, _, _, _, _ = self._play([self._match(), idle_state(), idle_state()])
+        self.assertTrue(res["started"])
+
+    def test_the_match_key_can_differ_from_the_uri_that_was_played(self):
+        # The reason match_key is a separate parameter: a caller may need to match on something
+        # other than what it handed to play_media.
+        res, ha, _, _, _ = self._play([playing_with_id(0.7, "builtin://track/OTHER-KEY"),
+                                       idle_state(), idle_state()],
+                                      match_key="OTHER-KEY")
+        self.assertTrue(res["started"])
+        # ...and what went to MA is still the real URI, not the match key.
+        self.assertIn(("music_assistant", "play_media",
+                       {"entity_id": self.ZONE, "media_id": self.URI}), ha.calls)
+
+    def test_a_clip_that_never_starts_reports_issued_but_not_started(self):
+        res, _, _, _, _ = self._play([idle_state()] * 20)
+        self.assertTrue(res["issued"])
+        self.assertFalse(res["started"])
+
+    def test_the_start_poll_is_bounded_by_the_start_timeout(self):
+        res, ha, _, _, _ = self._play([idle_state()] * 40,
+                                      opts=self._opts(start_timeout=2.0, poll_secs=0.5))
+        self.assertFalse(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 4)          # 2.0s / 0.5s
+
+    def test_a_read_failure_during_the_start_poll_is_survived(self):
+        # A read blip must not abort a clip that is actually playing. FakeHA returns None once its
+        # scripted states run out, which the implementation must tolerate as an empty state.
+        ha = FakeHA()
+        ha.set_states([None, self._match(), idle_state(), idle_state()])
+        res, _, _, _, _ = self._play(None, ha=ha)
+        self.assertTrue(res["started"])
+
+    def test_it_returns_early_when_superseded_during_the_start_poll(self):
+        res, ha, _, _, _ = self._play([self._match()] * 10, superseded=superseded_after(0))
+        self.assertTrue(res["issued"])
+        self.assertFalse(res["started"])
+        self.assertEqual(ha.state_timeouts, [])              # bailed before reading anything
+
+    # ---- finish poll ----------------------------------------------------------
+
+    def test_it_returns_early_when_superseded_during_the_finish_poll(self):
+        res, _, _, _, _ = self._play([self._match()] * 10, superseded=superseded_after(1))
+        self.assertTrue(res["started"])
+
+    def test_two_consecutive_ended_observations_are_required(self):
+        # A single flicker of state or cid must not end the wait: doing so cut replies off and
+        # replayed the source over them.
+        states = [self._match(),        # start poll
+                  self._match(),        # finish: playing
+                  idle_state(),         # finish: flicker -- must NOT end it
+                  self._match(),        # finish: playing again, streak reset
+                  idle_state(),         # finish: ended #1
+                  idle_state()]         # finish: ended #2 -> break
+        res, ha, _, _, _ = self._play(states)
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 6)
+
+    def test_an_empty_cid_is_not_an_ending_while_the_player_says_playing(self):
+        # MA transiently blanks media_content_id mid-clip.
+        states = [self._match(), self._blank(), self._blank(), self._blank(),
+                  self._match(), idle_state(), idle_state()]
+        res, ha, _, _, _ = self._play(states, opts=self._opts(blank_grace=4.0))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 7)
+
+    def test_a_blank_cid_past_the_grace_ends_the_wait(self):
+        # Beyond the grace we cannot tell, and holding the zone at reply volume for the whole
+        # finish timeout is worse than finishing.
+        states = [self._match()] + [self._blank()] * 20
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, ha, _, _, _ = self._play(states, opts=self._opts(blank_grace=1.0))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 3)          # start + 2 blanks == 1.0s of grace
+        self.assertTrue(any("cid stayed empty" in m for m in cm.output), cm.output)
+
+    def test_the_blank_grace_is_never_shorter_than_one_poll(self):
+        # A grace below the poll interval would make the very first blank fatal.
+        states = [self._match()] + [self._blank()] * 20
+        res, ha, _, _, _ = self._play(states, opts=self._opts(blank_grace=0.01, poll_secs=0.5))
+        self.assertEqual(len(ha.state_timeouts), 2)
+
+    def test_the_finish_poll_is_bounded_by_the_finish_timeout(self):
+        states = [self._match()] * 40
+        res, ha, _, _, _ = self._play(states, opts=self._opts(finish_timeout=2.0, poll_secs=0.5))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 5)          # 1 start + 2.0s/0.5s finish
+
+    def test_a_read_failure_during_the_finish_poll_is_survived(self):
+        ha = FakeHA()
+        ha.set_states([self._match(), None] + [self._match()] * 3)
+        res, _, _, _, _ = self._play(None, ha=ha, opts=self._opts(finish_timeout=1.5))
+        self.assertTrue(res["started"])
+
+    # ---- deadline clipping (design 6.5) --------------------------------------
+
+    def test_with_no_deadline_reads_get_the_plain_default(self):
+        # say / say_text keep accumulated-sleep bounding: converting a live, proven path with no
+        # defect motivating it would be a timing change for its own sake.
+        _, ha, _, _, _ = self._play([self._match(), idle_state(), idle_state()])
+        self.assertEqual(set(ha.state_timeouts), set([10]))
+
+    def test_reads_are_clipped_to_what_is_left_of_the_deadline(self):
+        clock = MovingClock(1000.0)
+        _, ha, _, _, _ = self._play([self._match(), idle_state(), idle_state()],
+                                    opts=self._opts(deadline=1003.0), clock=clock)
+        self.assertEqual(ha.state_timeouts[0], 3.0)
+
+    def test_the_clip_is_only_ever_downward(self):
+        # A deadline further out than the default must not INFLATE a read's timeout.
+        clock = MovingClock(1000.0)
+        _, ha, _, _, _ = self._play([self._match(), idle_state(), idle_state()],
+                                    opts=self._opts(deadline=1600.0), clock=clock)
+        self.assertEqual(ha.state_timeouts[0], 10)
+
+    def test_no_read_is_started_with_less_than_the_floor_left(self):
+        # Starting a blocking read with 0.2s of budget buys nothing and overshoots the phase.
+        res, ha, _, _, _ = self._play([self._match()] * 10,
+                                      opts=self._opts(deadline=1000.2, floor=0.5))
+        self.assertTrue(res["issued"])
+        self.assertFalse(res["started"])
+        self.assertEqual(ha.state_timeouts, [])
+
+    def test_the_deadline_can_end_the_start_poll_before_the_start_timeout(self):
+        res, ha, _, _, _ = self._play([idle_state()] * 40,
+                                      opts=self._opts(start_timeout=5.0, deadline=1001.0,
+                                                      poll_secs=0.5, floor=0.5))
+        self.assertFalse(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 2)          # not the 10 that 5.0s/0.5s would give
+
+    def test_the_deadline_can_end_the_finish_poll_before_the_finish_timeout(self):
+        res, ha, _, _, _ = self._play([self._match()] * 40,
+                                      opts=self._opts(finish_timeout=30.0, deadline=1001.0,
+                                                      poll_secs=0.5, floor=0.5))
+        self.assertTrue(res["started"])
+        self.assertEqual(len(ha.state_timeouts), 3)          # 1 start + 2 finish, then out of time
+
+    # ---- the clip URL must not reach the log --------------------------------
+
+    def test_the_uri_is_never_logged(self):
+        states = [idle_state()] * 20                          # forces the "did not start" warning
+        with self.assertLogs("resolver", level="INFO") as cm:
+            self._play(states)
+        joined = "\n".join(cm.output)
+        self.assertTrue(joined, "expected log output, so this test is not vacuous")
+        self.assertNotIn("tts_proxy", joined)
+        self.assertNotIn(self.URI, joined)
 
 
 if __name__ == "__main__":
