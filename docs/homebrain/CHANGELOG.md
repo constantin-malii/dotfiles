@@ -3,6 +3,120 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-08 — AN-01 resolver deploy is LIVE, and G3 validation FAILED at step 4: a TTS clip wrapped as `builtin://radio/` never reports completion, so an announcement holds the microphone for ~53 s
+
+> **The deploy itself is sound; the validation is not complete and G4 is blocked.** Every asserted
+> behaviour passed. The defect is a **timing** one, and it lands on requirement 7 (mute the satellite
+> microphone for the announcement), so it is recorded as a **failure**, not a caveat. **No rollback:**
+> the deployed code is correct on every behaviour it asserts, and reverting would lose a clean deploy
+> to fix a wait. Rollback pointer kept regardless: `~/mass-resolver/.bak/20260908-163353/`.
+
+### What was deployed
+
+`interaction.py`, `haconn.py`, `wsutil.py`, `config.py`, `config.json` plus five test modules
+(`test_interaction.py`, `test_haconn.py`, `test_config.py`, `test_wsutil.py`, `test_py35_compat.py`),
+from `main` at `4cb2869` (PR #48). Copies verified by **sha256 end to end**, not by `scp`'s exit code.
+
+- **Backup / rollback pointer:** `BACKUP_TS=20260908-163353`. All five backed-up files' checksums
+  matched the pre-change record exactly.
+- **Pre-change deployed state:** `interaction.py 570de080`, `haconn.py 2928f60e`, `wsutil.py 2553f72b`,
+  `config.py ec681f19`, `config.json 1f247941`. Confirmed pre-AN-01: `_mic_claim`, `_volume_recovery`,
+  `_play_clip_and_wait`, `_redact_uri`, `announce_volume` all absent.
+- **Host parity run, Python 3.5.2:** `COMPILE OK`; **435 tests OK** — `test_py35_compat` 7,
+  `test_interaction` 354, `test_haconn` 42, `test_config` 23, `test_wsutil` 9. `JSON OK 0.8 0.7`,
+  `CONFIG SANE`.
+- Restart was the operator's `sudo systemctl restart mass-resolver` at **16:41:49**; fresh
+  `SERVICE: /command HTTP server on 192.168.122.1:8770` + `connected; subscribed …`, no tracebacks.
+
+### What passed
+
+- **Health checks:** VM `running`, resolver `active`, `/command` bound, MA/HA `200`.
+- **Auth:** `with-key:200`. The bad-key `401` was sampled **45 times** on the host (30 no-key, 15
+  wrong-key) — **45/45 clean `401`s, zero resets.** This settles the recorded Windows socket-reset
+  flake: it is a **client artifact of the dev machine**, not the server's unauthorized path, so the
+  health check's `401` assertion is reliable here. The `http_server.py` body-drain fix drops to
+  unscheduled cleanup.
+- **Task 24 step 3, `say_text` regression:** `ok=True said=True likely_silent=False replayed=True`,
+  volume restored `0.4`, `library://radio/4` replayed, mic `off`. Operator heard it.
+- **Task 24 step 4, announce with the ceiling paused:** `ok True`, `chat Announced.`,
+  `announced True`, `chime {played: True}`, `mic {muted: True, confirmed: True}`,
+  `volume_restore restored`, both clips `started`/`issued`. Mic mute **confirmed after 2 polls**
+  (consistent with the 255 ms measured at AN-2); mic dead-man armed at **184 s** and correctly did
+  **not** fire; volume returned to `0.4`; `resume` replayed the captured station.
+- **The signed-URL redaction works live.** The chime's finish-poll line reads
+  `…timer_chime.wav?authSig=R` — that is `authSig=REDACTED` cut by the 80-char truncation. The
+  credential never reached the log, which is exactly what the post-G1 correction required.
+
+### The failure — requirement 7
+
+Step 4's `/command` call took **52.7 s** for a 17-character sentence. From the log:
+
+```
+17:10:18.433  SAY start … reply_volume=0.8
+17:10:25.060  clip=f3ff7804 finish-poll exit after 6.0s: state=idle      <- the chime, clean
+              … 45.8 s with no log line at all …
+17:11:10.907  restored -> 0.4
+17:11:10.908  mic restored
+```
+
+**Cause.** MA wraps by media type. The chime is `builtin://track/…` and reaches `state=idle` when it
+ends. The Piper clip is wrapped **`builtin://radio/…`** — a *stream*, which never reports an end, so
+the player stays `state=playing` on that cid indefinitely. A read taken 4 s **after** the call
+returned still showed
+`playing | 0.4 | builtin://radio/http://192.168.122.10:8123/api/tts_proxy/H65P50….mp3`.
+
+`_play_clip_and_wait`'s finish poll can exit three ways: two consecutive `ended` observations (never
+happens for a stream-wrapped clip), the blank-cid grace (`say_blank_cid_grace_ms`, 8 s — what
+`say_text` actually relies on; step 3 logged `cid stayed empty for 8.0s`), or the budget. Here the cid
+never blanked, so the budget was the only exit. **`announce_message_finish_timeout_ms` (45 s) is not a
+cap on a detected end; for the message clip it *is* the duration.**
+
+**Why this is a requirement-7 failure rather than slowness.** The mute is released in `_announce`'s
+`finally`, after `_say` returns. So:
+
+- the satellite microphone was muted **~53 s** for ~2 s of speech;
+- the ceiling was held at announce volume **0.8 for ~45 s after the speech ended**;
+- anyone talking to the satellite in that window is **not heard, with no indication why**.
+
+A fail-safe 25× wider than what it protects is not calibrated.
+
+**Observability gap, separately.** A finish poll that exhausts its budget **logs nothing** — only the
+ended-twice and blank-grace exits log. The operator sees `SAY start`, a 45 s hole, then `restored`.
+This was diagnosable only by subtracting timestamps. The budget exit needs a warning line carrying the
+clip and the elapsed time, whatever else is decided.
+
+### Not run, and why
+
+Task 24 steps 5–8 (announce over music, two-announcement supersession, the timed 300-char
+announcement, the self-wake pipeline trace) were **not run**. Each would incur the same 45 s, and step
+6 would compound it. Validation stopped at step 4 by the operator's instruction to stop on failure.
+
+A hypothesis for whoever resumes, untested: over *music* `was_playing` is true, so the source is
+replayed and the cid changes — the poll may exit properly, which would make this specific to the
+not-playing case.
+
+### State left behind
+
+Ceiling `playing library://radio/4` at `0.4`, satellite `idle`, mic mute `off`, resolver `active`, no
+tracebacks. The operator's station was captured before the test and restored after. Nothing stranded.
+**Live lane released.**
+
+**G4a/G4b remain blocked.** Sentence triggers would expose a 53 s mute to the household. A fix
+proposal (reliable completion detection via `media_duration`/`media_position`, versus the current
+budget fallback, with focused tests and a redeploy plan) is prepared and awaiting review; nothing is
+implemented.
+
+### Process notes worth keeping
+
+- **`scp`'s exit code proved nothing** — a `grep -v` in the pipeline masked it entirely, reporting
+  `exit=1` on two successful copies. Compare sha256 end to end.
+- **Do not spawn an `ssh-agent` per call.** 21 orphaned agents accumulated and held the tool's stdout
+  pipe open, wedging four consecutive calls after the ssh had already finished. One detached agent
+  writing to a file, killed on exit, works. Direct `ssh -i` still fails as the runbook records, and the
+  Windows `ssh-agent` service is Disabled.
+- `test_py35_compat.py` was deployed alongside the four planned test modules; running the
+  compatibility guard on the real 3.5.2 target is worth more than running it on the dev machine's 3.12.
+
 ## 2026-09-07 — normalise the legacy `platform:` trigger key across the remaining six automations
 
 > Eight `"platform"` → `"trigger"` renames in six managed automations. **No behaviour change of any
