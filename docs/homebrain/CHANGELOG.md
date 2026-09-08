@@ -3,6 +3,62 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-07 — normalise the legacy `platform:` trigger key across the remaining six automations
+
+> Eight `"platform"` → `"trigger"` renames in six managed automations. **No behaviour change of any
+> kind** — the point is that the *next* automation edit produces a readable diff.
+
+- **Live gate.** Claimed for this migration on `homebrain/automation-trigger-key-migration` after the
+  AN-01 owner confirmed G1 complete and released it; released again on merge. Recorded here rather
+  than in `BACKLOG.md` by deliberate choice. The work is disjoint from AN-01: its only Home Assistant
+  write target is `automation.voice_ceiling_speakers`, which this change does **not** touch.
+- **Why now.** PR #46 established that saving *any* automation through the HA UI rewrites the whole
+  config to the current schema, so a one-line intended edit arrived with eight unrequested rename
+  hunks attached. Every remaining managed automation carried the same latent cost. Doing them
+  deliberately, in isolation, means the renames are reviewed once on their own terms instead of
+  ambushing an unrelated review later.
+- **Method: save-only.** Each automation was opened in the UI's YAML editor and saved with **no text
+  edited**. The save alone triggers the normalisation; that *is* the migration.
+- **Scope, and one deliberate exclusion.** `automation.voice_ceiling_speakers` was normalised in
+  PR #46 and is untouched here — it is the target of AN-01's Task 26 and the subject of its G4b
+  rollback, so it stays out of any unrelated change.
+
+| Automation | Renames | Trigger platform values |
+|---|---|---|
+| `1784146586` (S1a - Satellite Ceiling Duck/Restore) | 2 | `state`, `state` |
+| `ma_auto_reload` (MA: auto-reload after restart) | 2 | `homeassistant`, `state` |
+| `1784200731` (S1b-2 - Satellite Reply on Ceiling) | 1 | `event` |
+| `lidarr_ma_sync` (Lidarr import -> MA sync) | 1 | `webhook` |
+| `ma_health_probe` (MA: health probe auto-reload) | 1 | `time_pattern` |
+| `satellite_timer_announce` (Satellite timer - announce) | 1 | `state` |
+
+- **These are not all `conversation` triggers.** PR #46's audit restricted the rename to values equal
+  to `"conversation"`; that rule would have been wrong here. The eight span five platform values, so
+  the audit had to accept any value and separately assert the value was **preserved**.
+- **Twenty-two changed lines, not sixteen.** Canonical output sorts keys and `trigger` sorts after
+  `to`, where `platform` sorted before it. In `1784146586` (both triggers) and
+  `satellite_timer_announce` the key therefore moves position and the adjacent line's trailing comma
+  moves with it. Predicted in advance precisely so it would not read as an anomaly in review.
+
+### Verification: the expected output was computed before Home Assistant was touched
+
+- **Byte-exact prediction, offline.** The exporter's `render()` (`sort_keys=True`,
+  `ensure_ascii=False`, `indent=2`, trailing newline) was replicated locally and applied to the
+  committed files with the rename as the only transform, producing six predicted digests **before any
+  UI save**. All six exports matched them exactly. A prediction made before the change cannot be
+  retro-fitted to agree with a mistake — this is the guard that a fixture written after the fact does
+  not give.
+- **Pre-change gate.** `--strict-inventory`, exit 0, 37 files, zero diff against `main` at `d520da7`.
+- **Post-change audit, four independent checks.** (A) exactly 6 of 37 files differ; (B) each is one of
+  the six intended; (C) each matches its offline-predicted digest; (D) transforming each committed
+  file by the rename alone reproduces the exported file exactly, with 0 `platform` keys left. 8/8
+  renames, 0 failures.
+- **Line counts unchanged in all six; −8 bytes total**, one per rename (`"platform"` is 8 characters,
+  `"trigger"` is 7).
+- **Checked for other legacy keys and found none** — all six already used the modern `action:`,
+  `triggers:` and `actions:` spellings, so `platform:` was the only thing HA rewrote. The `webhook`
+  trigger in `lidarr_ma_sync` was watched specifically in case saving re-registered it; it did not.
+
 ## 2026-09-07 — `play_radio` routes through the resolver; the other half of drift detection is now tested
 
 > The bare "play the radio" branch stopped bypassing the resolver. It was the last hardcoded station
