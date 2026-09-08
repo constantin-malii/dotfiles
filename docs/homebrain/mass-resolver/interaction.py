@@ -1276,18 +1276,24 @@ class InteractionCapability(capability.Capability):
                     paused_by_us[0] = True
                 except Exception:
                     pass                        # best-effort: a failed pause only costs us the bump
-            self._say_call(ctx, rid, zone, "media_player", "volume_set",
-                           {"entity_id": zone, "volume_level": reply_volume})
+            # Claim the restore obligation BEFORE issuing the write. Setting the flag first can
+            # only cause a REDUNDANT restore to a value the zone already holds -- harmless and
+            # idempotent. Setting it second can cause a MISSING restore, which is neither: a lost
+            # acknowledgement (the write lands, the response does not) stranded the zone at the
+            # reply volume, and for an announcement there is no duck snapshot and therefore no
+            # volume dead-man, so this finally is the only net (design 8.4c).
             pending_restore[0] = True
             if owns_restore:
                 with self._lock:
                     snap = self._snaps.get(zone)
                     if snap is not None and snap.get("ts") == my_snap_ts:
-                        # Keep the duck's "last value we wrote" in step with reality. If this reply
-                        # turn dies before its restore, a later _restore/dead-man must find the
-                        # device in agreement and restore the baseline -- not read our reply volume
-                        # as a human override, keep it, and discard the baseline (the ratchet).
+                        # Keep the duck's "last value we wrote" in step with what we are ABOUT to
+                        # write, so a turn that dies mid-write leaves a device a later reconciler
+                        # agrees with -- rather than reading our reply volume as a human override,
+                        # keeping it, and discarding the baseline (the ratchet).
                         snap["target"] = reply_volume
+            self._say_call(ctx, rid, zone, "media_player", "volume_set",
+                           {"entity_id": zone, "volume_level": reply_volume})
             # 5-7. play the clip SEQUENCE and wait each one out (design 8.1-8.3). One clip is
             # just the degenerate case, which is how say/say_text keep their existing behaviour.
             #

@@ -4071,5 +4071,254 @@ class AnnounceSupersessionTest(unittest.TestCase):
         self.assertEqual(cap._mic, {})
 
 
+
+class LostAckVolumeTest(unittest.TestCase):
+    """AN-01 Task 16: design 8.4(c). _say set pending_restore AFTER the volume write.
+
+    A lost acknowledgement -- the write lands, the response does not -- skipped the finally's
+    restore AND the snap["target"] sync. A later _restore then read 0.80, classified it as a human
+    override, KEPT it and discarded the baseline: the volume ratchet.
+
+    This is a pre-existing defect reachable by any reply today. An announcement makes it dangerous,
+    because a phone caller leaves no duck snapshot, so _arm_timer never ran and there is no volume
+    dead-man at all -- _say's finally is the only net, and this is precisely the net the defect
+    disabled.
+
+    Claiming the obligation BEFORE the write can only cause a REDUNDANT restore to a value the zone
+    already holds, which is harmless and idempotent. Claiming it after can cause a MISSING restore,
+    which is neither.
+    """
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.zone = "media_player.ceiling_speakers"
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _lost_ack_ha(self):
+        """Applies the volume write to its own state, THEN raises -- a lost ack."""
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        state = {"raised": False}
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "volume_set" and not state["raised"]:
+                state["raised"] = True
+                real(domain, service, data, timeout)      # the write LANDS
+                raise IOError("connection reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        return ha
+
+    def _refusing_ha(self):
+        """Refuses the first volume write BEFORE it lands."""
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        state = {"n": 0}
+
+        def refuse(domain, service, data, timeout=5):
+            if service == "volume_set" and state["n"] == 0:
+                state["n"] = 1
+                raise IOError("refused before landing")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = refuse
+        return ha
+
+    # ---- the defect ---------------------------------------------------------
+
+    def test_a_lost_ack_on_the_volume_raise_still_restores_the_baseline(self):
+        cap = self._cap()
+        ha = self._lost_ack_ha()
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-la")
+        self.assertFalse(r["ok"])
+        vols = [c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"]
+        self.assertEqual(vols, [0.40, 0.36])          # raised, then restored on the way out
+
+    def test_the_snap_target_sync_precedes_the_write(self):
+        # So a later _restore or dead-man agrees with the device instead of classifying our own
+        # reply volume as a human override and discarding the baseline.
+        cap = self._cap()
+        cap._snaps[self.zone] = {"volume": 0.36, "target": 0.15, "ts": 900.0, "timer": None}
+        ha = self._lost_ack_ha()
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-sync")
+        # The snapshot was retired by the abort-restore; if it survives, target must not be 0.15.
+        snap = cap._snaps.get(self.zone)
+        if snap is not None:
+            self.assertNotEqual(snap["target"], 0.15)
+
+    def test_a_redundant_restore_is_harmless(self):
+        # The write never landed: the restore writes a value the zone already holds.
+        cap = self._cap()
+        ha = self._refusing_ha()
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-red")
+        self.assertFalse(r["ok"])
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"], [0.36])
+
+    # ---- the recovery paths the reordering touches --------------------------
+
+    def test_the_lost_ack_snapshot_is_retired_so_no_stale_baseline_survives(self):
+        # Leaving an armed snapshot behind carries a now-stale baseline into the next turn.
+        cap = self._cap()
+        cap._snaps[self.zone] = {"volume": 0.36, "target": 0.15, "ts": 900.0, "timer": None}
+        ha = self._lost_ack_ha()
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-ret")
+        self.assertNotIn(self.zone, cap._snaps)
+
+    def test_a_snapshot_belonging_to_a_LATER_turn_is_not_retired(self):
+        # Ownership rule: we may only retire the snapshot our baseline came from. A duck that landed
+        # during the reply owns the next turn's baseline and dead-man, and must survive us.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        cap._snaps[self.zone] = {"volume": 0.36, "target": 0.15, "ts": 900.0, "timer": None}
+        keep = {"volume": 0.55, "target": 0.15, "ts": 5000.0, "timer": None}
+        real = ha.call_service_rest
+        state = {"raised": False}
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "volume_set" and not state["raised"]:
+                state["raised"] = True
+                real(domain, service, data, timeout)      # the write LANDS
+                cap._snaps[self.zone] = keep              # a NEWER duck lands during our reply
+                raise IOError("connection reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-keep")
+        self.assertIs(cap._snaps.get(self.zone), keep)
+        self.assertEqual(keep["target"], 0.15)        # and we did not sync someone else's snapshot
+
+    def test_the_sync_only_touches_the_snapshot_our_baseline_came_from(self):
+        # The ownership half of the moved block. my_snap_ts is captured back at step 2; a snapshot
+        # that appears AFTER that belongs to another turn, and writing our reply volume into its
+        # target would tell that turn's reconciler the device sits somewhere it does not.
+        #
+        # Planted on the media_pause call, which is the last thing before the claim and the sync --
+        # so the sync really does see a foreign snapshot, which is what the ts check is for.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.40)])
+        late = {"volume": 0.55, "target": 0.15, "ts": 7000.0, "timer": None}
+        real = ha.call_service_rest
+
+        def plant(domain, service, data, timeout=5):
+            if service == "media_pause":
+                cap._snaps[self.zone] = late      # a duck lands between our claim and the sync
+            real(domain, service, data, timeout)
+        ha.call_service_rest = plant
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-foreign")
+        self.assertEqual(late["target"], 0.15)
+        self.assertIs(cap._snaps.get(self.zone), late)     # nor did we retire it
+
+    def test_the_reply_marker_is_released_on_the_lost_ack_path(self):
+        cap = self._cap()
+        ha = self._lost_ack_ha()
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-rel")
+        self.assertNotIn(self.zone, cap._replies)
+        self.assertNotIn(self.zone, cap._turns)
+
+    def test_the_music_is_un_paused_when_the_clip_never_went_out(self):
+        # The other half of the finally. The volume write died, so play_media never issued and the
+        # queue still holds the music -- un-pausing restores the zone rather than leaving it silent.
+        cap = self._cap()
+        ha = self._lost_ack_ha()
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-unp")
+        self.assertIn("media_play", [sv for _, sv, _ in ha.calls])
+
+    def test_a_superseding_turn_keeps_the_zone_on_the_lost_ack_path(self):
+        # A superseded turn must not restore: the newer turn owns the volume now, and restoring
+        # would undo what it just set.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2")])
+        real = ha.call_service_rest
+        state = {"raised": False}
+
+        def lossy(domain, service, data, timeout=5):
+            if service == "volume_set" and not state["raised"]:
+                state["raised"] = True
+                real(domain, service, data, timeout)
+                cap._say_gen[self.zone] = cap._say_gen.get(self.zone, 0) + 5   # barge-in
+                raise IOError("connection reset after the write")
+            real(domain, service, data, timeout)
+        ha.call_service_rest = lossy
+        capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-sup")
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"], [0.40])
+
+    def test_with_owns_restore_off_the_lost_ack_does_not_restore(self):
+        # say_owns_restore=False hands the restore to the duck/_restore path instead; the finally's
+        # net is explicitly gated on owning it.
+        cap = self._cap()
+        ha = self._lost_ack_ha()
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.say_owns_restore = False
+        capability.run(cap, ctx, {"mode": "say", "uri": self.tts}, "rid-noown")
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"], [0.40])
+
+    # ---- the success path is unchanged --------------------------------------
+
+    def test_on_the_success_path_the_snapshot_target_still_tracks_the_raise(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.40)])
+        # A live duck snapshot, so the sync has something to write to.
+        cap._snaps[self.zone] = {"volume": 0.36, "target": 0.15, "ts": 900.0, "timer": None}
+        seen = []
+        real = ha.call_service_rest
+
+        def watch(domain, service, data, timeout=5):
+            if service == "volume_set":
+                snap = cap._snaps.get(self.zone)
+                seen.append((data["volume_level"], snap["target"] if snap else None))
+            real(domain, service, data, timeout)
+        ha.call_service_rest = watch
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-succ")
+        self.assertTrue(r["ok"], r)
+        # At the moment the raise is issued the snapshot already agrees with it.
+        self.assertEqual(seen[0], (0.40, 0.40))
+
+    def test_the_success_path_still_restores_exactly_once(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.tts),
+                       idle_state(), idle_state(), playing(0.40)])
+        r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.tts}, "rid-once")
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"],
+                         [0.40, 0.36])
+        self.assertNotIn("media_play", [sv for _, sv, _ in ha.calls])   # no spurious un-pause
+
+    def test_an_announcement_with_a_lost_ack_restores_although_it_has_no_dead_man(self):
+        # design 3.5: a phone caller leaves no duck snapshot, so _arm_timer never ran and there is
+        # no volume dead-man. This finally is the ONLY net -- and it is louder, so a stranded value
+        # is worse.
+        cap = self._cap()
+        ha = self._lost_ack_ha()
+        ha.tts_url = self.tts
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        ctx.settings.announce_chime_uri = ""
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")])
+        r = capability.run(cap, ctx, {"mode": "announce", "text": "dinner is ready"}, "rid-anla")
+        self.assertFalse(r["ok"])
+        self.assertEqual([c[2]["volume_level"] for c in ha.calls if c[1] == "volume_set"],
+                         [0.80, 0.36])
+        self.assertNotIn(self.zone, cap._snaps)
+        self.assertEqual(cap._mic, {})                # and the microphone came back
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
