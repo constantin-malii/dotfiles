@@ -92,6 +92,46 @@ class Settings(object):
         # Silence the outgoing music before raising to reply_volume, so the raise is not heard as a
         # "bump" on the ~1s of music still playing before the clip replaces the stream.
         self.say_pause_before_reply = bool(cfg.get("say_pause_before_reply", True))
+        # ---- AN-01 announce mode (design 6.2) -------------------------------------------
+        # Louder than reply_volume: an announcement has to carry through the house, where a reply
+        # only has to reach the person who asked.
+        self.announce_volume = float(cfg.get("announce_volume", 0.80))
+        # Empty by default -- the chime is the attention signal, so a spoken prefix would be a
+        # second one. Bounded separately below so a misconfiguration cannot defeat the timing model.
+        self.announce_prefix = cfg.get("announce_prefix", "")
+        self.announce_max_prefix_chars = int(cfg.get("announce_max_prefix_chars", 40))
+        # NO "./" IN THIS PATH. A './' segment makes HA sign the un-normalised path while returning
+        # a normalised url, so the signature cannot validate against the url it is attached to --
+        # the AN-1 root cause, and why this asset was believed unplayable for two days.
+        self.announce_chime_uri = cfg.get(
+            "announce_chime_uri", "media-source://media_source/local/timer_chime.wav")
+        # D1, settled at AN-2. Empty here so a machine with no config.json refuses rather than
+        # guessing an entity id; the shipped config.json carries the real one.
+        self.announce_mic_mute_entity = cfg.get("announce_mic_mute_entity", "")
+        self.announce_require_mic_mute = bool(cfg.get("announce_require_mic_mute", True))
+        # A successful switch.turn_on is an ACCEPTED REQUEST, not a muted microphone: AN-2 saw HA
+        # answer 200 in 1ms while the state was still "off", so the state is read back before any
+        # audio (design 9.3). AN-2 measured 255ms for the switch to report, in both directions, so
+        # 2000ms leaves roughly 8x headroom -- too tight a budget refuses every announcement.
+        self.announce_mic_confirm_timeout_ms = int(cfg.get("announce_mic_confirm_timeout_ms", 2000))
+        self.announce_mic_confirm_poll_ms = int(cfg.get("announce_mic_confirm_poll_ms", 250))
+        # Failsafe timers. 0 derives from the turn's own budget (design 6.5). Both are POLICY
+        # CUTOFFS based on an engineered budget, not wall-clock bounds -- a pathologically
+        # slow-but-live turn can cross one. The trade-off deliberately favours liveness: a stuck
+        # mute leaves the satellite deaf, and a stuck volume leaves the ceiling loud.
+        self.announce_mic_deadman_ms = int(cfg.get("announce_mic_deadman_ms", 0))
+        self.announce_volume_deadman_ms = int(cfg.get("announce_volume_deadman_ms", 0))
+        self.announce_volume_deadman_retries = int(cfg.get("announce_volume_deadman_retries", 3))
+        # Per-clip finish budgets, NOT say_reply_timeout_ms (180s) -- that is sized for the
+        # knowledge agent's long answers, and a 4s chime does not need it.
+        self.announce_chime_finish_timeout_ms = int(cfg.get("announce_chime_finish_timeout_ms", 15000))
+        self.announce_message_finish_timeout_ms = int(cfg.get("announce_message_finish_timeout_ms", 45000))
+        # Bound on the FINAL RENDERED text (prefix + message). Every timeout above is sized from
+        # this number, so nothing reaching Piper may escape it. Over-long is REJECTED, never
+        # truncated: clipping a household message can invert its meaning.
+        self.announce_max_chars = int(cfg.get("announce_max_chars", 300))
+        # Floor for a deadline-clipped blocking call: below this, do not start the call at all.
+        self.announce_min_call_timeout_ms = int(cfg.get("announce_min_call_timeout_ms", 500))
 
 
 def load_settings(here):

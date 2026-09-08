@@ -123,5 +123,117 @@ class TtsEngineSettingTest(unittest.TestCase):
         self.assertEqual(config.Settings({"tts_engine": "tts.other"}).tts_engine, "tts.other")
 
 
+
+class AnnounceTunablesTest(unittest.TestCase):
+    """AN-01 Task 9: the announce mode's tunables (design 6.2 and 6.5).
+
+    Two values here are measurements, not guesses:
+      * announce_mic_mute_entity is D1, settled at AN-2.
+      * announce_mic_confirm_timeout_ms is sized from the measured 255ms read-back latency.
+    """
+
+    CHIME = "media-source://media_source/local/timer_chime.wav"
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="cfg_")
+        self.addCleanup(shutil.rmtree, self.d, ignore_errors=True)
+
+    def _write(self, obj):
+        with open(os.path.join(self.d, "config.json"), "w") as f:
+            json.dump(obj, f)
+
+    def test_defaults(self):
+        s = config.load_settings(self.d)
+        self.assertEqual(s.announce_volume, 0.80)
+        self.assertEqual(s.announce_prefix, "")
+        self.assertEqual(s.announce_max_prefix_chars, 40)
+        self.assertEqual(s.announce_chime_uri, self.CHIME)
+        self.assertEqual(s.announce_mic_mute_entity, "")
+        self.assertTrue(s.announce_require_mic_mute)
+        self.assertEqual(s.announce_mic_confirm_timeout_ms, 2000)
+        self.assertEqual(s.announce_mic_confirm_poll_ms, 250)
+        self.assertEqual(s.announce_mic_deadman_ms, 0)
+        self.assertEqual(s.announce_volume_deadman_ms, 0)
+        self.assertEqual(s.announce_volume_deadman_retries, 3)
+        self.assertEqual(s.announce_chime_finish_timeout_ms, 15000)
+        self.assertEqual(s.announce_message_finish_timeout_ms, 45000)
+        self.assertEqual(s.announce_max_chars, 300)
+        self.assertEqual(s.announce_min_call_timeout_ms, 500)
+
+    def test_the_chime_default_has_no_dot_segment(self):
+        # AN-1 root cause: a './' makes HA sign the un-normalised path while returning a normalised
+        # url, so the signature cannot validate. This default must never carry one again.
+        s = config.load_settings(self.d)
+        self.assertNotIn("/./", s.announce_chime_uri)
+
+    def test_overrides(self):
+        self._write({"announce_volume": 0.55, "announce_prefix": "Attention.",
+                     "announce_chime_uri": "", "announce_require_mic_mute": False,
+                     "announce_max_chars": 120, "announce_mic_confirm_timeout_ms": 4000,
+                     "announce_mic_mute_entity": "switch.other",
+                     "announce_volume_deadman_retries": 1})
+        s = config.load_settings(self.d)
+        self.assertEqual(s.announce_volume, 0.55)
+        self.assertEqual(s.announce_prefix, "Attention.")
+        self.assertEqual(s.announce_chime_uri, "")
+        self.assertFalse(s.announce_require_mic_mute)
+        self.assertEqual(s.announce_max_chars, 120)
+        self.assertEqual(s.announce_mic_confirm_timeout_ms, 4000)
+        self.assertEqual(s.announce_mic_mute_entity, "switch.other")
+        self.assertEqual(s.announce_volume_deadman_retries, 1)
+
+    def test_require_mic_mute_can_be_switched_off_by_config(self):
+        # It is the fail-safe for requirement 7, so the escape hatch must actually work.
+        self._write({"announce_require_mic_mute": False})
+        self.assertFalse(config.load_settings(self.d).announce_require_mic_mute)
+
+
+class ShippedAnnounceConfigTest(unittest.TestCase):
+    """Assertions against the REAL config.json that gets deployed, not a temp dir."""
+
+    def _shipped(self):
+        here = os.path.dirname(os.path.dirname(os.path.abspath(config.__file__)))
+        return config.load_settings(os.path.join(here, "mass-resolver"))
+
+    def test_announce_volume_is_above_reply_volume(self):
+        # Guards against an edit quietly making announcements quieter than ordinary replies.
+        s = self._shipped()
+        self.assertGreater(s.announce_volume, s.reply_volume)
+
+    def test_the_mic_mute_entity_is_the_settled_D1_value(self):
+        # D1, settled at AN-2 2026-09-07. An empty value makes every announcement refuse.
+        s = self._shipped()
+        self.assertEqual(s.announce_mic_mute_entity,
+                         "switch.respeaker_living_room_microphone_mute")
+
+    def test_the_shipped_chime_uri_has_no_dot_segment(self):
+        self.assertNotIn("/./", self._shipped().announce_chime_uri)
+
+    def test_the_confirm_budget_clears_the_measured_readback_latency(self):
+        # AN-2 measured 255ms for the switch to report back, in both directions. The budget must
+        # leave real headroom; too tight and every announcement refuses.
+        s = self._shipped()
+        self.assertGreaterEqual(s.announce_mic_confirm_timeout_ms, 4 * 255)
+
+    def test_the_confirm_poll_fits_inside_the_confirm_budget(self):
+        s = self._shipped()
+        self.assertLess(s.announce_mic_confirm_poll_ms, s.announce_mic_confirm_timeout_ms)
+
+    def test_the_engineered_phase_budget_stays_under_the_rest_command_timeout(self):
+        # design 6.5: an arithmetic self-consistency check as timeouts are tuned. It does NOT claim
+        # the budget bounds wall-clock duration -- a socket timeout is a per-operation inactivity
+        # timeout, not a request deadline.
+        s = self._shipped()
+        start = s.say_start_timeout_ms
+        call = s.say_call_timeout_ms
+        budget_ms = (10000 + 10000 + 10000 + 5000 + s.announce_mic_confirm_timeout_ms
+                     + 5000 + 5000
+                     + call + start + s.announce_chime_finish_timeout_ms
+                     + call + start + s.announce_message_finish_timeout_ms
+                     + 5000 + call + 5000
+                     + 5 * s.announce_min_call_timeout_ms)
+        self.assertLess(budget_ms / 1000.0, 200.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

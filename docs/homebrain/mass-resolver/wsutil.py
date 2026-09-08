@@ -3,8 +3,19 @@
 import os, socket, base64, struct, json
 
 
-def ws_connect(host, port, path):
-    s = socket.create_connection((host, port), timeout=15)
+def ws_connect(host, port, path, timeout=15):
+    # `timeout` is a PER-OPERATION socket inactivity timeout, not a deadline for the whole
+    # handshake -- connect, send and each recv get their own allowance. It is applied to the
+    # connect AND the handshake read, because the connect timeout does not bound the recv
+    # loop below it: a slow-but-alive peer could otherwise hold the handshake open past the
+    # caller's budget. Callers holding a phase deadline clip this instead of blocking on the
+    # 15s default (AN-01 design 6.5).
+    #
+    # The default is unchanged at 15s, and both existing callers override the socket timeout
+    # immediately afterwards -- haconn.connect -> settimeout(None) for the long-lived event
+    # socket, maconn.connect -> settimeout(60) -- so neither is affected.
+    s = socket.create_connection((host, port), timeout=timeout)
+    s.settimeout(timeout)
     s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     k = base64.b64encode(os.urandom(16)).decode()
     s.sendall(("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n" % (path, host, k)).encode())
