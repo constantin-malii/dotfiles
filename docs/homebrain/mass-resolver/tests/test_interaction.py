@@ -5344,5 +5344,252 @@ class VolumeRecoveryTest(unittest.TestCase):
         self.assertNotIn(self.zone, cap._vol_recovery)
 
 
+
+class FinishPollBudgetWarningTest(unittest.TestCase):
+    """6a: a finish poll that gives up without observing the end must say so.
+
+    The poll has five exits. Two are logged -- the ended-twice observation and the blank-cid grace.
+    Three were silent: the accumulated-sleep budget, the turn deadline, and refusing to start a read
+    below the floor. That silence is what made the G3 failure appear as a 45-second hole between two
+    ordinary log lines, diagnosable only by subtracting timestamps.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    URI = "http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+    WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+
+    def _opts(self, **over):
+        opts = {"start_timeout": 5.0, "finish_timeout": 3.0, "call_timeout": 20.0,
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
+        opts.update(over)
+        return opts
+
+    def _match(self):
+        return playing_with_id(0.70, self.WRAPPED)
+
+    def _run(self, opts, states=None, sup=None, moving=False, ha=None):
+        if moving:
+            clock = MovingClock()
+            cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                    sleeper=AdvancingSleeper(clock))
+        else:
+            cap = interaction.InteractionCapability(timer_factory=FakeTimer,
+                                                    clock=lambda: 1000.0, sleeper=FakeSleeper())
+        ha = ha if ha is not None else FakeHA(self._match())
+        if states is not None:
+            ha.set_states(states)
+        res = cap._play_clip_and_wait(FakeCtx(ha), "rid1", self.ZONE, self.URI, self.URI,
+                                      "cl1p", opts, sup or (lambda: False))
+        return res, ha
+
+    def _warnings(self, cm):
+        return [m for m in cm.output if m.startswith("WARNING")]
+
+    # ---- the three formerly silent exits -----------------------------------
+
+    def test_the_accumulated_sleep_budget_exit_warns(self):
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(finish_timeout=3.0))
+        self.assertTrue(res["started"])
+        gave_up = [m for m in self._warnings(cm) if "without observing" in m]
+        self.assertEqual(len(gave_up), 1, cm.output)
+        self.assertIn("cl1p", gave_up[0])          # the clip fingerprint
+        self.assertIn("3.0", gave_up[0])           # the budget
+
+    def test_the_turn_deadline_exit_warns(self):
+        clock_start = 1000.0
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(finish_timeout=600.0, deadline=clock_start + 1.0),
+                               moving=True)
+        self.assertTrue(res["started"])
+        self.assertTrue([m for m in self._warnings(cm) if "without observing" in m], cm.output)
+
+    def test_the_below_floor_exit_warns(self):
+        # No budget left to start another read; the poll stops without seeing the clip end.
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(finish_timeout=600.0, deadline=1000.6, floor=0.5),
+                               moving=True)
+        self.assertTrue(res["started"])
+        self.assertTrue([m for m in self._warnings(cm) if "without observing" in m], cm.output)
+
+    # ---- the two exits that already log must NOT gain a warning ------------
+
+    def test_the_ended_twice_exit_does_not_warn(self):
+        states = [self._match(), self._match(), idle_state(), idle_state()]
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(), states=states)
+        self.assertTrue(res["started"])
+        self.assertTrue(any("finish-poll exit after" in m for m in cm.output), cm.output)
+        self.assertEqual([m for m in self._warnings(cm) if "without observing" in m], [])
+
+    def test_the_blank_grace_exit_does_not_warn(self):
+        blank = {"state": "playing", "attributes": {"volume_level": 0.7,
+                                                    "media_content_id": ""}}
+        states = [self._match()] + [blank] * 10
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(blank_grace=1.0, finish_timeout=600.0), states=states)
+        self.assertTrue(any("cid stayed empty" in m for m in cm.output), cm.output)
+        self.assertEqual([m for m in self._warnings(cm) if "without observing" in m], [])
+
+    def test_a_superseded_turn_does_not_warn(self):
+        # Being superseded is a person talking, not a failure to observe the clip.
+        #
+        # A plain handler rather than assertLogs: a turn superseded on the first finish-poll
+        # iteration emits NO records at all, and assertLogs fails on zero records -- which would make
+        # this test fail for the opposite of the reason it exists.
+        import logging
+        recs = []
+
+        class Grab(logging.Handler):
+            def emit(self, r):
+                try:
+                    recs.append((r.levelname, r.getMessage()))
+                except Exception:
+                    recs.append(("?", "<unformattable>"))
+
+        log = logging.getLogger("resolver")
+        h = Grab()
+        log.addHandler(h)
+        self.addCleanup(log.removeHandler, h)
+        old = log.level
+        log.setLevel(logging.DEBUG)
+        self.addCleanup(log.setLevel, old)
+
+        res, _ = self._run(self._opts(), sup=superseded_after(1))
+        self.assertTrue(res["started"])
+        self.assertEqual([m for lvl, m in recs if "without observing" in m], [])
+
+    def test_a_clip_that_never_started_does_not_get_the_finish_warning(self):
+        # The start poll already warns "did not start (likely silent)"; the finish poll never ran.
+        with self.assertLogs("resolver", level="INFO") as cm:
+            res, _ = self._run(self._opts(), ha=FakeHA(idle_state()))
+        self.assertFalse(res["started"])
+        self.assertTrue(any("did not start" in m for m in cm.output), cm.output)
+        self.assertEqual([m for m in self._warnings(cm) if "without observing" in m], [])
+
+    # ---- the warning must not leak a credential ---------------------------
+
+    def test_the_warning_carries_no_credential(self):
+        signed = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=" + FAKE_SIG)
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                sleeper=FakeSleeper())
+        ha = FakeHA(playing_with_id(0.8, "builtin://track/" + signed))
+        with self.assertLogs("resolver", level="INFO") as cm:
+            cap._play_clip_and_wait(FakeCtx(ha), "rid1", self.ZONE, signed, signed,
+                                    cap._clip_id(signed), self._opts(), lambda: False)
+        joined = "\n".join(cm.output)
+        self.assertIn("without observing", joined)
+        self.assertNotIn(FAKE_SIG, joined)
+        self.assertNotIn("authSig=" + FAKE_SIG, joined)
+
+
+class TurnClipFingerprintTest(unittest.TestCase):
+    """6b: one turn must log ONE clip fingerprint for one clip.
+
+    The turn-level id was hashed from the RAW uri while the per-clip id was hashed from the
+    NORMALISED uri. Because HA's TTS url sits on a different host than say_internal_base, the two
+    diverged and a single turn logged two different ids -- defeating the correlation _clip_id exists
+    for. Observed live at G3: clip=58bf0413 on the start line, clip=47dcf789 on the finish-poll line,
+    same clip.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    # Deliberately NOT on say_internal_base, so normalisation actually changes the string.
+    FOREIGN = "http://homeassistant.local:8123/api/tts_proxy/x.mp3"
+    CHIME = "http://192.168.122.10:8123/media/local/timer_chime.wav?authSig=" + FAKE_SIG
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def _ids(self, cm):
+        import re
+        return re.findall(r"clip=([0-9a-f?]{8})", "\n".join(cm.output))
+
+    def test_the_normalisation_actually_changes_this_uri(self):
+        # Guard: if it did not, the tests below would pass vacuously.
+        cap = self._cap()
+        norm = cap._normalise_uri(self.FOREIGN, "192.168.122.10:8123")
+        self.assertNotEqual(norm, self.FOREIGN)
+        self.assertNotEqual(cap._clip_id(norm), cap._clip_id(self.FOREIGN))
+
+    def test_a_single_clip_turn_logs_one_fingerprint(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + cap._normalise_uri(
+                           self.FOREIGN, "192.168.122.10:8123")),
+                       idle_state(), idle_state(), playing(0.40)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            r = capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.FOREIGN}, "rid-fp")
+        self.assertTrue(r["ok"], r)
+        ids = self._ids(cm)
+        self.assertTrue(ids, cm.output)
+        self.assertEqual(len(set(ids)), 1, "one clip should log one id, got %s" % sorted(set(ids)))
+
+    def test_the_turn_id_is_the_normalised_one(self):
+        cap = self._cap()
+        expected = cap._clip_id(cap._normalise_uri(self.FOREIGN, "192.168.122.10:8123"))
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + cap._normalise_uri(
+                           self.FOREIGN, "192.168.122.10:8123")),
+                       idle_state(), idle_state(), playing(0.40)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.FOREIGN}, "rid-fp2")
+        self.assertEqual(set(self._ids(cm)), set([expected]))
+
+    def test_a_two_clip_turn_still_logs_DISTINCT_fingerprints(self):
+        # The fix must not collapse chime and message onto one id -- that would make two genuinely
+        # different clips indistinguishable, which is why the turn id is normalised rather than
+        # pushed down into the loop.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://track/" + self.CHIME),
+                       idle_state(), idle_state(),
+                       playing_with_id(0.80, "builtin://radio/" + cap._normalise_uri(
+                           self.FOREIGN, "192.168.122.10:8123")),
+                       idle_state(), idle_state(), playing(0.80)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            r = capability.run(cap, FakeCtx(ha), {
+                "mode": "say", "uri": self.FOREIGN,
+                "uris": [self.CHIME, self.FOREIGN],
+                "match_keys": [self.CHIME, self.FOREIGN],
+                "finish_timeouts": [15.0, 45.0], "volume_override": 0.80}, "rid-two")
+        self.assertTrue(r["ok"], r)
+        clips = r["metadata"]["clips"]
+        self.assertNotEqual(clips[0]["clip"], clips[1]["clip"])
+        self.assertEqual(len(set(self._ids(cm))), 2,
+                         "chime and message must stay distinguishable: %s" % sorted(set(self._ids(cm))))
+
+    def test_with_no_internal_base_the_id_is_the_raw_hash(self):
+        # _normalise_uri returns the uri unchanged when there is no base, so nothing moves.
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.say_internal_base = ""
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + self.FOREIGN),
+                       idle_state(), idle_state(), playing(0.40)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, ctx, {"mode": "say", "uri": self.FOREIGN}, "rid-nobase")
+        self.assertEqual(set(self._ids(cm)), set([cap._clip_id(self.FOREIGN)]))
+
+    def test_the_uri_never_reaches_the_log(self):
+        cap = self._cap()
+        ha = FakeHA(playing(0.36))
+        ha.set_states([playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.40, "builtin://radio/" + cap._normalise_uri(
+                           self.FOREIGN, "192.168.122.10:8123")),
+                       idle_state(), idle_state(), playing(0.40)])
+        with self.assertLogs("resolver", level="INFO") as cm:
+            capability.run(cap, FakeCtx(ha), {"mode": "say", "uri": self.FOREIGN}, "rid-noleak")
+        joined = "\n".join(cm.output)
+        self.assertNotIn("tts_proxy", joined)
+        self.assertNotIn("homeassistant.local", joined)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
