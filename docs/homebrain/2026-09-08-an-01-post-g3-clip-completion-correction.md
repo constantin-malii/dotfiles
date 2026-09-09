@@ -226,6 +226,91 @@ exists for. Cosmetic, one line, and it belongs in the same commit.
 
 **G4a and G4b remain blocked.**
 
+## Option D FAILED, and it falsifies this document's central claim — appended 2026-09-09
+
+An attended spike measured Option D. It did not work, and the control it produced overturns the
+mechanism this correction asserted above. **The sections above are left exactly as written** — they
+record what was believed on 2026-09-08 — and this is the correction to them.
+
+### What was tried
+
+A temporary build passed `media_type: "track"` on the clip's `play_media`, inert by default and
+enabled by one temporary config line. Deployed through the normal procedure: byte-identical copies
+verified by sha256, `COMPILE OK` and 442 tests on host Python 3.5.2, health green, operator-run
+restart, then **exactly one** short `say_text` with the operator listening. Reverted immediately
+afterwards.
+
+### Result — no effect
+
+| Measure | Result |
+|---|---|
+| Reached `idle`? | yes, at +5.0 s; the finish poll exited `state=idle` after 2.5 s |
+| **`media_duration`** | **`None` — unchanged** |
+| `media_content_id` | **still `builtin://radio/…tts_proxy…`** — MA did not wrap it as a track |
+| `media_position` | 0 → 2 |
+| elapsed | 4.39 s |
+| volume | 0.4 → 0.7 → **0.4 restored** |
+| mic mute | `off` throughout (a `say_text` does not lease it) |
+
+The criterion set for the spike was *reach `idle` **with a duration***. The duration stayed `None`
+and the wrapper did not change, so **Option D failed**. Asking MA explicitly for a track had no
+observable effect on a `tts_proxy` URL.
+
+### The control — why the clean exit proves nothing about the spike
+
+The resolver log carries a `say_text` from **2026-09-08 18:36:09**, on the **pre-spike** build:
+
+```
+SAY req=8200a07e … finish-poll exit after 2.0s: state=idle
+```
+
+The build already reached `idle` in 2.0 s without the change. So the spike's 2.5 s exit is **not
+attributable to it**.
+
+### What this falsifies
+
+This document's central claim — *"Music Assistant wraps by media type, and the wrapper decides
+whether an end exists"* — **is wrong.** A `builtin://radio/`-wrapped clip demonstrably **can** reach
+`idle`. The G3 evidence for that claim (the chime ending while the message did not, in the same turn)
+was a **correlation mistaken for the mechanism**: both facts were true, but the wrapper was not the
+cause.
+
+Everything else recorded above stands: the 45 s wait, the requirement-7 consequence, the unlogged
+budget exit, and the list of behaviours that were correct. Only the **explanation** was wrong.
+
+### The distinguishing feature, and it is UNTESTED
+
+Four observations are now available:
+
+| When | Case | Ceiling before | Exit |
+|---|---|---|---|
+| 2026-09-08 16:50 | `say_text`, one clip | playing radio | blank-cid grace, 8.0 s |
+| 2026-09-08 18:36 | `say_text`, one clip | — | **`idle`, 2.0 s** (no spike) |
+| 2026-09-09 16:18 | `say_text`, one clip | idle | **`idle`, 2.5 s** (spike) |
+| 2026-09-08 17:10 | announce, **clip 2 of 2** | paused | **never ended — 45 s budget** |
+
+Every single-clip turn ended. The only turn that did not was the **second clip in a sequence**, played
+after the chime. That — not the wrapper — is what distinguishes the failing case.
+
+**This is a hypothesis, not a finding.** It has not been tested, and it should not be built on. The
+next spike should target the multi-clip sequence: whether MA's queue leaves the player `playing` after
+the final item when that item was enqueued behind another. Note also that the blank-cid grace path
+(16:50, over music) is a third distinct behaviour, so the picture may be more than binary.
+
+**No remedy is chosen.** The character-count estimate remains untried and was deliberately **not**
+attempted as a fallback. The unlogged budget exit and the divergent clip fingerprint remain worth
+fixing regardless.
+
+### State after the spike
+
+Fully reverted and verified byte-identical to the post-G3 build — `interaction.py ff03c969`,
+`config.py b978ce0a`, `config.json 2ea59677`, `tests/test_interaction.py 7ba49361`, spike flag absent,
+**435 tests pass on host Python 3.5.2**, service active with fresh startup lines and no tracebacks,
+`key=200`/`nokey=401`, satellite and ceiling idle, microphone `off`. Backups retained:
+`.bak/20260909-160351` (pre-spike) and `.bak/20260908-163353` (pre-AN-01).
+
+**G4a and G4b remain blocked.**
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
