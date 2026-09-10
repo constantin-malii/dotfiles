@@ -1168,17 +1168,25 @@ class InteractionCapability(capability.Capability):
         elapsed = 0.0
         ended_seen = 0
         blank_for = 0.0
+        # Why the clip's wait ended. None once the end was actually OBSERVED; a string means we gave
+        # up without seeing it. Three exits used to be silent, which is why the G3 failure showed up
+        # as a 45s hole between two ordinary lines and was diagnosable only by subtracting
+        # timestamps.
+        gave_up = "finish_timeout"
         while True:
             if superseded():
                 return out
             # Both bounds again -- see the start poll above for why the accumulated-sleep test is
             # kept even when a deadline is set.
             if elapsed >= finish_timeout:
+                gave_up = "finish_timeout"
                 break
             if deadline is not None and self._clock() >= min(finish_deadline, deadline):
+                gave_up = "turn_deadline"
                 break
             rt = read_timeout(10)
             if rt is None:
+                gave_up = "below_floor"
                 break
             try:
                 state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
@@ -1201,6 +1209,7 @@ class InteractionCapability(capability.Capability):
                     LOG.info("SAY req=%s zone=%s clip=%s finish-poll: cid stayed empty for %.1fs "
                              "(state=playing); treating the clip as finished",
                              rid, zone, clip, blank_for)
+                    gave_up = None
                     break
             elif cid != "":
                 blank_for = 0.0
@@ -1214,16 +1223,32 @@ class InteractionCapability(capability.Capability):
                     LOG.info("SAY req=%s zone=%s clip=%s finish-poll exit after %.1fs: state=%s cid=%s",
                              rid, zone, clip, elapsed, state.get("state"),
                              self._redact_uri(cid)[:80])
+                    gave_up = None
                     break
             else:
                 ended_seen = 0
             self._sleeper(poll_secs)
             elapsed += poll_secs
+        if gave_up is not None:
+            # The clip's end was never observed. Say so: this is the difference between a turn that
+            # finished and one that merely ran out of time, and the two are indistinguishable in the
+            # log otherwise.
+            LOG.warning("SAY req=%s zone=%s clip=%s finish-poll gave up after %.1fs without "
+                        "observing the clip end (budget %.1fs, reason=%s)",
+                        rid, zone, clip, elapsed, finish_timeout, gave_up)
         return out
 
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
-        clip = self._clip_id(uri)
+        # Fingerprint the NORMALISED uri, so the turn-level id matches the id the clip loop derives
+        # for this same clip. HA's tts_proxy url sits on a different host than say_internal_base, so
+        # hashing the raw uri here made one turn log TWO ids and defeated the correlation _clip_id
+        # exists for (observed live at G3: clip=58bf0413 on the start line, clip=47dcf789 on the
+        # finish-poll line, same clip).
+        #
+        # Normalising here rather than pushing this id down into the loop is deliberate: the loop's
+        # per-clip ids must stay DISTINCT, or a chime and a message become indistinguishable.
+        clip = self._clip_id(self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", "")))
 
         # Plan decision (e): a pure media command is confirmed by the ACTION, not by speech. Playing
         # the confirmation clip here would replace the stream the same turn just started (and the
