@@ -3,6 +3,73 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-26 — AN-01 observability redeploy is LIVE, and the spike matrix completed: the 2026-09-08 completion-detection failure DID NOT REPRODUCE
+
+> **The defect is not fixed — it is not currently observable.** All four matrix cells ended cleanly,
+> including a same-build control re-run of the exact configuration that failed on 2026-09-08. Cause
+> unknown. Rollback pointer: `~/mass-resolver/.bak/20260910-131220/`.
+
+### What was deployed
+
+`interaction.py` only, plus its test module, from `main` at `52d03d8` (PR #49) — the two
+mechanism-independent observability fixes: a warning when a clip's finish poll gives up without
+observing the end (6a), and one normalised clip fingerprint per clip instead of two (6b). **Neither
+changes behaviour on any success path.** Files were staged 2026-09-10 and sat unrestarted for 16 days.
+
+- **Backup / rollback pointer:** `OBS_BACKUP_TS=20260910-131220`, covering **both** files the copy
+  touches. Pre-change: `interaction.py ff03c969`, `tests/test_interaction.py 7ba49361`.
+- **Deployed:** `interaction.py bd98a05f`, `tests/test_interaction.py d6368321`, verified by sha256
+  against `main`. Untouched and unchanged across the 16 days: `config.py b978ce0a`,
+  `config.json 2ea59677`, `wsutil.py 42391477`, `haconn.py e1bb6a5d`.
+- **Host parity run, Python 3.5.2:** `COMPILE OK`; **449 tests OK** — `test_py35_compat` 7,
+  `test_interaction` 368, `test_haconn` 42, `test_config` 23, `test_wsutil` 9.
+- Restart was the operator's `sudo systemctl restart mass-resolver` at **11:31:45**; fresh
+  `SERVICE: /command HTTP server on 192.168.122.1:8770` + `connected; subscribed …`, no tracebacks.
+- Re-verified before the restart that the 16-day-old staging was still intact: checksums unchanged,
+  host uptime 12 weeks with no intervening reboot, backup directory present.
+
+### The attended spike matrix
+
+Three live turns on the ceiling, each capturing and restoring the operator's music.
+
+| Cell | Clips | Ceiling before | Result |
+|---|---|---|---|
+| B | 1 (`say_text`) | paused | **ended, 3.14 s** — `finish-poll exit after 1.0s: state=idle` |
+| C | 2 (`announce`) | idle | **ended, 11.35 s** — chime 6.5 s, message 2.0 s, both `state=idle` |
+| D | 2 (`announce`) | paused | **ended, 9.50 s** — same configuration that took **52.7 s** on 2026-09-08 |
+
+Cell D was not in the plan. It was added as a **same-build control**, because B and C passing is
+ambiguous between an interaction effect and the failure having stopped occurring — and the design's
+own rule that a claim needs a same-build control applies to claiming a failure still exists, not just
+to claiming a fix.
+
+### What passed
+
+- **Recovery paths, three for three:** microphone leased → mute confirmed after 2 polls → restored to
+  `off`; volume `0.2 → 0.8 → 0.2` (cell B `→ 0.7 →`), always back to the captured baseline;
+  dead-man armed at 184 s and never fired. Cell D held the microphone **8.4 s**, not ~53 s.
+- **Health:** `/command` bound, `key=200`/`nokey=401`, VM `running`, satellite `idle` throughout,
+  **zero tracebacks**.
+- **The 6a warning fired 0 times**, correct when no poll exhausts its budget, and the positive control
+  that a silent budget exit would now be visible.
+- Operator confirmed both announcements audibly.
+
+### What this does and does not establish
+
+**It does not establish a fix.** PR #49 cannot explain cell D passing: `clip` at `interaction.py:1251`
+feeds only `LOG` calls and `_warn_if_double_speak`, and 6a is a `LOG.warning`. What changed between
+2026-09-08 and 2026-09-26 is uncharacterised — the resolver had run since 2026-09-09 16:27 and was
+restarted today, the host has 12 weeks' uptime, and HAOS/Music Assistant may have moved. Nothing
+measured distinguishes these.
+
+Two hypotheses were falsified by measurement over this investigation: the `media_type` wrapper story
+(2026-09-09) and the clip-sequence story (cell C). No remedy is proposed, per the design decision's
+stop/go criteria.
+
+**G4a and G4b are unblocked** — not because the defect is understood, but because it cannot presently
+be observed, its worst case is bounded by the dead-man, and a recurrence will now log
+`finish-poll gave up after … reason=`. The live gate is released.
+
 ## 2026-09-08 — AN-01 resolver deploy is LIVE, and G3 validation FAILED at step 4: a TTS clip wrapped as `builtin://radio/` never reports completion, so an announcement holds the microphone for ~53 s
 
 > **The deploy itself is sound; the validation is not complete and G4 is blocked.** Every asserted
