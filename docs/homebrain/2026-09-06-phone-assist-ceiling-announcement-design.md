@@ -6,6 +6,13 @@
 > the chime is unclassified by §8.2's reply/source logic). Those sections are **left as written** on
 > purpose — they record what was believed at G0 — so **read the correction alongside them.**
 >
+> ⚠ **AMENDED AGAIN 2026-09-08 by [`2026-09-08-an-01-post-g3-clip-completion-correction.md`](./2026-09-08-an-01-post-g3-clip-completion-correction.md)** — G3 measured that a Piper clip, which MA
+> wraps as `builtin://radio/`, **never reports completion**, so **§8.3**'s per-clip outcomes presume an
+> observable end that does not exist and **§6.5**'s message finish allowance is the ordinary duration
+> rather than a ceiling. The consequence is a **requirement-7 failure**: the microphone stayed muted
+> ~53 s for ~2 s of speech. Those sections are **left as written** — read the correction alongside
+> them. **G4a/G4b are blocked** until the mute window tracks the announcement.
+>
 > **Status:** **rev 5 — G0 APPROVED** (2026-09-06). The next authorised phase is an **implementation
 > plan only**. Nothing in this document has been built or deployed; nothing here modifies resolver
 > code, resolver tests, live Home Assistant, automations, or services. G1's spikes remain unexecuted
@@ -529,6 +536,12 @@ All six are optional. Absent, `_say` behaves exactly as it does today.
 
 ### 6.5 Timeout budget — the blocking `rest_command` is the constraint
 
+> ⚠ **Corrected 2026-09-08** — see [the post-G3 correction](./2026-09-08-an-01-post-g3-clip-completion-correction.md).
+> The message clip's finish allowance is not a ceiling on a detected end; measured at G3 it **is** the
+> ordinary duration, because a `builtin://radio/`-wrapped clip has no end to observe. The deadline
+> machinery below is correct and enforced the per-clip budget exactly as written — the assumption that
+> a phase usually finishes early is what fails.
+
 `/command` is **synchronous**: HA's `rest_command` blocks for the whole of `_say`. This is already a
 known live failure, not a hypothetical — `CHANGELOG.md:1328` records *"The occasional `interaction …
 timed out` is the HA `rest_command` timeout on a blocking long `_say`, absorbed by
@@ -815,6 +828,12 @@ The key is computed once at clip-build time in `_announce`. `_play_clip_and_wait
 parameter and never derives matching rules itself.
 
 ### 8.3 Per-clip outcomes
+
+> ⚠ **Corrected 2026-09-08** — see [the post-G3 correction](./2026-09-08-an-01-post-g3-clip-completion-correction.md).
+> This table presumes each clip's end is observable. Measured at G3: the chime (`builtin://track/`)
+> ends and is detected, but the Piper clip (`builtin://radio/`) is a **stream** and never reports one,
+> so its outcome is inferred from a timeout. Budget exhaustion is also **unlogged**, which hid the
+> failure.
 
 | Outcome | Chime clip | Message clip |
 |---|---|---|
