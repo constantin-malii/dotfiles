@@ -311,6 +311,93 @@ Fully reverted and verified byte-identical to the post-G3 build — `interaction
 
 **G4a and G4b remain blocked.**
 
+## The matrix is complete and the defect DID NOT REPRODUCE — appended 2026-09-26
+
+All four cells of the spike matrix in `2026-09-09-an-01-multi-clip-completion-design-decision.md`
+now have a measurement, and **every one of them ends cleanly.** Cells B and C were run as designed.
+Cell D — the configuration that failed on 2026-09-08 — was then re-run as a **same-build control**,
+because without it B and C cannot be interpreted: "both pass" is consistent both with an interaction
+effect and with the failure having stopped happening altogether.
+
+It had stopped happening.
+
+| Cell | Clips | Ceiling before | 2026-09-08 | 2026-09-26 on `52d03d8` |
+|---|---|---|---|---|
+| A | 1 | idle | ended, 2.5 s | — |
+| B | 1 | **paused** | not run | ✅ **ended, 3.14 s** |
+| C | 2 | **idle** | not run | ✅ **ended, 11.35 s** |
+| D | 2 | paused | ❌ **52.7 s, never observed ending** | ✅ **ended, 9.50 s** |
+
+Cell D is the same configuration, the same two clips, the same paused start, and the same code path
+as the failure this document was written about. **52.7 s became 9.50 s.**
+
+### Per-cell detail
+
+**Cell B** (`say_text`, paused start, req `07887514`) — `finish-poll exit after 1.0s: state=idle`.
+Volume 0.2 → 0.7 → 0.2. One transient blank `media_content_id` at t=1.1 s, the §4d behaviour, then a
+clean `idle`.
+
+**Cell C** (`announce`, idle start, req `4cf93767`) — chime `27e20264` exit after 6.5 s `state=idle`
+(`builtin://track/`, `media_duration: 4`); message `52c446f9` exit after 2.0 s `state=idle`
+(`builtin://radio/`, `media_duration: None`). Mic leased, confirmed after 2 polls, restored.
+Volume 0.2 → 0.8 → 0.2.
+
+**Cell D** (`announce`, paused start, req `32b34d76`) — chime `42f3ebce` exit after 5.0 s, message
+`2400ff86` exit after 2.0 s, both `state=idle`. **Microphone muted for 8.4 s, not ~53 s.**
+Volume 0.2 → 0.8 → 0.2. Dead-man armed at 184 s and did not fire.
+
+In all three turns: `ok=True`, `superseded=False`, `replayed=False`, `volume_restore='restored'`,
+microphone back to `off`, no tracebacks, and the captured music restored afterwards.
+
+### The 6a warning fired zero times
+
+`finish-poll gave up after ...` appears **0 times** across all three turns. The budget-exit logging
+deployed in PR #49 is present in the running file and stayed quiet, which is the correct behaviour
+when no poll exhausts its budget — and is the positive control showing that a silent budget exit
+would now be visible.
+
+### This is NOT a fix, and the new build is not the reason
+
+**The observability changes cannot explain cell D passing.** `clip` at `interaction.py:1251` feeds
+only `LOG` calls at 1265, 1290 and 1430 plus `_warn_if_double_speak`, which warns and returns; 6a is
+a `LOG.warning`. Both changes are observability-only exactly as §6 specified. Nothing in PR #49
+touches completion detection, timing, or any success path.
+
+So the honest status of the requirement-7 failure recorded in this document is:
+
+> **Intermittent. Not reproducible on 2026-09-26. Cause unknown. Not fixed.**
+
+Nobody should read the green matrix above as a resolution. What changed between 2026-09-08 and
+2026-09-26 is uncharacterised. The resolver process had been running since 2026-09-09 16:27 and was
+restarted 2026-09-26 11:31:45; the host has 12 weeks' uptime; HAOS and the Music Assistant add-on may
+have moved in the intervening 17 days. **Nothing measured distinguishes these**, and per the stop/go
+criteria in the design decision — "both B and C pass … stop and return to design, proposing nothing"
+— no remedy is proposed here.
+
+### What the matrix cost and what it bought
+
+The matrix was built to discriminate between two factors. It cannot, because there is no failure left
+to attribute. This is a **fifth outcome**, absent from the design's four-row table.
+
+That is not a wasted measurement. Three things are now true that were not before:
+
+1. **Two hypotheses are falsified by measurement** — the `media_type` wrapper story (2026-09-09) and
+   the clip-sequence story (cell C). Neither will be re-proposed from memory.
+2. **The recovery paths are verified live on the current build** — microphone lease, confirm and
+   restore; volume capture and restore; dead-man arming. Three turns, three clean recoveries.
+3. **A recurrence will leave evidence.** The silence that made 2026-09-08 expensive to investigate is
+   gone: a budget exit now logs its elapsed time, its budget and its `reason=`.
+
+### Consequence for the gates
+
+**G4a and G4b are no longer blocked by this defect**, because the defect does not currently reproduce
+and its worst case is bounded and instrumented. They were blocked on understanding a failure that
+cannot presently be observed; waiting for it to recur is not a plan. The residual risk is a ~45 s
+microphone mute window that the dead-man bounds at 184 s, and that now logs a reason when it happens.
+
+If it recurs, the `finish-poll gave up` line is the first thing to read, and this document is the
+history behind it.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;

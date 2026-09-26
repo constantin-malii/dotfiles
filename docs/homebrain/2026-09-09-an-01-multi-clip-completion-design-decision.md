@@ -195,6 +195,45 @@ no fallback to a character-count estimate. Those all wait on the matrix.
 
 **G4a and G4b remain blocked** until an announcement's mute window tracks its speech.
 
+## 8. OUTCOME — the matrix is complete, and it selected no row. Appended 2026-09-26
+
+Cells B and C were run on 2026-09-26 against `52d03d8`, in the order this document specifies. Both
+**passed**. Cell D was then re-run as a **same-build control**, because "both B and C pass" is
+ambiguous between the interaction-effect row of §3 and the failure simply no longer occurring — and
+§5's own rule that "every future claim of improvement needs a same-build control" applies just as
+much to a claim that a failure still exists.
+
+**Cell D passed too: 52.7 s on 2026-09-08 became 9.50 s.**
+
+| Cell | Clips | Before | Result |
+|---|---|---|---|
+| A | 1 | idle | ended, 2.5 s (2026-09-08) |
+| B | 1 | paused | ✅ ended, 3.14 s |
+| C | 2 | idle | ✅ ended, 11.35 s |
+| D | 2 | paused | ✅ ended, 9.50 s — **the 2026-09-08 failure did not reproduce** |
+
+**§3's outcome table does not cover this.** It has four rows, all of which presuppose that the defect
+still occurs. The matrix was designed to attribute a failure between two factors and cannot, because
+there is no failure left to attribute.
+
+Per §5, **no remedy is proposed**. §4's candidate mechanisms — `enqueue` (4a), queue-versus-item
+finished (4b), the paused start (4c) — are neither confirmed nor eliminated; they are simply untested
+against a live failure, and must not be carried forward as if the matrix had supported any of them.
+Cell C's clean two-clip run does remove the direct evidence for the sequence hypothesis that §3 named
+as the predicted outcome.
+
+The full measurement, the per-cell detail, and the reasoning for why PR #49's observability changes
+**cannot** explain the result are recorded in
+`2026-09-08-an-01-post-g3-clip-completion-correction.md` under "The matrix is complete and the defect
+DID NOT REPRODUCE".
+
+**The requirement-7 failure is intermittent, not reproducible as of 2026-09-26, cause unknown, and
+not fixed.**
+
+**G4a and G4b are unblocked** — not because the defect is understood, but because it cannot presently
+be observed, its worst case is bounded by the 184 s dead-man, and §6a now makes a recurrence legible.
+Waiting for an unreproducible failure to recur is not a plan.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It is a decision record; no code or
