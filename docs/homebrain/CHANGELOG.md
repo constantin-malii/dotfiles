@@ -3,6 +3,92 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-26 — AN-01 G4a: the dedicated announcement REST command is LIVE
+
+> `rest_command.resolver_command_announce` exists, is reloaded, and has made one verified round trip.
+> **Nothing calls it yet** — it is an unused definition until G4b's sentence triggers land, which is
+> also what makes its blast radius zero. Rollback: `/config/configuration.yaml.bak-20260926`.
+
+### D13b is now a fact, not an inference
+
+Checkpoint A passed D13b by inference from nine working callers. The live template was read for this
+task, as Task 25 step 3a requires:
+
+```yaml
+payload: >-
+  {"intent": "{{ intent }}", "params": {{ params | default({}) | tojson }}}
+```
+
+Proper JSON serialisation — the **go** row of step 3a's classification table. Had it been raw
+`{{ params }}` interpolation, the body would have been a Python `dict` repr with single quotes and
+the failure would have surfaced at G4b as an announcement that silently does nothing.
+
+Two further facts from the same read:
+
+- **`resolver_command`'s own `timeout: 30`** makes D13's dedicated shape **required**, not merely
+  preferred. An announcement runs 10–60 s; the shared command would truncate it.
+- **`content_type` is a top-level key in the live block, not a header** — unlike the skeleton in the
+  implementation plan. The plan says to copy the live block verbatim, which is what was done; the
+  skeleton is wrong and Task 27 should correct it.
+
+### What was added
+
+```yaml
+  resolver_command_announce:
+    url: "http://192.168.122.1:8770/command"
+    method: POST
+    content_type: "application/json"
+    timeout: 200
+    headers:
+      X-Resolver-Key: !secret resolver_http_secret
+    payload: >-
+      {"intent": "{{ intent }}", "params": {{ params | default({}) | tojson }}}
+```
+
+Reloaded via **Developer Tools → YAML → Reload REST commands**; no HA restart was needed.
+
+### Step 6 — no existing caller moved
+
+`script.play_radio`, `script.play_music`, `script.find_stations`, `script.news` and
+`script.media_status` all still reference `rest_command.resolver_command` with its original 30 s
+timeout. **0 scripts** reference the new command, which is correct until G4b.
+
+### Step 5 — one round trip through HA's template, 12.66 s
+
+Called as `rest_command.resolver_command_announce` through the HA API, so the payload template itself
+was exercised, not just the resolver's endpoint. `status: 200`, `ok: true`,
+`chat_text: "Announced."`, both clips `issued` + `started`, `mic {muted, confirmed}`,
+`chime {played}`, `volume_restore: "restored"`, `superseded: false`.
+
+| | |
+|---|---|
+| Start state | **`playing`** — the configuration the spike matrix never covered |
+| Chime `cea57224` | finish-poll exit after 7.0 s, `state=idle` |
+| Message `b9909fe8` | finish-poll exit after 2.0 s, `state=idle` |
+| Microphone | leased, confirmed after 2 polls, **restored to `off`** — held 11.5 s |
+| Volume | 0.36 → 0.8 → **0.36** |
+| Music | **`replayed: true`** — the resolver resumed `library://radio/4` itself; the harness's safety-net restore was not needed |
+| 6a budget-exit warnings | **0** |
+
+The playing start is the case that produced the blank-cid grace exit on 2026-09-08. Here it took the
+pause-and-replay path cleanly, and a transient blank `media_content_id` appeared at t=11.6 s during
+the handover back to the radio without affecting the outcome.
+
+### Discovered, and it needs a decision at G4b
+
+**`script.ceiling_announce` already exists and bypasses the resolver entirely.** It calls `tts.speak`
+straight at `media_player.ceiling_speakers` via Piper — no microphone mute, no chime, no volume duck
+or restore, no turn lock, no dead-man. It is the pre-AN-01 way of doing what AN-01 now does safely,
+and the implementation plan does not mention it.
+
+Per the managed exposure baseline it is **not exposed to any assistant**, so it is reachable from a
+dashboard or a manual service call but not from a spoken sentence. That baseline is a stored snapshot;
+re-confirm with an exporter run before G4b.
+
+**G4b must decide:** repoint it at the new command, delete it, or keep it and document why two
+announcement paths exist. Leaving an unsafe duplicate beside the safe one is how the wrong one gets
+called later.
+
 ## 2026-09-26 — AN-01 observability redeploy is LIVE, and the spike matrix completed: the 2026-09-08 completion-detection failure DID NOT REPRODUCE
 
 > **The defect is not fixed — it is not currently observable.** All four matrix cells ended cleanly,
