@@ -675,6 +675,107 @@ resolver-side work recorded above — honest reporting, the microphone handover,
 handling — makes an announcement any more likely to be heard. That work makes failures legible and
 safe. **It does not fix this.**
 
+## ⛔ THE "ROOT CAUSE" ABOVE IS WRONG. The MA log says otherwise. 2026-09-27, later
+
+The section above was written from upstream source-reading alone, before Music Assistant's own log
+had been read. **The log falsifies its mechanism.** It is left in place rather than deleted, because
+the reasoning is a useful record of how a plausible story survived until it met evidence — but
+**do not act on it**.
+
+### How the log was obtained, since the previous section said it could not be
+
+It said the MA add-on log was unreachable. That was wrong, and only half-checked: MA's own
+websocket API accepts a **`logging/get`** command, and the resolver already holds `.ma_token` and a
+working client (`maconn.py`). An HTTP probe returned 404 for `/logs` and friends, and `logging/get`
+initially answered *"Authentication required"* — which I first read as "unavailable" instead of
+"authenticate first". 3755 lines, spanning 2026-07-17 to 2026-09-27, one websocket call away the
+whole time.
+
+### What the log actually shows at the failure
+
+```
+16:01:50.897 INFO  [streams.audio]   Start Queue Flow stream for Queue Ceiling Speakers
+16:01:50.988 WARN  [player_queues]   Skipping unplayable item -x6odQg9FAYNmkJ6x-4KTw
+                                     (builtin://radio/.../api/tts_proxy/-x6odQg9FAYNmkJ6x-4KTw.flac)
+                                     ... x20 within 85 ms ...
+16:01:51.073 INFO  [streams.audio]   Finished Queue Flow stream for Queue Ceiling Speakers
+```
+
+MA decided the item was **unplayable and skipped it, 91 ms after the stream started**. It never
+tried to play anything. The resolver then polled a player that was never going to produce audio,
+for the full 45 s budget.
+
+### The actual discriminator is the FILE EXTENSION, and the URL 404s
+
+Every `.flac` TTS URL in the log fails, and ffmpeg says why:
+
+```
+[http @ ...] HTTP error 404 Not Found
+[in#0 @ ...] Error opening input: Server returned 404 Not Found
+Error opening input file http://192.168.122.10:8123/api/tts_proxy/<id>.flac.
+ERROR [player_queues] Failed to stream audio
+```
+
+Census of every `tts_proxy` URL MA has logged since July:
+
+| extension | clips | failed |
+|---|---|---|
+| `.mp3` | 28 | **0** |
+| `.flac` | 4 | **4** — three with a 404, one "unplayable" |
+
+**The audio is not fetchable.** It is not a classification problem, not a duration problem, and not
+a stall.
+
+### What this falsifies in the section above
+
+1. **"MA classifies a still-generating stream as radio, and radio never ends."** The radio wrapping
+   is **normal and happens on the runs that WORK**. Both passing control legs at 16:20 logged
+   `Live media item ... (radio) encountered in flow stream - breaking out to single item stream`
+   and then played. `builtin://radio/` is not the discriminator; it is the background.
+2. **The ffprobe story has no support in the log at all.** Zero occurrences of `ffprobe`, zero of
+   `InvalidDataError`. The only two `Unable to retrieve info for` lines are the **chime** on
+   2026-09-05 and 2026-09-07, both `401 Unauthorized`, both unrelated.
+3. **"2026-09-08 audible and 2026-09-27 silent are the same fault."** Almost certainly **not**. A
+   404 produces no audio at all, which is 2026-09-27. The 2026-09-08 announcement was **heard in
+   full** — its URL resolved and its audio played. Those are two different faults, and unifying
+   them was the same over-reach as the mechanism itself. The "fourth distinct behaviour" recorded
+   earlier was right; retracting it was wrong.
+
+### What is established
+
+- The failing clip's URL ended `.flac`; MA skipped it as unplayable within 91 ms; no audio.
+- All four `.flac` TTS URLs in ten weeks of log failed; all 28 `.mp3` ones did not.
+- Three of the four failed with an explicit **HTTP 404** from ffmpeg.
+- `tts_get_url` returns `.mp3` **right now**, three probes out of three.
+- MA server 2.9.3, HA core 2026.6.4.
+
+### What is NOT established — and this is the open question
+
+**Why HA returned a `.flac` URL for that turn, and an `.mp3` for every probe since.** The resolver
+calls `ha.tts_get_url(engine_id, message)` and does not request a format, so the extension is HA's
+choice. Nothing in hand explains the variation. Candidates, none tested:
+
+- HA negotiating a format per call, or per target player's declared capabilities.
+- A `.flac` URL generated for a format HA's proxy then declines to serve, which would make the 404
+  a *consequence* of the extension rather than a coincidence.
+- URL expiry (`home-assistant/core#159537` records `tts_proxy` 404s after idle) — though the 16:01
+  URL 404'd within a second of being minted, which argues against expiry.
+
+Note the three older `.flac` 404s sit beside lines reading
+`Playback announcement to player Ceiling Speakers (with pre-announce: True): ....mp3` — **MA's own
+announcement path**, i.e. `tts.speak`. So the `.flac` URLs are not unique to the resolver's path,
+which weakens the case for the `tts.speak` migration being an automatic escape from this.
+
+### The next measurement, and it is cheap
+
+Capture the **full** URL the resolver receives from `tts_get_url` on every announce — the resolver
+log truncates the cid at 80 characters, which is exactly why the `.flac` extension went unnoticed
+for a day. Then a failure is self-diagnosing: extension in hand, and a `curl -I` against the URL
+says 404 or 200 immediately.
+
+Until that is in place, the honest statement is: **an announcement fails when its TTS URL is not
+fetchable, the extension is the only known correlate, and why the extension varies is unknown.**
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
