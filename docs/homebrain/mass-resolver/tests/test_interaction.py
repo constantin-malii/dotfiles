@@ -6325,5 +6325,92 @@ class UnreadableReadsAreNotVerdictsTest(unittest.TestCase):
         self.assertIsNone(res["gave_up"])
 
 
+class ResolvedTtsUrlIsLoggedTest(unittest.TestCase):
+    """The resolved TTS URL must reach the log whole, extension included.
+
+    On 2026-09-27 an announcement produced no audio because its `tts_proxy` URL ended `.flac` and
+    returned HTTP 404 -- Music Assistant skipped it as unplayable 91 ms in. The resolver's own log
+    could not have shown that: it recorded `engine=` and `chars=` at resolve time, and the
+    finish-poll truncates the `media_content_id` at 80 characters, which lands just short of the
+    extension. The fault was diagnosable only by reading MA's log a day later.
+
+    Logging the resolved URL makes a failure self-diagnosing: the extension is right there, and a
+    `curl -I` against it answers 404 or 200 immediately.
+
+    It must be REDACTED and NOT truncated. A signed media URL is a bearer credential, and
+    `resolver.log` is world-readable on the host and quoted freely in CHANGELOG.md -- but a
+    truncation that cuts the extension off is exactly what hid this, so brevity is not an option
+    here. Redaction is what makes emitting the whole thing safe.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    FLAC = "http://192.168.122.10:8123/api/tts_proxy/-x6odQg9FAYNmkJ6x-4KTw.flac"
+    SIGNED = ("http://192.168.122.10:8123/api/tts_proxy/abc.mp3?authSig=" + FAKE_SIG
+              + "&token=" + FAKE_SIG)
+
+    def _cap(self):
+        clock = MovingClock()
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                 sleeper=AdvancingSleeper(clock))
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        return ctx
+
+    def _ha(self, tts_url):
+        ha = FakeHA(idle_state())
+        ha.tts_url = tts_url
+        ha.media_url = None                       # no chime: the message is the only clip
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2"),
+                       playing_with_id(0.80, "builtin://radio/" + tts_url),
+                       idle_state(), idle_state()])
+        return ha
+
+    def _lines(self, cm):
+        return [r for r in cm.output]
+
+    def test_say_text_logs_the_resolved_url_with_its_extension(self):
+        ha = FakeHA(idle_state())
+        ha.tts_url = self.FLAC
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(self._cap(), self._ctx(ha), {"mode": "say_text", "text": "dinner is ready"})
+        joined = "\n".join(self._lines(cm))
+        self.assertIn(self.FLAC, joined,
+                      "the resolved TTS url never reached the log, so a bad extension is invisible")
+        self.assertIn(".flac", joined)
+
+    def test_announce_logs_the_resolved_url_with_its_extension(self):
+        ha = self._ha(self.FLAC)
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        joined = "\n".join(self._lines(cm))
+        self.assertIn(self.FLAC, joined)
+
+    def test_the_logged_url_is_redacted(self):
+        ha = FakeHA(idle_state())
+        ha.tts_url = self.SIGNED
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(self._cap(), self._ctx(ha), {"mode": "say_text", "text": "hello"})
+        joined = "\n".join(self._lines(cm))
+        self.assertNotIn(FAKE_SIG, joined, "a bearer credential reached the log")
+        self.assertIn("REDACTED", joined)
+        self.assertIn(".mp3", joined, "redaction must not cost us the extension")
+
+    def test_the_logged_url_is_not_truncated_before_the_extension(self):
+        # The specific failure mode: 80-char truncation lands just short of ".flac".
+        long_url = ("http://192.168.122.10:8123/api/tts_proxy/"
+                    + "x" * 60 + ".flac")
+        ha = FakeHA(idle_state())
+        ha.tts_url = long_url
+        with self.assertLogs("resolver", level="INFO") as cm:
+            run(self._cap(), self._ctx(ha), {"mode": "say_text", "text": "hello"})
+        joined = "\n".join(self._lines(cm))
+        self.assertIn(long_url, joined)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
