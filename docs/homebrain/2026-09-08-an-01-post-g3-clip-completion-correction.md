@@ -494,6 +494,53 @@ were untouched, and `automation.voice_ceiling_speakers` remains byte-identical t
 
 **G4b is halted at step 4.** Steps 5-8 assume a working announcement and would measure nothing.
 
+### Control experiment — the invocation path is EXONERATED. 2026-09-27 16:20
+
+The section above named the invocation path as the one untested difference between the runs that
+passed and the run that failed. It was tested 19 minutes after the failure, both legs back to back,
+same build, same idle ceiling, same 18-character message.
+
+| Leg | Path | Result |
+|---|---|---|
+| A | `rest_command.resolver_command_announce` called directly | **passed, 10.49 s** — chime 6.5 s, message 2.0 s, both `state=idle` |
+| B | `conversation.process` → the **conversation trigger** on `automation.voice_ceiling_announce` | **passed, 9.50 s** — chime 6.0 s, message 1.5 s, both `state=idle` |
+
+Leg B exercised the same automation, the same trigger and the same relay that failed at 16:01. The
+assistant returned `'Announced.'` with `response_type: action_done`. No 6a warning in either leg,
+microphone and volume restored in both, no tracebacks.
+
+**So the conversation trigger is not the cause.** The hypothesis the previous section offered as its
+only untested candidate is dead.
+
+### The tally, which is the real finding
+
+On this build (`52d03d8`), 2026-09-27:
+
+| Announcement | Origin | Result |
+|---|---|---|
+| Matrix cells B, C, D | direct | passed |
+| G4a step 5 | direct `rest_command` | passed |
+| **G4b step 4** | **phone, via STT** | **FAILED — 52 s, silent** |
+| Control leg A | direct `rest_command` | passed |
+| Control leg B | conversation trigger, typed text | passed |
+
+**Seven announcements, one failure.** The failure was the only one that originated from the phone
+through speech-to-text. That is a correlation of one, on a sample of one, and it is **not** offered as
+a hypothesis — it is recorded so the next person does not re-test the paths already exonerated here.
+
+What remains untested: whether a phone/STT-originated announcement fails at a rate different from a
+programmatic one. Settling that needs several real phone announcements, which needs the operator; it
+cannot be simulated, because `conversation.process` is precisely the simulation that just passed.
+
+**The defect is intermittent at roughly 1 in 7 today, cause still unknown, and still not fixed.** The
+"fourth behaviour" recorded above — no audio at all, player stuck at `position=0` — has been observed
+exactly once.
+
+A minor observation for whoever writes the next harness: the microphone state read immediately after
+a turn returns can still show `on` for about a second before HA settles, while the resolver has
+already logged `mic restored`. Both legs showed this and both were `off` on the later check. Poll it
+twice before calling it a recovery failure.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
