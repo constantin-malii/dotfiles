@@ -947,8 +947,14 @@ class InteractionCapability(capability.Capability):
             return cr.err(self.name, rid, "upstream_error", "no clip uri",
                           "I couldn't say that.", spoken_text=None,
                           metadata={"said": False, "zone": resolved.get("zone")})
-        LOG.info("SAY_TEXT req=%s zone=%s engine=%s chars=%d", rid, resolved.get("zone"),
-                 engine, len(text))
+        # The URL goes in WHOLE, redacted but NOT truncated. On 2026-09-27 an announcement made no
+        # sound because this URL ended `.flac` and returned 404 -- MA skipped it as unplayable 91ms
+        # in -- and the resolver's log could not show it: resolve time recorded only engine/chars,
+        # and the finish poll truncates the cid at 80 characters, landing just short of the
+        # extension. Redaction is what makes emitting the whole thing safe; brevity is what hid the
+        # fault, so it is not a trade worth making here.
+        LOG.info("SAY_TEXT req=%s zone=%s engine=%s chars=%d url=%s", rid, resolved.get("zone"),
+                 engine, len(text), self._redact_uri(uri))
         resolved["uri"] = uri
         # A pushed sentence (timer chime, alert) is NOT confirmed by unrelated playback starting in
         # the same turn, so it must not inherit _say's media-confirmation skip -- that would drop it
@@ -1002,6 +1008,9 @@ class InteractionCapability(capability.Capability):
             return cr.err(self.name, rid, "upstream_error", "no clip uri",
                           "I couldn't say that.", spoken_text=None,
                           metadata={"announced": False, "zone": zone})
+        # Whole and redacted -- see the matching line in _say_text for why the extension matters.
+        LOG.info("ANNOUNCE req=%s zone=%s engine=%s chars=%d url=%s",
+                 rid, zone, engine, len(rendered), self._redact_uri(tts_uri))
 
         # D. Chime. A failure DEGRADES: an announcement without its chime is still an
         #    announcement. Resolved every turn and never cached -- the signature expires, and a
