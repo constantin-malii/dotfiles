@@ -9,6 +9,9 @@ LOG = logging.getLogger("resolver")
 _MODES = ("duck", "restore", "say", "say_text", "resume", "pause", "volume_up", "volume_down",
           "set_volume", "announce")
 
+# Consecutive unreadable zone states before a finish poll stops guessing (F1, 2026-09-27).
+UNREADABLE_LIMIT = 3
+
 
 class InteractionCapability(capability.Capability):
     name = "interaction"
@@ -19,6 +22,17 @@ class InteractionCapability(capability.Capability):
         self._sleeper = sleeper or time.sleep
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
+        self._mic_lock = threading.Lock()            # serialises the microphone HANDOVER: claim's
+                                                     #   mute+publish against release's
+                                                     #   validate+unmute. _lock protected the dict
+                                                     #   entry but not the WRITE, so an older turn
+                                                     #   could unmute a microphone a newer
+                                                     #   announcement had just muted -- broadcasting
+                                                     #   through a live satellite mic, the one
+                                                     #   failure requirement 7 exists to prevent.
+                                                     #   LOCK ORDER: _mic_lock BEFORE _lock, never
+                                                     #   the reverse. Nothing holds _lock across a
+                                                     #   _mic_* call, which is what makes that safe.
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
         self._turns = {}                              # zone -> {"ts": float, "playback": uri|None,
                                                       #          "stopped": bool}
@@ -635,7 +649,14 @@ class InteractionCapability(capability.Capability):
         Muting is requirement 7's fail-safe: an unmuted satellite hears the announcement come out of
         the ceiling and wakes on it. announce_require_mic_mute means what it says -- with it set, a
         microphone we cannot mute is a refusal, not a warning.
+
+        Held under _mic_lock for the whole claim, so a concurrent release cannot land its unmute
+        between this mute and the lease that says the microphone is ours.
         """
+        with self._mic_lock:
+            return self._mic_claim_locked(ctx, zone, my_gen, rid, clips)
+
+    def _mic_claim_locked(self, ctx, zone, my_gen, rid, clips=2):
         entity = self._mic_entity(ctx)
         require = bool(getattr(ctx.settings, "announce_require_mic_mute", True))
         if not entity:
@@ -740,7 +761,15 @@ class InteractionCapability(capability.Capability):
         IMMEDIATELY -- which is exactly what is wanted: the superseding turn is a person talking to
         the satellite, and they need the microphone back now (design 9.4/9.6). Only a newer
         ANNOUNCEMENT takes the lease, and then it owns the restore.
+
+        Held under _mic_lock for the whole release. Validating the lease and then unmuting without
+        it left a full REST round trip in which a newer announcement could claim and mute, only to
+        be unmuted by this turn.
         """
+        with self._mic_lock:
+            return self._mic_release_locked(ctx, zone, my_gen, rid)
+
+    def _mic_release_locked(self, ctx, zone, my_gen, rid):
         entity = self._mic_entity(ctx)
         with self._lock:
             lease = self._mic.get(zone)
@@ -1040,8 +1069,15 @@ class InteractionCapability(capability.Capability):
             seq["finish_timeouts"] = finish_timeouts
             seq["volume_override"] = float(getattr(ctx.settings, "announce_volume", 0.80))
             seq["gen"] = my_gen
+            # The play_media call is spent INSIDE this window, and this file notes a few hundred
+            # lines down that "MA's play_media regularly outruns the 5s REST default". Omitting it
+            # made the deadline 70s for work that can need 100s, so the message clip could exit via
+            # `turn_deadline` WHILE AUDIBLY PLAYING -- reported as a failure for an announcement the
+            # room heard. marker_budget already includes the call cost per clip; these now agree.
+            # Widening a bound only: no clip that completes today can start failing because of it.
             seq["deadline_from_now"] = sum(finish_timeouts) + (
-                len(uris) * int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0)
+                len(uris) * int(getattr(ctx.settings, "say_start_timeout_ms", 5000)) / 1000.0) + (
+                len(uris) * int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
             # A pushed sentence is NOT confirmed by unrelated playback starting in the same turn,
             # so it must not inherit _say's media-confirmation skip.
             seq["skip_on_fresh_playback"] = False
@@ -1069,6 +1105,14 @@ class InteractionCapability(capability.Capability):
             if not meta["announced"]:
                 return cr.err(self.name, rid, "upstream_error", "announcement did not start",
                               "I couldn't play the announcement.", spoken_text=None, metadata=meta)
+            # Three outcomes, because there are three states of knowledge. The clip started, so we
+            # cannot claim it was silent -- but its end was never observed, so we cannot claim it
+            # finished either. Saying so is the whole point of this increment: the operator is
+            # broadcasting to a room they may not be in, and "Announced." is the one answer they
+            # cannot check. An unqualified success here would be a guess wearing a fact's clothes.
+            if not meta.get("end_observed"):
+                return cr.ok(self.name, rid, "Announced, but I couldn't confirm it finished.",
+                             spoken_text=None, metadata=meta)
             return cr.ok(self.name, rid, "Announced.", spoken_text=None, metadata=meta)
         finally:
             # Every exit path, including an exception: a stuck-muted microphone is a deaf satellite,
@@ -1093,10 +1137,15 @@ class InteractionCapability(capability.Capability):
         clip's own timeout -- so a generous turn budget never lets one clip overrun its allowance,
         and a clock that stalls or steps backwards cannot leave the poll unbounded.
 
-        Returns {"started", "issued", "clip"}. Propagates whatever play_media raises -- the caller's
-        finally is the recovery path, and it owns the volume restore, so it has to see the failure.
+        Returns {"started", "issued", "clip", "ended", "gave_up"}. `ended` is True only when the
+        clip's end was actually OBSERVED; `gave_up` names why the wait stopped otherwise. Both
+        matter because the caller cannot otherwise tell a finished clip from an abandoned one --
+        which is exactly how an announcement nobody heard reported "Announced." on 2026-09-27.
+
+        Propagates whatever play_media raises -- the caller's finally is the recovery path, and it
+        owns the volume restore, so it has to see the failure.
         """
-        out = {"started": False, "issued": False, "clip": clip}
+        out = {"started": False, "issued": False, "clip": clip, "ended": False, "gave_up": None}
         deadline = opts.get("deadline")
         poll_secs = opts["poll_secs"]
         floor = opts["floor"]
@@ -1123,6 +1172,8 @@ class InteractionCapability(capability.Capability):
         start_timeout = opts["start_timeout"]
         start_deadline = self._clock() + start_timeout
         elapsed = 0.0
+        start_unreadable = 0
+        started_unreadable = False
         while True:
             if superseded():
                 return out
@@ -1147,7 +1198,20 @@ class InteractionCapability(capability.Capability):
                 state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
             except Exception as e:
                 LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
-                state = {}
+                # Same rule as the finish poll: a read that did not happen is not an observation.
+                # `{}` never matches, so a run of failures used to exhaust the start budget and
+                # report `never_started` -- which the announce path states as "the room certainly
+                # heard nothing" and turns into a flat denial. play_media was already accepted, so
+                # the clip may be audible; claiming otherwise is a guess, and acting on it replays
+                # the source straight over live speech.
+                start_unreadable += 1
+                if start_unreadable >= UNREADABLE_LIMIT:
+                    started_unreadable = True
+                    break
+                self._sleeper(poll_secs)
+                elapsed += poll_secs
+                continue
+            start_unreadable = 0
             attrs = state.get("attributes") or {}
             # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
             # "builtin://radio/<url>". Match by containment, not equality.
@@ -1158,7 +1222,17 @@ class InteractionCapability(capability.Capability):
             elapsed += poll_secs
 
         if not out["started"]:
-            LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)", rid, zone, clip)
+            # Two different facts. "never_started" means we WATCHED the zone and it never began
+            # playing -- the room heard nothing. "unreadable" means we could not see the zone at
+            # all, which says nothing about what came out of the speakers.
+            if started_unreadable:
+                LOG.warning("SAY req=%s zone=%s clip=%s start-poll could not read the zone; "
+                            "whether it is playing is UNKNOWN", rid, zone, clip)
+                out["gave_up"] = "unreadable"
+            else:
+                LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)",
+                            rid, zone, clip)
+                out["gave_up"] = "never_started"
             return out
 
         # Wait for finish: poll until the clip stops playing (or the caller is superseded).
@@ -1168,6 +1242,18 @@ class InteractionCapability(capability.Capability):
         elapsed = 0.0
         ended_seen = 0
         blank_for = 0.0
+        # Consecutive failed reads before the poll admits it cannot tell. One bad read is a blip on
+        # a busy HA; a run of them means we have no view of the zone at all.
+        unreadable = 0
+        # NO EARLY EXIT ON A STALLED POSITION. A clip the player accepts but never plays --
+        # `playing`, cid matching, media_position pinned, no sound -- is real and cost 52s of muted
+        # microphone on 2026-09-27. Detecting it from media_position/media_position_updated_at was
+        # implemented and then REMOVED, because measuring a HEALTHY stream falsified the premise:
+        # an audibly playing radio stream reported pos=1799 and a frozen media_position_updated_at
+        # unchanged across a 20s sample. MA throttles elapsed_time reporting, so "position has not
+        # moved" does not distinguish a stalled clip from a playing one, and the detector would
+        # have cut off audible speech. Do not reintroduce this without a signal that a healthy
+        # player demonstrably moves.
         # Why the clip's wait ended. None once the end was actually OBSERVED; a string means we gave
         # up without seeing it. Three exits used to be silent, which is why the G3 failure showed up
         # as a 45s hole between two ordinary lines and was diagnosable only by subtracting
@@ -1192,7 +1278,23 @@ class InteractionCapability(capability.Capability):
                 state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
             except Exception as e:
                 LOG.warning("SAY req=%s zone=%s finish-poll read failed (%r)", rid, zone, e)
-                state = {}
+                # A read that did not happen is NOT an observation. `state = {}` used to make
+                # state.get("state") != "playing" true, so two consecutive timeouts reached
+                # ended_seen >= 2 and the turn reported an observed ending -- "Announced." built
+                # out of two failed reads, in exactly the conditions where announcements fail.
+                # Past a bound, say we could not tell rather than inventing an answer.
+                unreadable += 1
+                if unreadable >= UNREADABLE_LIMIT:
+                    gave_up = "unreadable"
+                    break
+                # A poll that observed nothing must not COUNT towards the two consecutive
+                # observations the ending rule requires, or `flicker -> failed read -> flicker`
+                # satisfies a rule whose whole point is that flickers must be consecutive.
+                ended_seen = 0
+                self._sleeper(poll_secs)
+                elapsed += poll_secs
+                continue
+            unreadable = 0
             attrs = state.get("attributes") or {}
             cid = attrs.get("media_content_id") or ""
             # MA transiently reports an EMPTY media_content_id while the clip is still playing.
@@ -1236,6 +1338,8 @@ class InteractionCapability(capability.Capability):
             LOG.warning("SAY req=%s zone=%s clip=%s finish-poll gave up after %.1fs without "
                         "observing the clip end (budget %.1fs, reason=%s)",
                         rid, zone, clip, elapsed, finish_timeout, gave_up)
+        out["gave_up"] = gave_up
+        out["ended"] = gave_up is None
         return out
 
     def _say(self, ctx, resolved, rid):
@@ -1508,14 +1612,33 @@ class InteractionCapability(capability.Capability):
                 res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
                                                opts, superseded)
                 clip_results.append({"clip": one_clip, "started": res["started"],
-                                     "issued": res["issued"]})
+                                     "issued": res["issued"], "ended": res["ended"],
+                                     "gave_up": res["gave_up"]})
                 if superseded():
                     return superseded_result()
             # reply_started tracks the LAST clip -- the message. Design 8.3 makes that asymmetry
             # explicit: a chime that never starts is a degraded announcement, not a silent one, and
             # reporting the whole turn as silent would send the operator looking for the wrong fault.
             reply_started = bool(clip_results) and clip_results[-1]["started"]
-            likely_silent = not reply_started
+            # STARTING is not the same as being HEARD. `likely_silent` used to mean only "the
+            # player never reached the playing state", so a clip that started and then produced
+            # silence satisfied it -- and `_announce`'s correct failure mapping was handed a False.
+            # A message whose end was never observed is not a message the room heard.
+            # Two DIFFERENT facts, deliberately not merged. `likely_silent` means what its name
+            # says and nothing more: the player never reached the playing state, so the room
+            # certainly heard nothing. `end_observed` says whether we ever saw the clip finish.
+            #
+            # Merging them was wrong. The 2026-09-08 announcement was HEARD IN FULL and still
+            # exited on its budget, because a builtin://radio/-wrapped TTS clip reports no duration
+            # and never reaches idle. Treating that as silence tells the operator an announcement
+            # they heard did not play -- the same dishonesty as a false success, pointed the other
+            # way. An unobserved end is an absence of evidence, not a verdict.
+            end_observed = bool(clip_results) and clip_results[-1]["ended"]
+            # "Certainly silent" requires having WATCHED it fail to start. A clip whose start poll
+            # could not read the zone establishes neither that it played nor that it did not, and
+            # play_media was already accepted -- so it falls to the middle outcome, not to a denial.
+            reply_gave_up = clip_results[-1]["gave_up"] if clip_results else "never_started"
+            likely_silent = (not reply_started) and reply_gave_up != "unreadable"
 
             if superseded():
                 return superseded_result()
@@ -1577,6 +1700,7 @@ class InteractionCapability(capability.Capability):
                      rid, zone, clip, reply_started, likely_silent, replayed)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
+                                    "end_observed": end_observed,
                                     "replayed": replayed, "superseded": False, "zone": zone,
                                     "clips": clip_results,
                                     "volume_restore": volume_restore[0]})
