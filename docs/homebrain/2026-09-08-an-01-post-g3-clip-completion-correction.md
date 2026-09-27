@@ -541,6 +541,140 @@ a turn returns can still show `on` for about a second before HA settles, while t
 already logged `mic restored`. Both legs showed this and both were `off` on the later check. Poll it
 twice before calling it a recovery failure.
 
+## ROOT CAUSE — Music Assistant classifies a still-generating TTS stream as RADIO. 2026-09-27
+
+**This is the mechanism.** It explains every observation in this document, including the ones that
+looked contradictory: the intermittency, the 2026-09-08 clip that was audible but never ended, the
+2026-09-27 clip that produced no sound at all, and the chime that has never once failed.
+
+**Epistemic status, stated plainly because it matters here: this is an inference from VERIFIED
+upstream source, not a maintainer's diagnosis, and the exact signature is NOT filed upstream.** No
+issue in `music-assistant/server`, `music-assistant/support` or `home-assistant/core` matches it. It
+has not been confirmed against this host's own Music Assistant log, for the reason in "What is not
+verified" below. Treat it as the best available explanation, and as something that would take one
+log line to confirm or kill.
+
+### The mechanism
+
+Music Assistant's builtin provider classifies a URL by running **ffprobe against it**. There is no
+file-extension check and no Content-Type sniffing — the classification is purely what ffprobe
+reports. In `music_assistant/providers/builtin/__init__.py`, `parse_item()`:
+
+```python
+is_radio = media_info.get("icyname") or not media_info.duration
+...
+elif (is_radio or force_radio) and requested_media_type != MediaType.TRACK:
+    # treat as radio, unless a track was explicitly requested
+```
+
+and in `helpers/tags.py`, duration is `float(raw["format"].get("duration", 0)) or None` — **None
+when ffprobe cannot determine it**.
+
+Home Assistant's `tts_proxy` is a `web.StreamResponse` written chunk by chunk (`components/tts/
+__init__.py`). It carries **no Content-Length**, it is chunked, and on a cache miss **the bytes
+appear only as Piper synthesises them**.
+
+Put those together:
+
+| Case | ffprobe sees | duration | classified as | outcome |
+|---|---|---|---|---|
+| clip already cached | a complete mp3 | a real number | **track** | plays, reaches `idle`, ends |
+| clip still generating | a chunked, incomplete stream | **None** | **radio** | an ENDLESS STREAM |
+| the chime (`.wav`, local, signed) | a complete file | a real number | **track** | has never failed |
+
+A radio stream has no end by definition. `media_duration` is `None` *by design*, MA never expects a
+completion, and the player sits in `playing` holding the queue until something stops it. That is not
+a stall to be detected — it is the player doing exactly what it was told.
+
+### What this explains that nothing else did
+
+- **The ~1-in-7 rate.** It is a race between Piper's synthesis and MA's ffprobe, not a property of
+  any code path. Repeating the same text warms the cache; new text on a busy moment loses.
+- **Why the chime never fails.** A complete local file always has a duration. This document has
+  recorded that asymmetry three times without an explanation for it; here it is.
+- **Why `media_duration` was `None` on every failure.** Not a symptom — the *cause*, one step
+  upstream.
+- **Why the 2026-09-08 clip was AUDIBLE and the 2026-09-27 clip was SILENT.** Both were classified
+  as radio and so neither could ever end. Whether sound emerged depends on how much of the stream
+  survived the probe, which is a second race inside the first. The "fourth distinct behaviour"
+  recorded above is the same fault with a different amount of audio.
+- **Why the matrix cells, the control legs and G4a step 5 all passed.** Every one of them was a
+  cache hit or a fast enough synthesis. The matrix was measuring the race, not the factors it was
+  built to separate.
+- **Why `media_type: "track"` changed nothing (2026-09-09 spike).** The
+  `requested_media_type != MediaType.TRACK` escape hatch is on MA's dev branch. **This host runs
+  Music Assistant server 2.9.3** (verified on the host 2026-09-27 via `:8095/info`). The spike was
+  testing a parameter this version does not honour, so its negative result says nothing about the
+  idea — and the falsification recorded above under "Option D FAILED" should be read with that in
+  mind.
+
+### The fix is a different API, not a parameter
+
+`tts.speak` with `media_player_entity_id` pointing at the MA entity calls `media_player.play_media`
+with `ATTR_MEDIA_ANNOUNCE: True` (verified, `components/tts/entity.py`). The MA integration routes
+that to `mass.players.play_announcement(...)` — a **player-level** API that never touches the
+builtin music provider, never calls `parse_item`, never runs the ffprobe classifier and never
+creates a queue item. **The classification bug structurally cannot occur on that path.**
+
+MA handles ducking and resume itself. Before committing to it, three verified limitations:
+
+1. **Native overlay announcements exist only for Sonos S2 and Sendspin.** On Squeezelite — this
+   house — MA **stops** playback, announces, then resumes. The MA docs call this out for AirPlay and
+   Squeezelite specifically: the resume "will be noticeable".
+2. MA's docs state announcements "require accurate state and progress reporting from players for
+   reliable operation" — the same reporting measured as frozen for 20s below. Immune to the
+   *classification* bug is not immune to every stall.
+3. `music_assistant.play_announcement` takes an audio URL, not text. For Piper speech the entry
+   point is `tts.speak`.
+
+Note the irony for the G4b decision recorded elsewhere: **`script.ceiling_announce`, the pre-AN-01
+"unsafe duplicate" flagged for deletion, calls `tts.speak`** — the transport that avoids this bug.
+It lacks the microphone mute and the turn lock, but it was on the right path all along.
+
+### Adjacent upstream issues — verified, none is this bug
+
+- `music-assistant/support#6415` (open, 2.10.2) — MA fails to ffprobe a `tts_proxy` URL, logging
+  `Unable to retrieve info for <url>`. A different cause (http/https mismatch) but **the same code
+  path**. That log string is the one-line confirmation for the hypothesis above.
+- `music-assistant/support#6320` (open, regression since 2.10) — `play_media` with a plain audio URL
+  plays a random library track. Same URL-resolution area.
+- `home-assistant/core#151757` (closed, not planned) — `tts.speak` to MA: bell plays then silence,
+  reporter attributing it to a cached URL handed over while still loading. The closest upstream
+  analogue to a 1-in-7 timing race. **Reporter's diagnosis, not a maintainer's.**
+- `music-assistant/support#6359` — a Squeezelite `STMu`/`STMd` race. Different symptom; ruled out.
+
+### `media_position` cannot be used to detect this
+
+Measured on this host 2026-09-27, sampling the ceiling player every 2s for 20s **while it was
+audibly playing**: `media_position` stayed at `1799` and `media_position_updated_at` never changed,
+on every sample. Both fields are pushed from MA's `elapsed_time` / `elapsed_time_last_updated`
+(verified in `components/music_assistant/media_player.py`), not computed by HA, and MA throttles
+that reporting.
+
+A detector built on "position has not moved" was implemented and **removed** for this reason: it
+would have cut off audible speech. Do not reintroduce it without a signal a healthy player
+demonstrably moves. HA's developer docs define these attributes but say **nothing** about polling
+behaviour or streams — there is no contract to cite here, in either direction.
+
+### What is NOT verified
+
+- No maintainer has confirmed the mechanism, and the signature is **unfiled upstream**.
+- **It has not been confirmed against this host's MA log.** The decisive check is grepping the
+  Music Assistant add-on log for `Unable to retrieve info for` around a failing run. That log lives
+  inside the HAOS VM and is reachable through the Supervisor API or the MA add-on UI, neither of
+  which is reachable from the resolver host with the HA token alone. HA's own core error log was
+  empty (14 bytes) and does not carry add-on output.
+- Whether MA 2.9.3 contains the `requested_media_type` guard at all is **not determined**; the PR
+  that added it was not dated.
+
+### The next step this implies
+
+Confirm with the MA add-on log, then design the move to `tts.speak` as its own increment with its
+own live gate. It replaces the transport rather than compensating for it, which is why none of the
+resolver-side work recorded above — honest reporting, the microphone handover, the unreadable-poll
+handling — makes an announcement any more likely to be heard. That work makes failures legible and
+safe. **It does not fix this.**
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
