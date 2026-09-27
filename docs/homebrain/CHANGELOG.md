@@ -3,6 +3,88 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-27 — AN-01 G4b: the sentences are live but DISABLED — step 4 failed and the completion defect reproduced
+
+> **The announcement automation exists and is switched off.** The first phone announcement muted the
+> microphone for 52 s, produced **no audible message**, and told the phone "Announced." anyway.
+> Kill switch already applied: `automation.voice_ceiling_announce` is `off`.
+
+### What was created
+
+`automation.voice_ceiling_announce` (config id `1790544577824`), a **new, separate automation** rather
+than a 9th branch of `automation.voice_ceiling_speakers`. **Deliberate deviation from Task 26.** That
+automation is `mode: queued` and a `rest_command` call is synchronous, so an announcement placed in it
+would block all 82 existing ceiling sentences for its duration — including the "pause" and "stop"
+commands an operator would reach for if an announcement misbehaved. A separate automation gets its own
+queue and a one-toggle kill switch.
+
+- Sentences: `announce {message}`, `broadcast {message}`. `mode: queued`, `max: 2`.
+- Condition `{{ trigger.satellite_id | default(none) is none }}` — admits phone and web Assist,
+  blocks the satellite, per D12.
+- Action `rest_command.resolver_command_announce` with `response_variable: r` and
+  `continue_on_error: true`, then a `choose` with the two failure branches and the default relay.
+- Every shape copied from the live automation read at 11:13 (new-style `triggers`/`conditions`/
+  `actions`), not from the plan's skeleton.
+- Backup taken first: `.bak/automation-voice_ceiling_speakers-20260927-111309.json`, sha256
+  `b8c6cd48`, 7686 bytes, JSON validated.
+
+### Verified before any test
+
+`automation.voice_ceiling_speakers` **byte-identical** to its backup (`b8c6cd483844d6d5` both sides).
+All 82 existing sentences scanned: **0** begin with announce or broadcast, so no shadowing. Resolver
+`active`, `auth=200`, no tracebacks.
+
+### Step 4 FAILED — req `f864d0ff`, 16:01:50
+
+The operator said *"Announce dinner is ready."* from the phone. The chime played. Nothing else did.
+
+```
+16:01:56  chime 8a266f28  finish-poll exit after 5.5s: state=idle
+16:02:42  WARNING clip 414d2b19 finish-poll gave up after 45.0s without observing
+          the clip end (budget 45.0s, reason=finish_timeout)
+16:02:42  restored -> 0.3 (owns_restore=True) ; mic restored
+```
+
+**Microphone muted 52 s.** The clip sat at `state=playing, media_position=0, media_duration=None` and
+never advanced — it was still holding the zone minutes later and had to be stopped manually.
+
+**This is a fourth distinct exit behaviour**, not the 2026-09-08 failure: that one was **audible** and
+only its completion went unobserved. Per the design decision's stop criteria, no remedy is proposed.
+
+It also **falsifies yesterday's "not reproducible" conclusion**, on the first attempt through the
+phone path.
+
+### 6a proved itself in production
+
+The `finish-poll gave up after 45.0s ... reason=finish_timeout` warning is the budget-exit logging
+from PR #49. The identical failure on 2026-09-08 logged **nothing**, which is what made it expensive
+to investigate. The observability work is now demonstrably worth what it cost.
+
+### A second, independent defect: a false success
+
+The automation trace took `choice=default`, i.e. `r.content.ok` was true, so the phone displayed
+**"Announced."** Metadata carried `likely_silent: False` and both clips `issued`/`started`. The
+resolver believes a play that was *accepted* and produced *silence* succeeded. Design 5.2's
+honest-failure mapping covers refusals, not silent successes. This would survive a fix to the
+completion defect and needs its own design work.
+
+### D7, partially settled
+
+`chars=15` — `trigger.slots.message` carried `dinner is ready`, **the trailing full stop stripped**.
+That is the opposite of SPIKE-AN-3's finding for `trigger.sentence`, which preserves punctuation, so
+**the slot and the sentence normalise differently**. First-letter capitalisation remains unconfirmed.
+
+### Recovery and current state
+
+Mic back to `off`, volume restored to 0.3, dead-man armed at 184 s and not needed, no tracebacks. The
+stuck TTS clip was cleared and `library://radio/4` restored at 0.3. The other seven automations were
+untouched.
+
+**`automation.voice_ceiling_announce` is disabled.** With no caller, `mode=announce` is inert.
+**G4b is halted at step 4**; steps 5-8 assume a working announcement and would measure nothing.
+
+**This entry is the sole record** — the automation is live HA config and is not in the repo.
+
 ## 2026-09-26 — AN-01 G4a: the dedicated announcement REST command is LIVE
 
 > `rest_command.resolver_command_announce` exists, is reloaded, and has made one verified round trip.
