@@ -6201,5 +6201,129 @@ class MicLeaseHandoverRaceTest(unittest.TestCase):
         self.assertNotIn(self.ZONE, cap._mic)
 
 
+class UnreadableReadsAreNotVerdictsTest(unittest.TestCase):
+    """N1/N2: a poll that produced no observation must neither confirm nor deny.
+
+    F1 fixed the FINISH poll and left the start poll with the old `state = {}`, which never matches
+    -- so a run of failed reads exhausted the start budget and produced `never_started`. Under the
+    semantics the previous commit wrote down, that means "the player never reached the playing
+    state, SO THE ROOM CERTAINLY HEARD NOTHING", and the announce path turns it into a flat
+    "I couldn't play the announcement." Ten unreadable polls establish neither half of that:
+    play_media was already accepted, so the clip may well be audible -- and _say then restores the
+    volume and replays the captured source straight over it.
+
+    N2 is the mirror image, introduced BY the F1 fix: the unreadable branch `continue`d without
+    resetting `ended_seen`, so `flicker -> failed read -> flicker` satisfied a rule the code states
+    as "two CONSECUTIVE observations".
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    URI = "http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+    WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
+
+    class ScriptedHA(FakeHA):
+        """Each entry is a state dict to return, or an exception instance to raise."""
+
+        def __init__(self, script, tail=None):
+            FakeHA.__init__(self, tail)
+            self._script = list(script)
+
+        def get_entity_state(self, entity_id, timeout=None):
+            self.state_timeouts.append(timeout)
+            if self._script:
+                item = self._script.pop(0)
+                if isinstance(item, Exception):
+                    raise item
+                return item
+            if isinstance(self._state, Exception):
+                raise self._state
+            return self._state
+
+    def _opts(self, **over):
+        opts = {"start_timeout": 5.0, "finish_timeout": 3.0, "call_timeout": 20.0,
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
+        opts.update(over)
+        return opts
+
+    def _run(self, ha, opts=None):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer,
+                                                clock=lambda: 1000.0, sleeper=FakeSleeper())
+        return cap._play_clip_and_wait(FakeCtx(ha), "rid1", self.ZONE, self.URI, self.URI,
+                                       "cl1p", opts or self._opts(), lambda: False)
+
+    # ---- N1: the start poll -------------------------------------------------
+
+    def test_an_unreadable_start_poll_is_not_never_started(self):
+        ha = self.ScriptedHA([], tail=IOError("read timed out"))
+        res = self._run(ha)
+        self.assertFalse(res["started"])
+        self.assertTrue(res["issued"], "play_media was accepted, so the clip may be audible")
+        self.assertEqual(res["gave_up"], "unreadable")
+
+    def test_a_watched_failure_to_start_is_still_never_started(self):
+        # The distinction that matters: we WATCHED the zone and it never began playing.
+        ha = self.ScriptedHA([], tail=idle_state())
+        res = self._run(ha)
+        self.assertFalse(res["started"])
+        self.assertEqual(res["gave_up"], "never_started")
+
+    def test_a_transient_start_read_failure_does_not_abandon_the_clip(self):
+        ha = self.ScriptedHA([IOError("blip"), playing_with_id(0.70, self.WRAPPED)],
+                             tail=playing_with_id(0.70, self.WRAPPED))
+        res = self._run(ha)
+        self.assertTrue(res["started"], "one bad read abandoned a clip that did start")
+
+    def test_an_unreadable_start_is_not_reported_as_a_flat_denial(self):
+        tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+        class DeadAfterCapture(FakeHA):
+            def __init__(self):
+                FakeHA.__init__(self, None)
+                self._n = 0
+
+            def get_entity_state(self, entity_id, timeout=None):
+                self._n += 1
+                if self._n <= 3:                      # mic prev, mic confirm, volume capture
+                    return [{"state": "off", "attributes": {}},
+                            {"state": "on", "attributes": {}},
+                            playing_with_id(0.36, "library://radio/2")][self._n - 1]
+                raise IOError("HA stopped answering")
+
+        ha = DeadAfterCapture()
+        ha.tts_url = tts
+        ha.media_url = None                            # no chime; the message is the only clip
+        clock = MovingClock()
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                sleeper=AdvancingSleeper(clock))
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = "switch.respeaker_test_microphone_mute"
+        res = run(cap, ctx, {"mode": "announce", "text": "dinner is ready"})
+        self.assertNotEqual(res["chat_text"], "I couldn't play the announcement.")
+        self.assertFalse(res["metadata"]["likely_silent"],
+                         "unreadable polls were reported as 'the room certainly heard nothing'")
+
+    # ---- N2: the finish poll ------------------------------------------------
+
+    def test_two_flickers_separated_by_a_failed_read_are_not_an_ending(self):
+        match = playing_with_id(0.70, self.WRAPPED)
+        ha = self.ScriptedHA([match,                       # start poll: playing
+                              idle_state(),                # flicker 1
+                              IOError("read timed out"),   # no observation
+                              idle_state()],               # flicker 2
+                             tail=match)
+        res = self._run(ha, self._opts(finish_timeout=3.0))
+        self.assertTrue(res["started"])
+        self.assertFalse(res["ended"],
+                         "two non-consecutive flickers were counted as an observed end")
+
+    def test_two_genuinely_consecutive_observations_still_end_the_clip(self):
+        match = playing_with_id(0.70, self.WRAPPED)
+        ha = self.ScriptedHA([match, idle_state(), idle_state()], tail=idle_state())
+        res = self._run(ha, self._opts(finish_timeout=3.0))
+        self.assertTrue(res["ended"])
+        self.assertIsNone(res["gave_up"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

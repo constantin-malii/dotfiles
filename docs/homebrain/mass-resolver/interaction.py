@@ -1172,6 +1172,8 @@ class InteractionCapability(capability.Capability):
         start_timeout = opts["start_timeout"]
         start_deadline = self._clock() + start_timeout
         elapsed = 0.0
+        start_unreadable = 0
+        started_unreadable = False
         while True:
             if superseded():
                 return out
@@ -1196,7 +1198,20 @@ class InteractionCapability(capability.Capability):
                 state = ctx.ha.get_entity_state(zone, timeout=rt) or {}
             except Exception as e:
                 LOG.warning("SAY req=%s zone=%s start-poll read failed (%r)", rid, zone, e)
-                state = {}
+                # Same rule as the finish poll: a read that did not happen is not an observation.
+                # `{}` never matches, so a run of failures used to exhaust the start budget and
+                # report `never_started` -- which the announce path states as "the room certainly
+                # heard nothing" and turns into a flat denial. play_media was already accepted, so
+                # the clip may be audible; claiming otherwise is a guess, and acting on it replays
+                # the source straight over live speech.
+                start_unreadable += 1
+                if start_unreadable >= UNREADABLE_LIMIT:
+                    started_unreadable = True
+                    break
+                self._sleeper(poll_secs)
+                elapsed += poll_secs
+                continue
+            start_unreadable = 0
             attrs = state.get("attributes") or {}
             # MA does not echo the raw URL back as media_content_id -- it wraps it, e.g.
             # "builtin://radio/<url>". Match by containment, not equality.
@@ -1207,8 +1222,17 @@ class InteractionCapability(capability.Capability):
             elapsed += poll_secs
 
         if not out["started"]:
-            LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)", rid, zone, clip)
-            out["gave_up"] = "never_started"
+            # Two different facts. "never_started" means we WATCHED the zone and it never began
+            # playing -- the room heard nothing. "unreadable" means we could not see the zone at
+            # all, which says nothing about what came out of the speakers.
+            if started_unreadable:
+                LOG.warning("SAY req=%s zone=%s clip=%s start-poll could not read the zone; "
+                            "whether it is playing is UNKNOWN", rid, zone, clip)
+                out["gave_up"] = "unreadable"
+            else:
+                LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)",
+                            rid, zone, clip)
+                out["gave_up"] = "never_started"
             return out
 
         # Wait for finish: poll until the clip stops playing (or the caller is superseded).
@@ -1263,6 +1287,10 @@ class InteractionCapability(capability.Capability):
                 if unreadable >= UNREADABLE_LIMIT:
                     gave_up = "unreadable"
                     break
+                # A poll that observed nothing must not COUNT towards the two consecutive
+                # observations the ending rule requires, or `flicker -> failed read -> flicker`
+                # satisfies a rule whose whole point is that flickers must be consecutive.
+                ended_seen = 0
                 self._sleeper(poll_secs)
                 elapsed += poll_secs
                 continue
@@ -1606,7 +1634,11 @@ class InteractionCapability(capability.Capability):
             # they heard did not play -- the same dishonesty as a false success, pointed the other
             # way. An unobserved end is an absence of evidence, not a verdict.
             end_observed = bool(clip_results) and clip_results[-1]["ended"]
-            likely_silent = not reply_started
+            # "Certainly silent" requires having WATCHED it fail to start. A clip whose start poll
+            # could not read the zone establishes neither that it played nor that it did not, and
+            # play_media was already accepted -- so it falls to the middle outcome, not to a denial.
+            reply_gave_up = clip_results[-1]["gave_up"] if clip_results else "never_started"
+            likely_silent = (not reply_started) and reply_gave_up != "unreadable"
 
             if superseded():
                 return superseded_result()
