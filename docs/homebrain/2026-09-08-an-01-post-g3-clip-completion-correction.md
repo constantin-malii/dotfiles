@@ -398,6 +398,102 @@ microphone mute window that the dead-man bounds at 184 s, and that now logs a re
 If it recurs, the `finish-poll gave up` line is the first thing to read, and this document is the
 history behind it.
 
+## IT REPRODUCES — and it is a DIFFERENT failure. Appended 2026-09-27
+
+**This falsifies the previous section.** Yesterday's entry concluded the defect was "intermittent,
+not reproducible, cause unknown". Today, on the **first** announcement issued through the G4b phone
+path, it reproduced on the first attempt — and the failure is not the one recorded on 2026-09-08.
+
+### The measurement — req `f864d0ff`, 2026-09-27 16:01:50
+
+```
+16:01:50  ANNOUNCE mic leased gen=11 prev=False deadman=184s
+16:01:50  mic mute CONFIRMED after 2 poll(s)
+16:01:50  clips=2 chars=15 volume=0.8
+16:01:56  SAY clip=8a266f28 finish-poll exit after 5.5s: state=idle   <- chime, fine
+16:02:42  WARNING SAY clip=414d2b19 finish-poll gave up after 45.0s without observing
+          the clip end (budget 45.0s, reason=finish_timeout)
+16:02:42  restored -> 0.3 (owns_restore=True)
+16:02:42  mic restored
+```
+
+**Microphone muted for 52 s**, the same magnitude as 2026-09-08's 52.7 s.
+
+### What is NEW, and why this is a fourth behaviour
+
+**The message was never audible.** The operator heard the chime and nothing else. On 2026-09-08 the
+announcement **was** heard — only its completion went unobserved. Today no sound was produced at all.
+
+The player state explains why the poll never saw an end: **the clip sat at `state=playing`,
+`media_position=0`, `media_duration=None` and never advanced.** It was still sitting there minutes
+after the turn returned, holding the zone, until it was stopped manually.
+
+So the two failures are not the same event:
+
+| | 2026-09-08 | 2026-09-27 |
+|---|---|---|
+| Audible | **yes** | **no** |
+| Player | advanced, end unobserved | **stuck at `position=0`** |
+| Mic held | 52.7 s | 52 s |
+| Exit | budget exhausted (unlogged) | budget exhausted (**logged by 6a**) |
+
+Per the stop/go criteria in the design decision — *"any cell produces a fourth distinct exit
+behaviour → stop and report, proposing nothing"* — **no remedy is proposed here.**
+
+### 6a worked, and this is the first evidence of it
+
+The `WARNING ... finish-poll gave up after 45.0s ... reason=finish_timeout` line is the budget-exit
+logging from PR #49, firing in production for the first time. The identical failure on 2026-09-08
+logged **nothing**, which is what made it expensive to investigate. The clip, the elapsed time, the
+budget and the reason now arrive in one line, unprompted.
+
+### A NEW defect: the relay reported success for an announcement nobody heard
+
+The automation trace shows the `choose` took `choice=default`, i.e. `r.content.ok` was true, so the
+phone was told **"Announced."** The metadata carried `likely_silent: False` and both clips
+`issued: True, started: True`.
+
+**The resolver genuinely believes it succeeded.** `started` means the play call was accepted, which
+it was; nothing in the turn observes that no audio emerged. The honest-failure work in design 5.2
+maps refusals to truthful text, but it has no concept of *"the play was accepted and produced
+silence"*. A user asked to trust `chat_text` was, here, told the opposite of what happened.
+
+This is independent of the completion-detection defect and would survive a fix to it.
+
+### D7, partially settled
+
+`chars=15`. The spoken sentence was *"Announce dinner is ready."*, so `trigger.slots.message` carried
+**`dinner is ready`** — 15 characters, **the trailing full stop stripped**.
+
+That is the opposite of SPIKE-AN-3's finding for `trigger.sentence`, which **preserved**
+capitalisation and punctuation. **The slot and the sentence normalise differently**, exactly the
+divergence the plan warned might exist and refused to assume either way. Capitalisation of the first
+letter is not determined by a character count and remains unconfirmed; two attempts to read the trace
+variables directly failed on harness bugs of mine (`wsutil.ws_connect` returns `(sock, box)`, and the
+trigger variables are not at `result.variables.trigger` in this HA version).
+
+### What differs from the runs that passed
+
+Listed as facts, not as a hypothesis. Nothing here is tested.
+
+- **G4a step 5 passed at 14:54 the same day** through the *same* `rest_command`, so the HA transport
+  and the payload template are not implicated.
+- Cell C passed with two clips from an **idle** ceiling; this turn was also from an idle ceiling.
+- Differences that remain: the invocation path (conversation trigger vs direct service call), the
+  message text itself, and roughly an hour of elapsed time.
+- The chime, a `builtin://track/`, behaved perfectly in both. Only the `builtin://radio/`-wrapped
+  Piper clip failed, and this time it failed *earlier* than before — it never started producing audio.
+
+### State
+
+`automation.voice_ceiling_announce` was **disabled** immediately (the kill switch — a service call,
+no config change). The stuck TTS clip was cleared and `library://radio/4` restored at volume 0.3.
+Microphone `off`, satellite `idle`, resolver `active`, no tracebacks. The other seven automations
+were untouched, and `automation.voice_ceiling_speakers` remains byte-identical to
+`.bak/automation-voice_ceiling_speakers-20260927-111309.json` (sha256 `b8c6cd48`).
+
+**G4b is halted at step 4.** Steps 5-8 assume a working announcement and would measure nothing.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;

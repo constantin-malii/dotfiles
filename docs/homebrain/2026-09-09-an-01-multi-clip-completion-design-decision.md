@@ -234,6 +234,29 @@ not fixed.**
 be observed, its worst case is bounded by the 184 s dead-man, and §6a now makes a recurrence legible.
 Waiting for an unreproducible failure to recur is not a plan.
 
+## 9. Section 8 IS SUPERSEDED — the defect reproduced on 2026-09-27
+
+Section 8 above concluded, on 2026-09-26, that the failure was "intermittent, not reproducible as of
+2026-09-26, cause unknown, and not fixed". The "not reproducible" half is **false as of 2026-09-27**:
+the first announcement issued through the G4b phone path failed immediately, with a 52 s microphone
+mute.
+
+It is also **not the same failure**. The message produced **no audio at all** and the player sat at
+`state=playing, media_position=0` without advancing, where the 2026-09-08 failure was audible and
+only its completion went unobserved. That is a fourth distinct exit behaviour, which section 5's stop
+criteria answer with *stop and report, proposing nothing*.
+
+The four-cell matrix therefore did not measure what it was built to measure. Cells B, C and D each
+ran a **direct** announce; the failing turn came through a **conversation trigger**. Whether that
+distinction matters is untested — G4a step 5 passed through the same `rest_command` 67 minutes
+earlier, which rules the HA transport and the payload template out but not the trigger path.
+
+Section 4's candidate mechanisms remain untested, and 6a is now **proven in production**: it logged
+the budget exit that the identical 2026-09-08 failure logged nothing for.
+
+Full measurement in `2026-09-08-an-01-post-g3-clip-completion-correction.md` under "IT REPRODUCES".
+**G4b is halted at step 4 and `automation.voice_ceiling_announce` is disabled.**
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It is a decision record; no code or
