@@ -1093,10 +1093,15 @@ class InteractionCapability(capability.Capability):
         clip's own timeout -- so a generous turn budget never lets one clip overrun its allowance,
         and a clock that stalls or steps backwards cannot leave the poll unbounded.
 
-        Returns {"started", "issued", "clip"}. Propagates whatever play_media raises -- the caller's
-        finally is the recovery path, and it owns the volume restore, so it has to see the failure.
+        Returns {"started", "issued", "clip", "ended", "gave_up"}. `ended` is True only when the
+        clip's end was actually OBSERVED; `gave_up` names why the wait stopped otherwise. Both
+        matter because the caller cannot otherwise tell a finished clip from an abandoned one --
+        which is exactly how an announcement nobody heard reported "Announced." on 2026-09-27.
+
+        Propagates whatever play_media raises -- the caller's finally is the recovery path, and it
+        owns the volume restore, so it has to see the failure.
         """
-        out = {"started": False, "issued": False, "clip": clip}
+        out = {"started": False, "issued": False, "clip": clip, "ended": False, "gave_up": None}
         deadline = opts.get("deadline")
         poll_secs = opts["poll_secs"]
         floor = opts["floor"]
@@ -1159,6 +1164,7 @@ class InteractionCapability(capability.Capability):
 
         if not out["started"]:
             LOG.warning("SAY req=%s zone=%s clip=%s did not start (likely silent)", rid, zone, clip)
+            out["gave_up"] = "never_started"
             return out
 
         # Wait for finish: poll until the clip stops playing (or the caller is superseded).
@@ -1168,6 +1174,19 @@ class InteractionCapability(capability.Capability):
         elapsed = 0.0
         ended_seen = 0
         blank_for = 0.0
+        # A clip the player ACCEPTED but never actually played. Observed 2026-09-27: `playing`, cid
+        # matching, media_position pinned at 0 for the whole 45s budget, and no sound in the room.
+        # `ended` is decided from state and cid alone, so that clip looks perfectly healthy and the
+        # poll waits out the entire budget with the microphone muted.
+        #
+        # HA reports position as a value PLUS the moment it was measured, not as a live counter, so
+        # a player that re-reports the same second with a fresh timestamp is still talking to us.
+        # Both fields therefore count as progress. An absent position means we cannot tell, and
+        # guessing there would cut off an audibly playing clip -- the very fault the blank-cid grace
+        # exists to prevent -- so it is left alone.
+        silence_grace = float(opts.get("silence_grace", 0.0) or 0.0)
+        pos_sig = None
+        flat_for = 0.0
         # Why the clip's wait ended. None once the end was actually OBSERVED; a string means we gave
         # up without seeing it. Three exits used to be silent, which is why the G3 failure showed up
         # as a 45s hole between two ordinary lines and was diagnosable only by subtracting
@@ -1213,6 +1232,21 @@ class InteractionCapability(capability.Capability):
                     break
             elif cid != "":
                 blank_for = 0.0
+            if silence_grace > 0 and not ended and cid != "":
+                sig = (attrs.get("media_position"), attrs.get("media_position_updated_at"))
+                if sig[0] is None:
+                    pass                                  # nothing reported; not judged
+                elif pos_sig is None or sig != pos_sig:
+                    pos_sig = sig
+                    flat_for = 0.0
+                else:
+                    flat_for += poll_secs
+                    if flat_for >= silence_grace:
+                        # Abandon rather than hold the zone and the microphone for the full budget.
+                        # This exit is reachable ONLY where the poll would have given up anyway, so
+                        # a clip that plays today cannot start failing because of it.
+                        gave_up = "no_audio"
+                        break
             if ended:
                 # Require two consecutive observations: a single flicker of state or cid must not
                 # trigger the restore+replay that is heard as a cut-off.
@@ -1236,6 +1270,8 @@ class InteractionCapability(capability.Capability):
             LOG.warning("SAY req=%s zone=%s clip=%s finish-poll gave up after %.1fs without "
                         "observing the clip end (budget %.1fs, reason=%s)",
                         rid, zone, clip, elapsed, finish_timeout, gave_up)
+        out["gave_up"] = gave_up
+        out["ended"] = gave_up is None
         return out
 
     def _say(self, ctx, resolved, rid):
@@ -1496,7 +1532,10 @@ class InteractionCapability(capability.Capability):
                          "poll_secs": poll_secs,
                          "blank_grace": int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
                          "deadline": deadline,
-                         "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0}
+                         "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0,
+                         # 0 disables the silence detector entirely. It lives beside say_poll_ms
+                         # because it governs this clip loop, not the announce path alone.
+                         "silence_grace": int(getattr(ctx.settings, "say_silence_grace_ms", 12000)) / 1000.0}
             clip_results = []
             for i, one in enumerate(uris):
                 one_uri = self._normalise_uri(one, internal_base)
@@ -1508,14 +1547,20 @@ class InteractionCapability(capability.Capability):
                 res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
                                                opts, superseded)
                 clip_results.append({"clip": one_clip, "started": res["started"],
-                                     "issued": res["issued"]})
+                                     "issued": res["issued"], "ended": res["ended"],
+                                     "gave_up": res["gave_up"]})
                 if superseded():
                     return superseded_result()
             # reply_started tracks the LAST clip -- the message. Design 8.3 makes that asymmetry
             # explicit: a chime that never starts is a degraded announcement, not a silent one, and
             # reporting the whole turn as silent would send the operator looking for the wrong fault.
             reply_started = bool(clip_results) and clip_results[-1]["started"]
-            likely_silent = not reply_started
+            # STARTING is not the same as being HEARD. `likely_silent` used to mean only "the
+            # player never reached the playing state", so a clip that started and then produced
+            # silence satisfied it -- and `_announce`'s correct failure mapping was handed a False.
+            # A message whose end was never observed is not a message the room heard.
+            reply_ended = bool(clip_results) and clip_results[-1]["ended"]
+            likely_silent = not reply_started or not reply_ended
 
             if superseded():
                 return superseded_result()
