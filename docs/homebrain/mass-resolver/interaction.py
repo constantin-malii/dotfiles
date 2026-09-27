@@ -1174,19 +1174,15 @@ class InteractionCapability(capability.Capability):
         elapsed = 0.0
         ended_seen = 0
         blank_for = 0.0
-        # A clip the player ACCEPTED but never actually played. Observed 2026-09-27: `playing`, cid
-        # matching, media_position pinned at 0 for the whole 45s budget, and no sound in the room.
-        # `ended` is decided from state and cid alone, so that clip looks perfectly healthy and the
-        # poll waits out the entire budget with the microphone muted.
-        #
-        # HA reports position as a value PLUS the moment it was measured, not as a live counter, so
-        # a player that re-reports the same second with a fresh timestamp is still talking to us.
-        # Both fields therefore count as progress. An absent position means we cannot tell, and
-        # guessing there would cut off an audibly playing clip -- the very fault the blank-cid grace
-        # exists to prevent -- so it is left alone.
-        silence_grace = float(opts.get("silence_grace", 0.0) or 0.0)
-        pos_sig = None
-        flat_for = 0.0
+        # NO EARLY EXIT ON A STALLED POSITION. A clip the player accepts but never plays --
+        # `playing`, cid matching, media_position pinned, no sound -- is real and cost 52s of muted
+        # microphone on 2026-09-27. Detecting it from media_position/media_position_updated_at was
+        # implemented and then REMOVED, because measuring a HEALTHY stream falsified the premise:
+        # an audibly playing radio stream reported pos=1799 and a frozen media_position_updated_at
+        # unchanged across a 20s sample. MA throttles elapsed_time reporting, so "position has not
+        # moved" does not distinguish a stalled clip from a playing one, and the detector would
+        # have cut off audible speech. Do not reintroduce this without a signal that a healthy
+        # player demonstrably moves.
         # Why the clip's wait ended. None once the end was actually OBSERVED; a string means we gave
         # up without seeing it. Three exits used to be silent, which is why the G3 failure showed up
         # as a 45s hole between two ordinary lines and was diagnosable only by subtracting
@@ -1232,21 +1228,6 @@ class InteractionCapability(capability.Capability):
                     break
             elif cid != "":
                 blank_for = 0.0
-            if silence_grace > 0 and not ended and cid != "":
-                sig = (attrs.get("media_position"), attrs.get("media_position_updated_at"))
-                if sig[0] is None:
-                    pass                                  # nothing reported; not judged
-                elif pos_sig is None or sig != pos_sig:
-                    pos_sig = sig
-                    flat_for = 0.0
-                else:
-                    flat_for += poll_secs
-                    if flat_for >= silence_grace:
-                        # Abandon rather than hold the zone and the microphone for the full budget.
-                        # This exit is reachable ONLY where the poll would have given up anyway, so
-                        # a clip that plays today cannot start failing because of it.
-                        gave_up = "no_audio"
-                        break
             if ended:
                 # Require two consecutive observations: a single flicker of state or cid must not
                 # trigger the restore+replay that is heard as a cut-off.
@@ -1532,10 +1513,7 @@ class InteractionCapability(capability.Capability):
                          "poll_secs": poll_secs,
                          "blank_grace": int(getattr(ctx.settings, "say_blank_cid_grace_ms", 4000)) / 1000.0,
                          "deadline": deadline,
-                         "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0,
-                         # 0 disables the silence detector entirely. It lives beside say_poll_ms
-                         # because it governs this clip loop, not the announce path alone.
-                         "silence_grace": int(getattr(ctx.settings, "say_silence_grace_ms", 12000)) / 1000.0}
+                         "floor": int(getattr(ctx.settings, "announce_min_call_timeout_ms", 500)) / 1000.0}
             clip_results = []
             for i, one in enumerate(uris):
                 one_uri = self._normalise_uri(one, internal_base)

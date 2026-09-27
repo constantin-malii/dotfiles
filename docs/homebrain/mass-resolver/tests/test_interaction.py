@@ -5592,11 +5592,7 @@ class TurnClipFingerprintTest(unittest.TestCase):
 
 
 def playing_pos(vol, mid, pos, upd="2026-09-27T22:01:50+00:00"):
-    """A playing state that also reports where the player is inside the clip.
-
-    `media_position` in HA is "last reported position, as of media_position_updated_at" -- not a
-    live counter -- so both fields matter when asking whether anything is progressing.
-    """
+    """A playing state that also reports where the player claims to be inside the clip."""
     return {"state": "playing",
             "attributes": {"volume_level": vol, "media_content_id": mid,
                            "media_position": pos, "media_position_updated_at": upd}}
@@ -5605,7 +5601,7 @@ def playing_pos(vol, mid, pos, upd="2026-09-27T22:01:50+00:00"):
 class ClipOutcomePropagationTest(unittest.TestCase):
     """_play_clip_and_wait must tell its caller WHY the wait ended.
 
-    It already computes that answer -- the local `gave_up` -- and then discards it, returning only
+    It already computed that answer -- the local `gave_up` -- and then discarded it, returning only
     {started, issued, clip}. That discard is the whole false-success defect of 2026-09-27: the
     player reported `playing` with a matching cid, so `started` was True, so `likely_silent` was
     False, so `announced` was True, so the turn reported "Announced." for an announcement nobody
@@ -5618,8 +5614,7 @@ class ClipOutcomePropagationTest(unittest.TestCase):
 
     def _opts(self, **over):
         opts = {"start_timeout": 5.0, "finish_timeout": 3.0, "call_timeout": 20.0,
-                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5,
-                "silence_grace": 0.0}
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
         opts.update(over)
         return opts
 
@@ -5680,91 +5675,49 @@ class ClipOutcomePropagationTest(unittest.TestCase):
         self.assertEqual(res["gave_up"], "never_started")
 
 
-class SilenceDetectionTest(unittest.TestCase):
-    """AN-01 post-G4b: a clip the player ACCEPTED but never actually played.
+class StalledPositionIsNotEvidenceTest(unittest.TestCase):
+    """A frozen media_position must NOT be treated as proof that a clip is silent.
 
-    Observed 2026-09-27 16:01: `state=playing`, the cid matching, `media_position` stuck at 0 and
-    `media_duration` None for the whole 45s budget, no audio in the room, and the zone still held
-    minutes later. The finish poll decides "ended" from state and cid alone, so it saw a healthy
-    clip and waited out the entire budget with the microphone muted.
+    A detector that abandoned a clip whose media_position and media_position_updated_at had not
+    moved for 12s was implemented here and then removed, because a measurement falsified its
+    premise. Sampling a HEALTHY, audibly playing radio stream on the live system every 2s for 20s
+    gave `media_position: 1799` and an unchanged `media_position_updated_at` on every single
+    sample -- Music Assistant throttles elapsed_time reporting, so a stalled clip and a playing
+    one are indistinguishable by that signal, and the detector would have cut off real speech.
 
-    Every one of these polls already fetches the full state dict, which carries the position. The
-    detector is therefore free; the only question is how conservative to be. It fires ONLY when the
-    poll would have given up anyway, so a turn that works today cannot start failing.
+    These tests pin the decision so it is not quietly re-added: a stalled clip is reported through
+    the ordinary budget exit, which is honest, and nothing special is inferred from position.
     """
 
     ZONE = "media_player.ceiling_speakers"
     URI = "http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
     WRAPPED = "builtin://radio/http://192.168.122.10:8123/api/tts_proxy/abc.mp3"
 
-    def _opts(self, **over):
-        opts = {"start_timeout": 5.0, "finish_timeout": 45.0, "call_timeout": 20.0,
-                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5,
-                "silence_grace": 2.0}
-        opts.update(over)
-        return opts
+    def _run(self, state, finish_timeout=3.0):
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer,
+                                                clock=lambda: 1000.0, sleeper=FakeSleeper())
+        opts = {"start_timeout": 5.0, "finish_timeout": finish_timeout, "call_timeout": 20.0,
+                "poll_secs": 0.5, "blank_grace": 4.0, "deadline": None, "floor": 0.5}
+        return cap._play_clip_and_wait(FakeCtx(FakeHA(state)), "rid1", self.ZONE, self.URI,
+                                       self.URI, "cl1p", opts, lambda: False)
 
-    def _flat(self, pos=0, upd="t0"):
-        return playing_pos(0.80, self.WRAPPED, pos, upd)
-
-    def _run(self, opts, states=None, ha=None):
-        clock = MovingClock()
-        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
-                                                sleeper=AdvancingSleeper(clock))
-        ha = ha if ha is not None else FakeHA(self._flat())
-        if states is not None:
-            ha.set_states(states)
-        res = cap._play_clip_and_wait(FakeCtx(ha), "rid1", self.ZONE, self.URI, self.URI,
-                                      "cl1p", opts, lambda: False)
-        return res, clock
-
-    def test_a_position_that_never_moves_is_reported_as_no_audio(self):
-        res, _ = self._run(self._opts())
+    def test_a_stalled_clip_exits_through_the_ordinary_budget(self):
+        res = self._run(playing_pos(0.80, self.WRAPPED, 0))
         self.assertTrue(res["started"])
         self.assertFalse(res["ended"])
-        self.assertEqual(res["gave_up"], "no_audio")
+        self.assertEqual(res["gave_up"], "finish_timeout")
 
-    def test_it_gives_up_long_before_the_finish_budget(self):
-        # The point of detecting this at all: 52s of muted microphone becomes a few seconds.
-        res, clock = self._run(self._opts(silence_grace=2.0, finish_timeout=45.0))
-        self.assertEqual(res["gave_up"], "no_audio")
-        self.assertLess(clock.t - 1000.0, 10.0)
+    def test_a_healthy_stream_reporting_a_frozen_position_is_treated_the_same(self):
+        # pos=1799 frozen is what the live system reports while audibly playing. It must reach the
+        # same exit as pos=0 frozen -- i.e. position carries no verdict either way.
+        stalled = self._run(playing_pos(0.80, self.WRAPPED, 0))
+        healthy = self._run(playing_pos(0.80, self.WRAPPED, 1799))
+        self.assertEqual(stalled["gave_up"], healthy["gave_up"])
+        self.assertEqual(stalled["ended"], healthy["ended"])
 
-    def test_an_advancing_position_ends_normally(self):
-        states = [self._flat(0), self._flat(1), self._flat(2), self._flat(3),
-                  idle_state(), idle_state()]
-        res, _ = self._run(self._opts(), states=states, ha=FakeHA(idle_state()))
-        self.assertTrue(res["ended"])
-        self.assertIsNone(res["gave_up"])
-
-    def test_a_moving_updated_at_alone_counts_as_progress(self):
-        # HA reports position as a value plus the moment it was measured. A player that re-reports
-        # the same second with a fresh timestamp is still talking to us.
-        states = [self._flat(3, "t0"), self._flat(3, "t1"), self._flat(3, "t2"),
-                  self._flat(3, "t3"), idle_state(), idle_state()]
-        res, _ = self._run(self._opts(), states=states, ha=FakeHA(idle_state()))
+    def test_no_position_based_exit_reason_exists(self):
+        res = self._run(playing_pos(0.80, self.WRAPPED, 0))
         self.assertNotEqual(res["gave_up"], "no_audio")
-
-    def test_an_absent_position_is_not_judged_as_silence(self):
-        # No position reported at all means we cannot tell. Guessing here would cut off a clip that
-        # is audibly playing, which is the exact bug the blank-cid grace exists to prevent.
-        res, _ = self._run(self._opts(), ha=FakeHA(playing_with_id(0.80, self.WRAPPED)))
-        self.assertEqual(res["gave_up"], "finish_timeout")
-
-    def test_a_zero_grace_disables_the_detector(self):
-        res, _ = self._run(self._opts(silence_grace=0.0, finish_timeout=3.0))
-        self.assertEqual(res["gave_up"], "finish_timeout")
-
-    def test_it_does_not_fire_before_the_grace_has_elapsed(self):
-        res, _ = self._run(self._opts(silence_grace=30.0, finish_timeout=2.0))
-        self.assertEqual(res["gave_up"], "finish_timeout")
-
-    def test_the_give_up_warning_names_the_reason(self):
-        with self.assertLogs("resolver", level="INFO") as cm:
-            self._run(self._opts())
-        warned = [m for m in cm.output if m.startswith("WARNING") and "without observing" in m]
-        self.assertEqual(len(warned), 1, cm.output)
-        self.assertIn("reason=no_audio", warned[0])
 
 
 class SilentReplyIsNotSuccessTest(unittest.TestCase):
@@ -5773,7 +5726,8 @@ class SilentReplyIsNotSuccessTest(unittest.TestCase):
     `_announce` already maps a non-announcement to cr.err with "I couldn't play the announcement."
     -- that logic was correct all along. It was fed `likely_silent = not reply_started`, which only
     ever meant "the player never reached the playing state". A clip that starts and then produces
-    silence satisfies it, which is why 2026-09-27 reported success.
+    silence satisfies it, which is why 2026-09-27 reported success for an announcement nobody
+    heard.
     """
 
     ENT = "switch.respeaker_test_microphone_mute"
@@ -5794,7 +5748,6 @@ class SilentReplyIsNotSuccessTest(unittest.TestCase):
         ctx = FakeCtx(ha)
         ctx.settings = FakeSettings()
         ctx.settings.announce_mic_mute_entity = self.ENT
-        ctx.settings.say_silence_grace_ms = 2000
         return ctx
 
     def _ha(self, tail):
@@ -5809,6 +5762,7 @@ class SilentReplyIsNotSuccessTest(unittest.TestCase):
         return ha
 
     def _stuck_message(self):
+        # The 2026-09-27 signature: accepted, `playing`, cid matching, and it never ends.
         return playing_pos(0.80, "builtin://radio/" + self.tts, 0)
 
     def test_an_inaudible_announcement_is_reported_as_a_failure(self):
@@ -5825,7 +5779,7 @@ class SilentReplyIsNotSuccessTest(unittest.TestCase):
         message = res["metadata"]["clips"][-1]
         self.assertTrue(message["started"])
         self.assertFalse(message["ended"])
-        self.assertEqual(message["gave_up"], "no_audio")
+        self.assertEqual(message["gave_up"], "finish_timeout")
 
     def test_an_audible_announcement_is_still_a_success(self):
         # The guard that stops this becoming a false-FAILURE machine.
@@ -5835,14 +5789,36 @@ class SilentReplyIsNotSuccessTest(unittest.TestCase):
                        playing_with_id(0.36, "library://radio/2"),
                        playing_with_id(0.80, "builtin://track/" + self.chime_signed),
                        idle_state(), idle_state(),
-                       playing_pos(0.80, "builtin://radio/" + self.tts, 0),
-                       playing_pos(0.80, "builtin://radio/" + self.tts, 1),
+                       playing_with_id(0.80, "builtin://radio/" + self.tts),
                        idle_state(), idle_state()])
         res = run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
         self.assertTrue(res["ok"])
         self.assertEqual(res["chat_text"], "Announced.")
         self.assertFalse(res["metadata"]["likely_silent"])
         self.assertTrue(res["metadata"]["announced"])
+
+    def test_a_chime_that_never_starts_does_not_fail_the_announcement(self):
+        # Design 8.3: a chime that never starts is a DEGRADED announcement, not a silent one. Only
+        # the last clip -- the message -- decides whether the room heard anything. Correcting
+        # likely_silent must not make the chime's outcome fail the turn.
+        #
+        # A chime that STALLS is a different case and is deliberately not asserted here: it burns
+        # the chime budget and then the turn deadline, so the message never gets to play, and
+        # reporting that turn as failed is correct.
+        ha = FakeHA(idle_state())
+        ha.tts_url = self.tts
+        ha.media_url = self.chime_signed
+        ha.set_states([{"state": "off", "attributes": {}},
+                       {"state": "on", "attributes": {}},
+                       playing_with_id(0.36, "library://radio/2")]
+                      + [idle_state()] * 12                       # chime never reaches playing
+                      + [playing_with_id(0.80, "builtin://radio/" + self.tts),
+                         idle_state(), idle_state()])
+        res = run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        self.assertTrue(res["ok"], res)
+        self.assertFalse(res["metadata"]["likely_silent"])
+        self.assertFalse(res["metadata"]["chime"]["played"])
+        self.assertEqual(res["metadata"]["clips"][0]["gave_up"], "never_started")
 
     def test_say_text_keeps_its_own_ok_semantics(self):
         # Containment: S1b's satellite reply automation consumes _say's ok. Correcting

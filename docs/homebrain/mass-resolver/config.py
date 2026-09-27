@@ -89,12 +89,6 @@ class Settings(object):
         # the tolerance is wider than the 4s that sufficed for short replies -- too short and a long
         # answer gets cut at the first sustained blank.
         self.say_blank_cid_grace_ms = int(cfg.get("say_blank_cid_grace_ms", 8000))
-        # A clip the player ACCEPTED but never played: `playing`, the cid matching, and
-        # media_position pinned for the whole budget. Abandon it after this long rather than
-        # hold the zone and the muted microphone for the full finish timeout. 0 disables the
-        # detector. 12s is ~10x the worst start-to-first-advance seen in measurement, because a
-        # false positive cuts off a clip that is audibly playing.
-        self.say_silence_grace_ms = int(cfg.get("say_silence_grace_ms", 12000))
         # Silence the outgoing music before raising to reply_volume, so the raise is not heard as a
         # "bump" on the ~1s of music still playing before the clip replaces the stream.
         self.say_pause_before_reply = bool(cfg.get("say_pause_before_reply", True))
