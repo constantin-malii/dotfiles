@@ -22,6 +22,17 @@ class InteractionCapability(capability.Capability):
         self._sleeper = sleeper or time.sleep
         self._snaps = {}                             # zone -> {"volume": baseline, "target": last-written, "ts": float, "timer": obj|None}
         self._lock = threading.Lock()                # guards _snaps check-then-act (HTTP threads + timer thread)
+        self._mic_lock = threading.Lock()            # serialises the microphone HANDOVER: claim's
+                                                     #   mute+publish against release's
+                                                     #   validate+unmute. _lock protected the dict
+                                                     #   entry but not the WRITE, so an older turn
+                                                     #   could unmute a microphone a newer
+                                                     #   announcement had just muted -- broadcasting
+                                                     #   through a live satellite mic, the one
+                                                     #   failure requirement 7 exists to prevent.
+                                                     #   LOCK ORDER: _mic_lock BEFORE _lock, never
+                                                     #   the reverse. Nothing holds _lock across a
+                                                     #   _mic_* call, which is what makes that safe.
         self._say_gen = {}                            # zone -> generation counter (barge-in supersede), guarded by _lock
         self._turns = {}                              # zone -> {"ts": float, "playback": uri|None,
                                                       #          "stopped": bool}
@@ -638,7 +649,14 @@ class InteractionCapability(capability.Capability):
         Muting is requirement 7's fail-safe: an unmuted satellite hears the announcement come out of
         the ceiling and wakes on it. announce_require_mic_mute means what it says -- with it set, a
         microphone we cannot mute is a refusal, not a warning.
+
+        Held under _mic_lock for the whole claim, so a concurrent release cannot land its unmute
+        between this mute and the lease that says the microphone is ours.
         """
+        with self._mic_lock:
+            return self._mic_claim_locked(ctx, zone, my_gen, rid, clips)
+
+    def _mic_claim_locked(self, ctx, zone, my_gen, rid, clips=2):
         entity = self._mic_entity(ctx)
         require = bool(getattr(ctx.settings, "announce_require_mic_mute", True))
         if not entity:
@@ -743,7 +761,15 @@ class InteractionCapability(capability.Capability):
         IMMEDIATELY -- which is exactly what is wanted: the superseding turn is a person talking to
         the satellite, and they need the microphone back now (design 9.4/9.6). Only a newer
         ANNOUNCEMENT takes the lease, and then it owns the restore.
+
+        Held under _mic_lock for the whole release. Validating the lease and then unmuting without
+        it left a full REST round trip in which a newer announcement could claim and mute, only to
+        be unmuted by this turn.
         """
+        with self._mic_lock:
+            return self._mic_release_locked(ctx, zone, my_gen, rid)
+
+    def _mic_release_locked(self, ctx, zone, my_gen, rid):
         entity = self._mic_entity(ctx)
         with self._lock:
             lease = self._mic.get(zone)

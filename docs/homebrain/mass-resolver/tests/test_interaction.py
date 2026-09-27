@@ -6084,5 +6084,122 @@ class UnobservedEndIsNotAVerdictTest(unittest.TestCase):
         self.assertFalse(res["metadata"]["end_observed"])
 
 
+class MicLeaseHandoverRaceTest(unittest.TestCase):
+    """P2: releasing the microphone must not unmute one a NEWER announcement just muted.
+
+    `_mic_release` validated the lease under `_lock`, released the lock, and only then issued
+    `switch.turn_off`. Between those two points a second announcement can claim the generation,
+    take the lease and mute. The older turn then resumes and unmutes -- so announcement B
+    broadcasts through a LIVE satellite microphone and wakes on its own audio, which is the single
+    failure requirement 7's fail-safe exists to prevent.
+
+    The identity checks (`self._mic.get(zone) is lease`) protected the dict ENTRY from being
+    clobbered. Nothing protected the WRITE.
+
+    Back-to-back announcements are the expected pattern for a pushed broadcast, and the window is a
+    full REST round trip, so this is reachable rather than theoretical.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    class SlowSwitchHA(FakeHA):
+        """Records switch calls in order and makes turn_off take real time, opening the window."""
+
+        def __init__(self, delay):
+            FakeHA.__init__(self, {"state": "off", "attributes": {}})
+            self.switch_calls = []
+            self._delay = delay
+
+        def call_service_rest(self, domain, service, data, timeout=5):
+            # Record on COMPLETION, not on entry. What harms the household is the order in which
+            # the writes LAND: recording at entry made a race that unmutes a live announcement
+            # look correctly ordered, and the first version of this test passed against the buggy
+            # implementation because of it.
+            if service == "turn_off":
+                time.sleep(self._delay)
+            FakeHA.call_service_rest(self, domain, service, data, timeout)
+            self.switch_calls.append(service)
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        return ctx
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    def test_a_newer_announcement_is_not_unmuted_by_the_older_ones_release(self):
+        ha = self.SlowSwitchHA(delay=0.25)
+        ctx = self._ctx(ha)
+        cap = self._cap()
+
+        gen_a = cap._claim_gen(self.ZONE)
+        lease_a, err = cap._mic_claim(ctx, self.ZONE, gen_a, "A")
+        self.assertIsNone(err)
+        self.assertIsNotNone(lease_a)
+
+        # A starts releasing; its turn_off is slow, which is the window.
+        releaser = threading.Thread(target=cap._mic_release, args=(ctx, self.ZONE, gen_a, "A"))
+        releaser.start()
+        time.sleep(0.05)                      # let A get past the lease check and into the write
+
+        # B arrives mid-window and claims the microphone for itself.
+        gen_b = cap._claim_gen(self.ZONE)
+        lease_b, err_b = cap._mic_claim(ctx, self.ZONE, gen_b, "B")
+        releaser.join(timeout=5)
+        self.assertFalse(releaser.is_alive())
+
+        self.assertIsNone(err_b)
+        self.assertIsNotNone(lease_b, "B failed to take the lease")
+        # The ordering IS the assertion: B's mute must not be followed by A's unmute.
+        self.assertEqual(ha.switch_calls[-1], "turn_on",
+                         "the older release unmuted a microphone the newer announcement had "
+                         "already muted: %r" % (ha.switch_calls,))
+        # And the lease left behind must be B's, so B's own release is the one that restores.
+        self.assertEqual(cap._mic[self.ZONE]["gen"], gen_b)
+
+    def test_a_stale_generation_never_unmutes(self):
+        # Pins the behaviour the identity checks already gave: once B holds the lease, A's release
+        # is a no-op rather than a write.
+        ha = self.SlowSwitchHA(delay=0.0)
+        ctx = self._ctx(ha)
+        cap = self._cap()
+        gen_a = cap._claim_gen(self.ZONE)
+        cap._mic_claim(ctx, self.ZONE, gen_a, "A")
+        gen_b = cap._claim_gen(self.ZONE)
+        cap._mic_claim(ctx, self.ZONE, gen_b, "B")
+        before = list(ha.switch_calls)
+        self.assertFalse(cap._mic_release(ctx, self.ZONE, gen_a, "A"))
+        self.assertEqual(ha.switch_calls, before, "a stale release issued a switch call")
+
+    def test_the_holder_still_releases_normally(self):
+        # The lock must not break the ordinary path.
+        ha = self.SlowSwitchHA(delay=0.0)
+        ctx = self._ctx(ha)
+        cap = self._cap()
+        gen = cap._claim_gen(self.ZONE)
+        cap._mic_claim(ctx, self.ZONE, gen, "A")
+        self.assertTrue(cap._mic_release(ctx, self.ZONE, gen, "A"))
+        self.assertEqual(ha.switch_calls, ["turn_on", "turn_off"])
+        self.assertNotIn(self.ZONE, cap._mic)
+
+    def test_the_dead_man_can_still_release_from_its_own_thread(self):
+        # _mic_deadman runs on the timer thread and calls _mic_release. A second lock must not
+        # deadlock it against a claim in flight.
+        ha = self.SlowSwitchHA(delay=0.0)
+        ctx = self._ctx(ha)
+        cap = self._cap()
+        gen = cap._claim_gen(self.ZONE)
+        cap._mic_claim(ctx, self.ZONE, gen, "A")
+        t = threading.Thread(target=cap._mic_deadman, args=(ctx, self.ZONE, gen))
+        t.start()
+        t.join(timeout=5)
+        self.assertFalse(t.is_alive(), "the dead-man blocked -- lock ordering problem")
+        self.assertNotIn(self.ZONE, cap._mic)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
