@@ -3,6 +3,62 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-27 — AN-01 resolver redeploy #2: bounded in-lock HA calls, honest chime metadata
+
+> Announcements remain **disabled**; the only live path affected is the satellite reply.
+> Rollback: `~/mass-resolver/.bak/20260927-190834/`.
+
+`interaction.py 84cc1f78` + its test module, from `main` at `fcbda6b`. `config.py`, `config.json`,
+`wsutil.py`, `haconn.py` unchanged and not copied. **Host parity, Python 3.5.2: 493 tests OK**
+(was 487), `COMPILE OK`. Operator restart at **19:12:23**, after the 19:08:35 file write; clean
+startup lines, `key=200`/`nokey=401`, no tracebacks, satellite `idle`, microphone `off`.
+
+Pre-change: `interaction.py 1b63edeb`, `tests/test_interaction.py 61b14157`.
+
+**What changed.** The four HA calls made while `_lock` is held — a read and a `volume_set` in each
+of `_duck` and `_restore` — now carry `LOCK_HELD_CALL_TIMEOUT` instead of the client default. That
+lock also gates `_claim_gen`, `interaction_in_flight` (called on every dispatch result) and the
+volume-recovery timer, with the microphone dead-man queued behind it, so a hung Home Assistant used
+to stall far more than its caller. The chime also stops being judged by `started` alone: it now
+carries `end_observed` and an `end_unobserved` reason, though it remains decorative and still cannot
+fail a turn.
+
+### Live-gate handling for this deploy — stated rather than skipped
+
+The gate was **not claimed in a separate published commit beforehand**. Pushes to `main` now require
+a pull request, and recording claim-then-release as two merges costs two PRs for a ten-minute
+window. The gate was free throughout, one operator was present for the restart, and this entry
+records both the claim and the release. Noted here because the register is only worth anything if
+its gaps are visible; if the two-step is wanted even at that cost, say so and it resumes.
+
+### N3 — the microphone mute window: DECIDED, no change
+
+The 2026-09-27 failure held the microphone **52 s**: a 6 s chime plus a message that gave up at its
+full 45 s `announce_message_finish_timeout_ms`. Shortening that budget was considered and
+**rejected for now**.
+
+| `announce_message_finish_timeout_ms` | worst-case mute |
+|---|---|
+| **45 s (current)** | **52 s** |
+| 25 s | ~32 s |
+| 15 s | ~22 s |
+
+Giving up does not merely stop waiting: `_say` then restores the volume and replays the captured
+source **over the clip**. A budget shorter than a legitimate announcement therefore truncates real
+speech. `announce_max_chars` is 300 — roughly 50 words, about 20 s of Piper speech — so 45 s is a
+~2x margin and 25 s has almost none.
+
+If the window is ever worth shortening, the lever is **both** values: halving `announce_max_chars`
+to ~150 (≈10 s of speech) would let the budget drop to 25 s while keeping the margin. One without
+the other buys a cut-off announcement.
+
+Neither is changed now, because announcements are disabled and the window costs nothing today, and
+because the right time to set these is when G4b is re-enabled, **from measured clip durations**.
+Choosing a threshold from arithmetic is exactly what produced the silence detector that had to be
+removed the same afternoon.
+
+**Live gate: FREE. G4b remains halted, `automation.voice_ceiling_announce` remains `off`.**
+
 ## 2026-09-27 — AN-01 resolver redeploy is LIVE: honest reporting, safe microphone handover, and the TTS url in the log
 
 > **Announcements remain DISABLED**, so the only live path this touches is the satellite reply
