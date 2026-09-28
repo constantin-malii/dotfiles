@@ -152,6 +152,11 @@ class InteractionCapability(capability.Capability):
         self._replies = {}                            # zone -> {"gen": int, "baseline": float|None} while a reply
                                                       #   turn is in flight; _say owns the zone's volume for its
                                                       #   lifetime (S1b-2 decision (b)). Guarded by _lock.
+        self._queue_targets = {}                      # MR-08c: zone -> {"gen", "rid", "target", "clips",
+                                                      #   "live"}. The interrupted item and the reply clips a
+                                                      #   turn put in the queue: a superseding turn or a later
+                                                      #   "resume" continues from it (design 4.5-4.6).
+                                                      #   Guarded by _lock.
         self._vol_recovery = {}                       # zone -> {"gen", "baseline", "target",
                                                       #          "rid", "ts", "timer"}
                                                       #   design 9.7: an UNDUCKED turn has no duck
@@ -1245,7 +1250,8 @@ class InteractionCapability(capability.Capability):
             if muted:
                 self._mic_release(ctx, zone, my_gen, rid)
 
-    def _play_clip_and_wait(self, ctx, rid, zone, norm_uri, match_key, clip, opts, superseded):
+    def _play_clip_and_wait(self, ctx, rid, zone, norm_uri, match_key, clip, opts, superseded,
+                            enqueue=None, issue=True):
         """Play ONE clip on the zone and wait for it: play_media -> start-poll -> finish-poll.
 
         Everything a TURN owns stays with the caller -- generation ownership, baseline capture, the
@@ -1289,8 +1295,12 @@ class InteractionCapability(capability.Capability):
 
         # MA's play_media regularly outruns the 5s REST default; a client-side timeout here aborts
         # the turn while the clip still starts server-side (audible, unsequenced).
-        self._say_call(ctx, rid, zone, "music_assistant", "play_media",
-                       {"entity_id": zone, "media_id": norm_uri}, timeout=opts["call_timeout"])
+        if issue:
+            data = {"entity_id": zone, "media_id": norm_uri}
+            if enqueue:
+                # MR-08c: insert the clip instead of replacing the queue (design 4.3-3).
+                data["enqueue"] = enqueue
+            self._say_call(ctx, rid, zone, "music_assistant", "play_media", data, timeout=opts["call_timeout"])
         out["issued"] = True
 
         # Confirm start: poll until the clip is actually playing, or the start budget runs out.
@@ -1467,6 +1477,257 @@ class InteractionCapability(capability.Capability):
         out["ended"] = gave_up is None
         return out
 
+    # --- MR-08c queue mode -------------------------------------------------------------------------------
+    def _queue_on(self, ctx):
+        return (bool(getattr(ctx.settings, "say_queue_resume", True))
+                and getattr(ctx, "ma_factory", None) is not None
+                and bool(getattr(ctx.settings, "queue_id", None)))
+
+    def _ma_open(self, ctx):
+        """A fresh MA connection for ONE phase (design 4.2): a reply can idle the socket for minutes."""
+        ma = ctx.ma_factory()
+        if getattr(ma, "s", None) is None:
+            ma.connect()
+        return ma
+
+    def _ma_close(self, ma):
+        if ma is not None:
+            try:
+                ma.close()
+            except Exception:
+                pass
+
+    def _queue_capture(self, ctx, rid, zone, my_gen):
+        """Design 4.3-1: capture the interrupted item BEFORE the pause. None -> legacy mode for the turn."""
+        if not self._queue_on(ctx):
+            return None
+        queue_id = ctx.settings.queue_id
+        ma = None
+        stale = 0
+        try:
+            ma = self._ma_open(ctx)
+            cap, why = parse_queue_capture(ma.queue_state(queue_id), self._clock())
+            if cap is None:
+                LOG.info("SAY req=%s zone=%s queue capture unavailable (%s); legacy replay", rid, zone, why)
+                return None
+            try:
+                r = ma.queue_items(queue_id, offset=max(0, (cap["index"] or 0) - 10), limit=25)
+                window = (r.get("result") or []) if _ma_ok(r) else []
+                stale = sum(1 for x in window if is_reply_clip_uri(
+                    (x.get("media_item") or {}).get("uri") or x.get("uri") or ""))
+            except Exception:
+                pass
+        except Exception as e:
+            LOG.info("SAY req=%s zone=%s queue capture unavailable (%r); legacy replay", rid, zone, e)
+            return None
+        finally:
+            self._ma_close(ma)
+        qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [], "unrecorded": [],
+              "anchor": cap["index"] or 0, "unidentified": 0, "resume": "none", "seeked": False,
+              "deleted": 0, "inherited_from": None}
+        self._queue_adopt_target(qm, rid, zone)
+        with self._lock:
+            self._queue_targets[zone] = {"gen": my_gen, "rid": rid, "target": qm["target"],
+                                         "clips": list(qm["clips"]), "live": True}
+        LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f (extrapolated %.1fs) seekable=%s "
+                 "stale_reply_clips=%d", rid, zone, cap["item"], cap["index"], cap["pos"], cap["extrapolated"],
+                 cap["seekable"], stale)
+        return qm
+
+    def _queue_adopt_target(self, qm, rid, zone):
+        """Which item this turn resumes. Task 3: the captured item, unless it is itself a reply clip.
+        (Task 5 replaces this with barge-in / pending-resume inheritance, design 4.5-4.6.)"""
+        cap = qm["cap"]
+        if is_reply_clip_uri(cap["uri"]):
+            LOG.info("SAY req=%s zone=%s current queue item %s is a reply clip; no resume target",
+                     rid, zone, cap["item"])
+            return
+        qm["target"] = cap
+
+    def _queue_publish_clips(self, zone, my_gen, qm):
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            if rec is not None and rec.get("gen") == my_gen:
+                rec["clips"] = list(qm["clips"])
+
+    def _queue_record_clip(self, ctx, rid, zone, qm, played_uri, clip, my_gen):
+        """Design 4.3-4: record this clip's queue id by exact identity at the anchored position. enqueue=play
+        makes the clip CURRENT, so the live current item at anchor+1 is checked first and a window read at the
+        anchor is the fallback. The anchor follows the live current index, so one miss cannot cascade onto
+        the next clip of the same turn."""
+        ma = None
+        qid, idx, why = None, None, None
+        cur_idx, cur_is_clip = None, False
+        try:
+            ma = self._ma_open(ctx)
+            s = ma.queue_state(qm["queue_id"])
+            if _ma_ok(s):
+                q = s.get("result") or {}
+                ci = q.get("current_item") or {}
+                cur_idx = q.get("current_index")
+                cur_is_clip = is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or "")
+                if cur_idx == qm["anchor"] + 1 and ci.get("queue_item_id"):
+                    qid, idx, why = anchored_clip([ci], cur_idx, qm["anchor"], played_uri)
+            if qid is None:
+                r = ma.queue_items(qm["queue_id"], offset=qm["anchor"], limit=5)
+                items = (r.get("result") or []) if _ma_ok(r) else []
+                qid, idx, why = anchored_clip(items, qm["anchor"], qm["anchor"], played_uri)
+        except Exception as e:
+            qid, idx, why = None, None, "read failed (%r)" % (e,)
+        finally:
+            self._ma_close(ma)
+        if qid is None:
+            qm["unidentified"] += 1
+            if cur_is_clip and cur_idx is not None:
+                qm["anchor"] = cur_idx              # the next clip is inserted after this one
+            LOG.warning("SAY req=%s zone=%s clip=%s queue_item UNIDENTIFIED (%s)", rid, zone, clip, why)
+            return
+        if qid not in qm["clips"]:
+            qm["clips"].append(qid)
+        qm["anchor"] = idx
+        self._queue_publish_clips(zone, my_gen, qm)
+        LOG.info("SAY req=%s zone=%s clip=%s queue_item=%s", rid, zone, clip, qid)
+
+    def _queue_confirm(self, ma, queue_id, item, poll_secs):
+        """Poll (bounded, design 4.4) until `item` is current. -> (seen, any_read_ok)."""
+        if ma is None:
+            return False, False
+        reads_ok = False
+        tries = max(1, int(CONFIRM_BUDGET_S / max(poll_secs, 0.05)))
+        for i in range(tries):
+            try:
+                s = ma.queue_state(queue_id)
+                if _ma_ok(s):
+                    reads_ok = True
+                    cur = ((s.get("result") or {}).get("current_item") or {}).get("queue_item_id")
+                    if cur == item:
+                        return True, True
+            except Exception:
+                pass
+            if i < tries - 1:
+                self._sleeper(poll_secs)
+        return False, reads_ok
+
+    def _queue_resume(self, ctx, rid, zone, qm, source_id, call_timeout):
+        """Design 4.4 decision table. True when the source is (or may be) playing again."""
+        t = qm["target"]
+        qid = qm["queue_id"]
+        seek = seek_target(t)
+        poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
+        known_clips = list(qm["clips"])              # clips we already knew BEFORE this resume
+        qm["resume"] = "attempted"
+        called, why, seen, reads_ok = "ok", None, False, False
+        ma = None
+        try:
+            try:
+                ma = self._ma_open(ctx)
+            except Exception as e:
+                called, why = "error", "connect failed (%r)" % (e,)   # never sent: a KNOWN failure
+            if ma is not None:
+                try:
+                    r = ma.play_index(qid, t["item"], seek_position=seek)
+                    if not _ma_ok(r):
+                        called = "error"
+                        why = "ma error %s" % ((r or {}).get("error_code") if isinstance(r, dict) else "no reply")
+                except Exception as e:
+                    called, why = "raised", "play_index raised (%r)" % (e,)
+                seen, reads_ok = self._queue_confirm(ma, qid, t["item"], poll_secs)
+        finally:
+            self._ma_close(ma)
+        if seen:
+            outcome = "confirmed"
+        elif called == "ok":
+            outcome = "unconfirmed"
+        elif called == "error" or reads_ok:
+            outcome = "fallback_uri"
+        else:
+            outcome = "unknown"
+        qm["resume"] = outcome
+        if outcome in ("confirmed", "unconfirmed"):
+            qm["seeked"] = seek > 0
+            LOG.info("SAY req=%s zone=%s resumed by queue item=%s outcome=%s seek=%s",
+                     rid, zone, t["item"], outcome, seek if seek else "skipped")
+            self._queue_settle(ctx, rid, zone, qm, seek, poll_secs, known_clips)
+            return True
+        if outcome == "unknown":
+            LOG.error("SAY req=%s zone=%s resume unknown (%s); not replaying", rid, zone, why)
+            return False
+        LOG.warning("SAY req=%s zone=%s resume by queue failed (%s); URI fallback", rid, zone, why)
+        if source_id and not self._is_reply_uri(source_id):
+            try:
+                self._say_call(ctx, rid, zone, "music_assistant", "play_media",
+                               {"entity_id": zone, "media_id": source_id}, timeout=call_timeout)
+                return True
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s URI fallback failed (%r); source NOT resumed", rid, zone, e)
+        return False
+
+    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips):
+        """Task 3: no-op placeholder with the final signature; Task 4 fills it (design 4.3-7)."""
+        return None
+
+    def _queue_finish(self, ctx, rid, zone, qm, my_gen):
+        """Design 4.3-8: delete recorded clips that are not current; keep the zone record per outcome."""
+        ma = None
+        cur = None
+        try:
+            if qm["clips"]:
+                ma = self._ma_open(ctx)
+                try:
+                    s = ma.queue_state(qm["queue_id"])
+                    if _ma_ok(s):
+                        cur = ((s.get("result") or {}).get("current_item") or {}).get("queue_item_id")
+                except Exception:
+                    pass
+                for cid in list(qm["clips"]):
+                    if cid == cur:
+                        LOG.info("SAY req=%s zone=%s clip left as current item %s (no resume)", rid, zone, cid)
+                        continue
+                    try:
+                        r = ma.delete_item(qm["queue_id"], cid)
+                        if _ma_ok(r):
+                            qm["deleted"] += 1
+                            qm["clips"].remove(cid)
+                        else:
+                            LOG.warning("SAY req=%s zone=%s delete failed for %s (%s)", rid, zone, cid,
+                                        r.get("error_code") if isinstance(r, dict) else "no reply")
+                    except Exception as e:
+                        LOG.warning("SAY req=%s zone=%s delete failed for %s (%r)", rid, zone, cid, e)
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s clip cleanup failed (%r)", rid, zone, e)
+        finally:
+            self._ma_close(ma)
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            if rec is not None and rec.get("gen") == my_gen:
+                if qm["resume"] == "confirmed" or qm["target"] is None:
+                    del self._queue_targets[zone]
+                else:
+                    # Did not resume, or resume unconfirmed/unknown: a later "resume" continues from here.
+                    rec["live"] = False
+                    rec["clips"] = list(qm["clips"])
+        if qm["target"] is not None and qm["resume"] != "confirmed":
+            LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
+                     rid, zone, qm["target"]["item"], qm["clips"])
+
+    def _queue_superseded_exit(self, ctx, rid, zone, qm, my_gen):
+        """Design 4.5: a successor that CAPTURED owns the resume. If none did -- e.g. an announcement claimed
+        the generation and aborted before reaching _say -- this turn's record would stay live forever and
+        nobody would resume: record any unrecorded clips and turn it into a pending resume."""
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            mine = rec is not None and rec.get("gen") == my_gen
+        if not mine:
+            return
+        for uri in list(qm["unrecorded"]):
+            self._queue_record_clip(ctx, rid, zone, qm, uri, self._clip_id(uri), my_gen)
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            if rec is not None and rec.get("gen") == my_gen:
+                rec["live"] = False
+                rec["clips"] = list(qm["clips"])
+        LOG.info("SAY req=%s zone=%s superseded with no successor capture; pending resume recorded", rid, zone)
+
     def _say(self, ctx, resolved, rid):
         zone = resolved["zone"]; uri = resolved["uri"]
         # Fingerprint the NORMALISED uri, so the turn-level id matches the id the clip loop derives
@@ -1640,7 +1901,12 @@ class InteractionCapability(capability.Capability):
                                                 #   has to mean the turn died before REACHING a
                                                 #   play_media at all.
         replay_done = [False]                   # step 9 already put the source back
+        qm = None
+        queue_done = [False]
         try:
+            # MR-08c: capture the interrupted queue item BEFORE the pause and any enqueue (design 4.3-1).
+            qm = self._queue_capture(ctx, rid, zone, my_gen)
+
             # 3. normalise the reply URI to the MA-reachable internal base
             norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
 
@@ -1734,8 +2000,17 @@ class InteractionCapability(capability.Capability):
                 opts = dict(base_opts)
                 opts["finish_timeout"] = finish_timeouts[i]
                 queue_may_be_replaced[0] = True
-                res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
-                                               opts, superseded)
+                if qm is not None:
+                    res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
+                                                   opts, superseded, enqueue="play")
+                    qm["played"].append(one_uri)
+                    if superseded():
+                        qm["unrecorded"].append(one_uri)   # a successor may own the queue now
+                    else:
+                        self._queue_record_clip(ctx, rid, zone, qm, one_uri, one_clip, my_gen)
+                else:
+                    res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
+                                                   opts, superseded)
                 clip_results.append({"clip": one_clip, "started": res["started"],
                                      "issued": res["issued"], "ended": res["ended"],
                                      "gave_up": res["gave_up"]})
@@ -1809,9 +2084,15 @@ class InteractionCapability(capability.Capability):
             except Exception as e:
                 LOG.warning("SAY req=%s zone=%s restore failed (%r)", rid, zone, e)
 
-            # 9. replay source: the reply replaced the queue, so replay for BOTH radio and local content
+            # 9. put the source back. Queue mode resumes the captured queue item (design 4.3-7);
+            #    legacy mode replays the captured source by URI, exactly as before.
             replayed = False
-            if was_playing and source_id and not superseded():
+            if qm is not None:
+                if was_playing and qm["target"] is not None and not superseded():
+                    replayed = self._queue_resume(ctx, rid, zone, qm, source_id, call_timeout)
+                self._queue_finish(ctx, rid, zone, qm, my_gen)
+                queue_done[0] = True
+            elif was_playing and source_id and not superseded():
                 try:
                     queue_may_be_replaced[0] = True
                     self._say_call(ctx, rid, zone, "music_assistant", "play_media",
@@ -1820,15 +2101,20 @@ class InteractionCapability(capability.Capability):
                     replay_done[0] = True       # the finally must not replay a second time
                 except Exception as e:
                     LOG.warning("SAY req=%s zone=%s replay failed (%r); source NOT resumed", rid, zone, e)
+            resume_mode = ({"confirmed": "queue"}.get(qm["resume"], qm["resume"]) if qm is not None
+                           else "legacy")
 
-            LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s likely_silent=%s replayed=%s",
-                     rid, zone, clip, reply_started, likely_silent, replayed)
+            LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s likely_silent=%s replayed=%s resume=%s",
+                     rid, zone, clip, reply_started, likely_silent, replayed, resume_mode)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
                                     "end_observed": end_observed,
                                     "replayed": replayed, "superseded": False, "zone": zone,
                                     "clips": clip_results,
-                                    "volume_restore": volume_restore[0]})
+                                    "volume_restore": volume_restore[0],
+                                    "resume": resume_mode, "seeked": bool(qm and qm["seeked"]),
+                                    "clips_deleted": (qm["deleted"] if qm else 0),
+                                    "clips_unidentified": (qm["unidentified"] if qm else 0)})
         finally:
             # The zone must never be handed back sitting at reply_volume. If we raised after
             # raising the volume (e.g. play_media 500s, or a read blip in the poll), restore the
@@ -1845,36 +2131,55 @@ class InteractionCapability(capability.Capability):
                 except Exception as e:
                     LOG.error("SAY req=%s zone=%s abort-restore failed (%r); dead-man must reconcile",
                               rid, zone, e)
-            # design 8.3a: an earlier clip may have replaced the queue, so un-pausing could restart
-            # a spent chime instead of the music. On an AMBIGUOUS failure, replaying the captured
-            # source is the safer recovery: if the play landed, replay is the only fix; if it did
-            # not, replay re-plays the station that was already there.
-            replayed_here = False
-            if (queue_may_be_replaced[0] and not replay_done[0] and was_playing
-                    and source_id and not superseded()):
+            if qm is None:
+                # design 8.3a: an earlier clip may have replaced the queue, so un-pausing could restart
+                # a spent chime instead of the music. On an AMBIGUOUS failure, replaying the captured
+                # source is the safer recovery: if the play landed, replay is the only fix; if it did
+                # not, replay re-plays the station that was already there.
+                replayed_here = False
+                if (queue_may_be_replaced[0] and not replay_done[0] and was_playing
+                        and source_id and not superseded()):
+                    try:
+                        ctx.ha.call_service_rest(
+                            "music_assistant", "play_media",
+                            {"entity_id": zone, "media_id": source_id},
+                            timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                        replayed_here = True
+                        LOG.warning("SAY req=%s zone=%s aborted after a play; replayed the source",
+                                    rid, zone)
+                    except Exception as e:
+                        LOG.error("SAY req=%s zone=%s abort-replay failed (%r)", rid, zone, e)
+                # design 8.3a: un-pause ONLY when the queue is certainly intact -- i.e. no play_media was
+                # ever attempted, or there was no source to replay. A replay that RAISED may still have
+                # landed, so un-pausing after one would resume either the source or the announcement
+                # clip. That ambiguity is why there is no blind last-resort un-pause here: when a play
+                # and its replay both fail, the zone is left paused at its baseline and the operator
+                # recovers with "resume" (interaction mode resume un-pauses a paused zone).
+                if (paused_by_us[0] and not superseded()
+                        and not replay_done[0] and not replayed_here
+                        and (not queue_may_be_replaced[0] or not source_id)):
+                    try:
+                        ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+                        LOG.warning("SAY req=%s zone=%s un-paused the source (queue intact, or nothing "
+                                    "to replay)", rid, zone)
+                    except Exception as e:
+                        LOG.error("SAY req=%s zone=%s un-pause failed (%r)", rid, zone, e)
+            if qm is not None:
                 try:
-                    ctx.ha.call_service_rest(
-                        "music_assistant", "play_media",
-                        {"entity_id": zone, "media_id": source_id},
-                        timeout=int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
-                    replayed_here = True
-                    LOG.warning("SAY req=%s zone=%s aborted after a play; replayed the source",
-                                rid, zone)
+                    if superseded():
+                        self._queue_superseded_exit(ctx, rid, zone, qm, my_gen)
+                    elif not queue_done[0]:
+                        # Died before step 9. Only act on what WE changed (peer review finding 2):
+                        #  - a clip may sit in front of the song -> resume the captured item (table 4.4);
+                        #  - we only paused -> the queue is exactly as it was: un-pause in place;
+                        #  - neither -> the song was never interrupted: do nothing.
+                        if was_playing and qm["target"] is not None and qm["resume"] == "none":
+                            if queue_may_be_replaced[0]:
+                                self._queue_resume(ctx, rid, zone, qm, source_id,
+                                                   int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                            elif paused_by_us[0]:
+                                self._say_call(ctx, rid, zone, "media_player", "media_play", {"entity_id": zone})
+                        self._queue_finish(ctx, rid, zone, qm, my_gen)
                 except Exception as e:
-                    LOG.error("SAY req=%s zone=%s abort-replay failed (%r)", rid, zone, e)
-            # design 8.3a: un-pause ONLY when the queue is certainly intact -- i.e. no play_media was
-            # ever attempted, or there was no source to replay. A replay that RAISED may still have
-            # landed, so un-pausing after one would resume either the source or the announcement
-            # clip. That ambiguity is why there is no blind last-resort un-pause here: when a play
-            # and its replay both fail, the zone is left paused at its baseline and the operator
-            # recovers with "resume" (interaction mode resume un-pauses a paused zone).
-            if (paused_by_us[0] and not superseded()
-                    and not replay_done[0] and not replayed_here
-                    and (not queue_may_be_replaced[0] or not source_id)):
-                try:
-                    ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
-                    LOG.warning("SAY req=%s zone=%s un-paused the source (queue intact, or nothing "
-                                "to replay)", rid, zone)
-                except Exception as e:
-                    LOG.error("SAY req=%s zone=%s un-pause failed (%r)", rid, zone, e)
+                    LOG.error("SAY req=%s zone=%s queue recovery failed (%r)", rid, zone, e)
             release_reply()
