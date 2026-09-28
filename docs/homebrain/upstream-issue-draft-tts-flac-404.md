@@ -47,9 +47,38 @@ does break out, the `.mp3` is played as given and everything works.
 
 1. Resolve a Piper TTS URL through HA: `POST /api/tts_get_url` → `http://<ha>/api/tts_proxy/<id>.mp3`.
 2. Call `music_assistant.play_media` on a Squeezelite player with that URL as `media_id`.
-3. Most of the time it plays. Intermittently — **once in 8** queue-flow starts across our logs,
-   and once in 7 announcements on the day we measured it — it produces silence, and the log
-   shows the sequence below.
+3. Most of the time it plays. **Intermittently — and we could not make it happen on demand** — it
+   produces silence and the log shows the sequence below.
+
+**Honest note on reproducibility.** We tried to reproduce it deliberately: **8 consecutive
+announcements, all 8 succeeded.** Across everything we measured on one day the rate is about **1 in
+15** (14 clean, 1 failure), and 1 in 21 across the queue-flow starts in our logs. So the end-to-end
+failure is **not** a reliable repro, and we are not pretending otherwise.
+
+### What IS deterministic: `tts_proxy` urls are format-keyed
+
+This part reproduces every time, in three commands, with no Music Assistant involved. It is the
+mechanism behind the 404 above:
+
+```bash
+# 1. mint a TTS url (no format requested -> .mp3)
+curl -s -X POST -H "Authorization: Bearer $HA_TOKEN" -H 'Content-Type: application/json' \
+     -d '{"engine_id":"tts.piper","message":"format keying check"}' \
+     http://<ha>:8123/api/tts_get_url
+# -> {"url": "http://<ha>:8123/api/tts_proxy/<id>.mp3", ...}
+
+# 2. the minted url serves
+curl -s -o /dev/null -w '%{http_code}\n' http://<ha>:8123/api/tts_proxy/<id>.mp3     # 200
+
+# 3. the SAME id with a different extension does not
+curl -s -o /dev/null -w '%{http_code}\n' http://<ha>:8123/api/tts_proxy/<id>.flac    # 404
+```
+
+Requesting `"options": {"preferred_format": "flac"}` in step 1 mints a `.flac` that serves 200
+(35955 bytes here), so HA is perfectly capable of flac — the id is simply bound to the format it was
+minted for. **So any component that derives a `.flac` url from an `.mp3` one gets a 404, every
+time.** That is what the intermittent failure lands on; what remains unexplained is which component
+does the deriving, and how often.
 
 ### Expected behavior
 
@@ -104,6 +133,9 @@ Every `Start Queue Flow stream` in the period where this caller was active:
 |---|---|---|
 | `breaking out to single item stream` | **7** | played correctly |
 | no break-out | **1** | `Skipping unplayable item`, `ext=flac`, silence |
+
+(A later run of 8 deliberate announcements added 8 more clean turns, none of which
+reached this branch.)
 
 Every log line mentioning `.flac`:
 
