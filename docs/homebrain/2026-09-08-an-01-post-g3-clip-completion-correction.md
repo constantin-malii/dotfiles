@@ -837,6 +837,66 @@ handed to the MA issue tracker rather than pursued by measurement here. The evid
 break-out correlation, 23/36 `.flac` lines being failures, zero successful `.flac` plays — is a
 better bug report than anything filed in the adjacent issues cited earlier.
 
+### The mechanism, exactly: `tts_proxy` urls are FORMAT-KEYED. Appended 2026-09-28
+
+Measured on the live system, and it explains the 404 precisely:
+
+```
+mint .flac  -> GET .flac            = 200, 35955 bytes    HA serves what it minted
+mint .wav   -> GET .wav             = 200, 58924 bytes
+mint .mp3   -> GET .mp3             = 200, 18791 bytes
+mint .mp3   -> GET <same id>.flac   = 404                 <-- the failure signature
+```
+
+**An HA `tts_proxy` id is valid only in the format it was minted for.** Ask for another extension on
+the same id and HA returns 404. That is exactly what the failing turn hit.
+
+So the question is no longer "why does HA 404 this" — it is **who asked for a flac variant of a clip
+minted as mp3**.
+
+### What is ruled out, and how
+
+| Candidate | Status | Evidence |
+|---|---|---|
+| HA cannot produce flac | **ruled out** | `preferred_format: "flac"` mints a `.flac` that serves 200 |
+| Our resolver requests flac | **ruled out** | `haconn.tts_get_url` posts only `{engine_id, message}` — no `options`, no `preferred_format` (`haconn.py:119-120`). 8 probes, all `.mp3` |
+| MA rewrites the extension | **not found in source** | searched `music-assistant/server` at tag 2.9.3 for `tts_proxy` (hits only `providers/ai_radio/constants.py`) and `with_suffix` (no relevant hits). **Other idioms — `splitext`, `rsplit(".")`, f-string assembly — were not covered, so this is "not found", not "does not exist"** |
+| The `.flac` is MA's own stream url | **ruled out** | MA's stream urls are `:8095/flow/…` or `:8095/single/…/{player_id}.{fmt}`. Ours is `:8123/api/tts_proxy/<id>.flac` — Home Assistant's host and path |
+
+### The break-out condition, from MA 2.9.3 source
+
+Verified at the `2.9.3` tag — `music_assistant/controllers/streams/audio.py`,
+`_flow_stream_needs_restart` (def line 2797, log at 2829-2837):
+
+```python
+if queue_track.media_type in (MediaType.RADIO, MediaType.AUDIO_SOURCE):
+    self.logger.info("Live media item %s (%s, %s) encountered in flow stream "
+                     "- breaking out to single item stream", ...)
+    return True
+```
+
+That is the whole test — no `is_live`, no duration, no streamdetails. And the same exclusion appears
+again at url-resolution level (`controllers/streams/controller.py:404-422`), where `CONF_OUTPUT_CODEC`
+(**default `"flac"`**) supplies the extension for MA's own stream urls.
+
+**This retires the "break-out decides it" framing from the previous section.** Breaking out does not
+change the extension — `single` and `flow` urls both carry `CONF_OUTPUT_CODEC`. The 7-vs-1
+correlation is real but it is not the cause; at most it says the failing item carried a `media_type`
+other than `RADIO`, despite a `builtin://radio/` uri.
+
+### What remains unknown, stated as unknown
+
+**Who requested the flac variant.** Not established. It is the last open link and every candidate
+above is either ruled out or merely not-found.
+
+**The next failure answers it without any new work.** The resolver now logs the resolved TTS url
+whole and redacted at the moment it resolves. If that line says `.mp3` while MA reports `.flac`, the
+swap is downstream of us. If it says `.flac`, then HA handed us flac for that call and the eight
+probes were unrepresentative. Either way it is one log line, and it is already deployed.
+
+Until then: **do not file this as "MA rewrites the extension"** — that is precisely the shape of the
+three root causes already retracted in this document.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
