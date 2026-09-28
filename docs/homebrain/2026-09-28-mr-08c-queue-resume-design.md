@@ -112,7 +112,8 @@ Queue mode is used when `settings.say_queue_resume` is true (default **true**; k
 4. **Identify each clip (exact + position-anchored).** Read `queue_items(offset=<anchor>, limit=5)` where the
    anchor is the captured `current_index` for the first clip and the previous clip's index for later clips.
    The candidate is the item at **anchor + 1**, and it must match exactly:
-   - URI: `media_item.uri` (or `uri`) with only the `builtin://radio/` prefix removed **equals** the clip's
+   - URI: `media_item.uri` (or `uri`) with only one of MA's two measured wrappers removed
+     (`builtin://radio/` for TTS, `builtin://track/` for the announce chime — see `_is_reply_uri`) **equals** the clip's
      played (normalised) URI — for announce clips this is the already-resolved chime/message URL `_say`
      played, so equality holds without a name rule;
    - or, if the URI is absent, `name` **equals** the clip's TTS id.
