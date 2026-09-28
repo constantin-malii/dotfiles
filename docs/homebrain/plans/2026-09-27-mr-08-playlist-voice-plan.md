@@ -28,7 +28,8 @@ reviewed by an independent agent and by peer session `dotfiles-61`). Read it bef
 - `md["uri"]` is always a **string**; a curated playlist's track list goes in `md["uris"]`.
 - New settings are read with `getattr(settings, "playlist_aliases", None) or {}` — existing fakes lack them.
 - Commits: no AI attribution; code and docs in separate commits.
-- **Live host (Tasks 6–7) only with explicit operator approval at that step**; the operator runs the `sudo` restart.
+- **Live host (Task 1 read-only probe, Task 7 deploy) only with explicit operator approval at that step**; the
+  operator runs the `sudo` restart. `main` is protected — everything lands via PR (BACKLOG §8).
 
 ## Review Focus
 
@@ -46,7 +47,12 @@ reviewed by an independent agent and by peer session `dotfiles-61`). Read it bef
 ### Task 1: Live read-only probe of the MA shapes (no code)
 
 Confirms spec §8 assumptions before code depends on them. **Read-only; runs a script on the host over SSH using
-the documented on-host token method — the operator approved read-only SSH checks for this work.**
+the documented on-host token method.** CLAUDE.md allows SSH only on a specific ask: **before Step 2, ask the operator
+for this read-only check and wait for a yes** — this plan is not that approval. `id_homebrain` has a passphrase and
+must already be loaded in the ssh-agent (adopt `~/.ssh/agent.env`; never kill the agent), or `BatchMode` fails.
+
+**Not checked here:** spec §8's "`player_queues/play_media` accepts a list of URIs" cannot be probed read-only (it
+starts playback). The first live play in Task 7 Step 7 is that check, and it is a STOP condition there.
 
 **Files:**
 - Create (scratch, not committed): `C:\Users\CONSTA~1\AppData\Local\Temp\claude\D--repos-dotfiles\f665b45e-08ed-4da2-8ee3-0144e3f39ce4\scratchpad\mr08_probe.py`
@@ -308,6 +314,7 @@ class FakeMA(object):
         self._tracks = tracks or {}          # playlist item_id -> [track dicts]
         self.played = []
         self.track_calls = []
+        self.track_limits = []
         self.library_calls = []
         self.s = object()
     def connect(self):
@@ -317,9 +324,12 @@ class FakeMA(object):
     def library(self, mt):
         self.library_calls.append(mt)
         return self._data.get(mt, [])
-    def playlist_tracks(self, item_id, provider="library", limit=500):
+    def playlist_tracks(self, item_id, provider="library", limit=None):
+        # No default cap here: the cap must come from music.py, or the cap test proves nothing.
         self.track_calls.append(str(item_id))
-        return list(self._tracks.get(str(item_id), []))[:limit]
+        self.track_limits.append(limit)
+        items = list(self._tracks.get(str(item_id), []))
+        return items if limit is None else items[:limit]
     def play(self, q, media, option="replace"):
         self.played.append(media); return {"result": {}}
 
@@ -418,6 +428,7 @@ class CuratedPlaylistTest(unittest.TestCase):
         many = [smb("t%d" % i, "p/%d" % i) for i in range(music.PLAYLIST_TRACK_CAP + 50)]
         ma = FakeMA({"playlist": [curated("big", "3")]}, {"3": many})
         run(ma, "big", "playlist")
+        self.assertEqual(ma.track_limits, [music.PLAYLIST_TRACK_CAP])
         self.assertEqual(len(ma.played[0]), music.PLAYLIST_TRACK_CAP)
 
     def test_artist_play_never_fetches_playlist_tracks(self):
@@ -674,6 +685,9 @@ class AliasAndPhraseTest(unittest.TestCase):
 
     def test_alias_to_missing_target_is_not_found_and_never_an_artist(self):
         lib = self.lib(); lib["playlist"] = [smb("costea-playlist", "c.m3u")]   # target renamed away
+        # An artist named exactly like the target, and one named like the phrase ("Costea Mix"):
+        # neither may play, whichever way a broken alias branch falls through.
+        lib["artist"] = [smb("Costea Mix", "a1"), smb("my music - costea (local)", "a2")]
         ma = FakeMA(lib)
         r = run(ma, "costea mix", settings=with_aliases(ALIASES))
         self.assertFalse(r["ok"])
@@ -731,10 +745,12 @@ class AliasAndPhraseTest(unittest.TestCase):
         self.assertIn("(shuffle isn't supported yet)", r["chat_text"])
 
     def test_title_starting_with_shuffle_still_resolves_unstripped(self):
-        ma = FakeMA({"track": [smb("Shuffle", "s1")]})
-        r = run(ma, "Shuffle")
+        # Unstripped first: "shuffle the deck" must play the track of that name, not "The Deck"
+        # (which a strip-first order would pick) and without the shuffle note.
+        ma = FakeMA({"track": [smb("The Deck", "d1"), smb("Shuffle the Deck", "s1")]})
+        r = run(ma, "shuffle the deck")
         self.assertTrue(r["ok"])
-        self.assertEqual(r["metadata"]["candidate"], "Shuffle")
+        self.assertEqual(r["metadata"]["candidate"], "Shuffle the Deck")
         self.assertNotIn("shuffle isn't supported", r["chat_text"])
 
     def test_library_fetched_once_per_type_across_shuffle_retry(self):
@@ -1011,17 +1027,21 @@ revert with `git checkout -- <file>`:
 |---|---|---|
 | `_curated_mapping`: drop `and str(...).isdigit()` | `tests.test_playlist` | `test_automatic_named_id_playlists_are_never_curated` |
 | `_curated_tracks`: append every track's uri, local or not | `tests.test_playlist` | `test_mixed_plays_only_local_tracks_with_note` |
-| `_lookup` alias branch: call `_resolve_all(... _types(settings, "playlist") ...)` instead of `_resolve_type(... exact=True)` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` |
+| `_lookup` alias branch: call `_resolve_all(ma, target, _types(settings, "playlist"), ...)` instead of `_resolve_type(... exact=True)` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` (artist named like the target) |
+| `_lookup` alias branch: on a miss, fall through to resolving the phrase instead of `return hit, nl, key` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` ("Costea Mix" artist) |
 | `_resolve_type`: ignore `exact` | `tests.test_playlist` | `test_alias_target_never_fuzzy_matches_another_playlist` |
+| `_curated_tracks`: drop `limit=PLAYLIST_TRACK_CAP` | `tests.test_playlist` | `test_track_list_capped` |
+| `resolve`: try the `shuffle `-stripped phrase first | `tests.test_playlist` | `test_title_starting_with_shuffle_still_resolves_unstripped` |
 | `core.py`: remove `and not dry` | `tests.test_core` | `test_music_not_found_dry_run_param_is_silent` |
 
-Record the table's outcome (all five caught) in the commit message.
+Record the table's outcome (all eight caught) in the commit message. A mutation that survives means its test
+does not pin the behaviour — fix the test, not the table.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add docs/homebrain/mass-resolver/tests/test_playlist.py
-git commit -m "test(resolver): MR-08 dispatch integration; full suite green; mutation check 5/5 caught"
+git commit -m "test(resolver): MR-08 dispatch integration; full suite green; mutation check 8/8 caught"
 ```
 
 - [ ] **Step 6: Whole-branch review** — request a fresh code review of `main..HEAD` (resolver code + tests) before
@@ -1031,66 +1051,110 @@ any deploy; fix findings with the same TDD loop.
 
 ### Task 7: Deploy (operator-gated — stop and ask before Step 1)
 
-Every step touches the live host. Ask the operator for explicit approval to start; the operator performs the
-restart. Replace `<ts>` with the timestamp printed in Step 2.
+Every step from Step 2 touches the live host. Ask the operator for explicit approval to start; the operator performs
+the restart. `main` is protected (BACKLOG §8): every change below lands through a PR. `gh pr create` fails on this
+machine (gh uses the personal token) — push the branch and open the PR from the browser URL git prints.
+Replace `<ts>` with the timestamp printed in Step 2.
 
-- [ ] **Step 1: Claim the live gate** — per `docs/homebrain/BACKLOG.md` §8–9 (single resolver deploy at a time):
-add a "claim the live gate for MR-08" line to `docs/homebrain/CHANGELOG.md`, commit
-(`docs(homebrain): claim the live gate for MR-08`), merge to `main` and push so peer sessions see it.
+- [ ] **Step 1: Claim the live gate in the §10 register** — per BACKLOG §10 ("record the track ID + branch here in
+the claiming PR"). Edit the `host-live / HA-live / exposure` row of `docs/homebrain/BACKLOG.md` §10: Holder
+`MR-08 (homebrain/mr-playlist-voice)`, Status `CLAIMED <date> for the MR-08 resolver deploy`. BACKLOG is CRLF — match
+its line endings and check `git diff --numstat` shows only the lines you meant. Commit
+(`docs(homebrain): claim the live gate for MR-08`), push, open the PR, and **wait until it is merged** before Step 2.
+If the row is not FREE, stop — another track holds the gate. Do **not** touch `CHANGELOG.md` here (§9: one writer,
+entry added at merge).
 
-- [ ] **Step 2: Back up the host files**
+- [ ] **Step 2: Back up the host files, including the tests**
 
 ```bash
-ssh costea@192.168.1.68 'cd ~/mass-resolver && ts=$(date +%Y%m%d-%H%M%S) && mkdir -p .bak/$ts && cp music.py maconn.py favorites.py config.py core.py resolver.py config.json .bak/$ts/ && echo $ts'
+ssh costea@192.168.1.68 'cd ~/mass-resolver && ts=$(date +%Y%m%d-%H%M%S) && mkdir -p .bak/$ts && cp music.py maconn.py favorites.py config.py core.py resolver.py config.json .bak/$ts/ && cp -r tests .bak/$ts/tests && echo $ts'
 ```
 
-- [ ] **Step 3: Copy code; merge config safely**
+Also record the current announce count for Step 6: `ssh costea@192.168.1.68 'grep -c "ANNOUNCE via" ~/mass-resolver/resolver.log'`.
+
+- [ ] **Step 3: Copy code and tests; run the suite on the host's Python 3.5.2 before the restart**
 
 ```bash
 cd docs/homebrain/mass-resolver
 scp music.py maconn.py favorites.py config.py core.py resolver.py costea@192.168.1.68:mass-resolver/
-ssh costea@192.168.1.68 'cd ~/mass-resolver && python3 -c "import json; print(sorted(json.load(open(\"config.json\")).keys()))"'
+scp -r tests costea@192.168.1.68:mass-resolver/
+ssh costea@192.168.1.68 'cd ~/mass-resolver && python3 --version && python3 -m unittest discover -s tests -t . 2>&1 | tail -3'
 ```
 
-Compare the printed keys with the repo `config.json`; then add **only** the alias key on the host:
+Expected: `Python 3.5.2`, then `OK` (compare the count with the last deploy's 487 host tests plus the new ones; host
+skips may differ from Windows). `test_py35_compat` only parses syntax — this run is the real 3.5 check. **Any failure:
+STOP**, restore from `.bak/<ts>` (rollback below) — the service is still running the old code, so nothing is live yet.
+
+- [ ] **Step 4: Merge the alias config by value, not by key**
+
+Compare the host `config.json` with the repo's by **value** (the repo mirror must not drift):
+
+```bash
+scp costea@192.168.1.68:mass-resolver/config.json "$SCRATCH/host_config.json"   # $SCRATCH = this session's scratchpad
+python -c "import json,sys; h=json.load(open(sys.argv[1])); r=json.load(open('config.json')); print('differ:', sorted(k for k in set(h)|set(r) if h.get(k)!=r.get(k)))" "$SCRATCH/host_config.json"
+```
+
+Expected: `differ: []` (or only keys you can explain). An unexplained difference: STOP and ask the operator which
+side is right. (`config.json` holds no secrets — tokens live in dot-files — but print key names only, as above.)
+Then add **only** the alias key on the host, ASCII-safe (non-interactive ssh on 16.04 may run in an ASCII locale):
 
 ```bash
 ssh costea@192.168.1.68 'cd ~/mass-resolver && python3 - <<EOF
 import json
 c = json.load(open("config.json"))
 c["playlist_aliases"] = {"costea mix": "my music - costea (local)", "costea mics": "my music - costea (local)"}
-open("config.json", "w").write(json.dumps(c, indent=2, ensure_ascii=False) + "\n")
+open("config.json", "w").write(json.dumps(c, indent=2, ensure_ascii=True) + "\n")
 print("aliases:", c["playlist_aliases"])
 EOF'
 ```
 
-Mirror the same key into the repo `config.json` (separate commit `chore(resolver): MR-08 playlist alias config`).
+Mirror the same key into the repo `config.json` and run `python -m unittest tests.test_config -v`
+(`ShippedAnnounceConfigTest` asserts against the repo file and must stay green), then commit separately
+(`chore(resolver): MR-08 playlist alias config`).
 
-- [ ] **Step 4: Operator restarts the service** — ask them to run:
+- [ ] **Step 5: Operator restarts the service** — ask them to run:
 `! ssh -t costea@192.168.1.68 'sudo systemctl restart mass-resolver'`
 then confirm it is up: `ssh costea@192.168.1.68 'tail -n 5 ~/mass-resolver/resolver.log'` shows
-`SERVICE: connected`.
+`SERVICE: connected`, and the runbook health check (`runbooks/quick-connect-and-health-check.md`) gives
+`good_key=200` / `no_key=401`.
 
-- [ ] **Step 5: Dry-runs (only now, after the dry-run fix is live)**
+- [ ] **Step 6: Dry-runs on both paths (only now, after the dry-run fix is live)**
+
+CLI (legacy `resolve_music`):
 
 ```bash
-ssh costea@192.168.1.68 'cd ~/mass-resolver && for q in "costea mix" "my music - costea (local)" "costea-playlist playlist" "no such thing xyz"; do python3 resolver.py --dry-run --query "$q" | tail -1; done; grep -c "ANNOUNCE via" resolver.log'
+ssh costea@192.168.1.68 'cd ~/mass-resolver && for q in "costea mix" "my music - costea (local)" "costea-playlist playlist" "no such thing xyz"; do python3 resolver.py --dry-run --query "$q" | tail -1; done'
 ```
 
-Expected: the first three `"ok": true` with `local=8/8` (curated) or the `.m3u` URI; the last `"ok": false`;
-the `ANNOUNCE via` count **unchanged** from before the step (record it first).
+Expected JSON: the first two `"ok": true` with `"local": 8, "total": 8` and `"played": false`; the third
+`"ok": true` with the `.m3u` URI; the last `"ok": false`.
 
-- [ ] **Step 6: Live test with the operator present**
+`/command` (the path that spoke on 2026-09-27; secret read on the host, never printed):
+
+```bash
+ssh costea@192.168.1.68 'SEK=$(cat ~/mass-resolver/.http_secret); curl -s -m20 -H "X-Resolver-Key: $SEK" -H "Content-Type: application/json" -d "{\"intent\":\"music\",\"params\":{\"query\":\"no such thing xyz\",\"dry_run\":true}}" http://192.168.122.1:8770/command; echo; grep -c "ANNOUNCE via" ~/mass-resolver/resolver.log'
+```
+
+Expected: a CommandResult with `"ok": false`, `not_found`; the log shows `ANNOUNCE suppressed: dry-run`; and the
+`ANNOUNCE via` count **equals** the Step 2 value. A higher count: STOP and roll back — the fix is not live.
+
+- [ ] **Step 7: Live test with the operator present**
 
 1. Operator: "Okay Nabu, play Costea mix" → log shows `alias='costea mix'` and `PLAYING library://playlist/28`;
-   MA queue holds 8 local items (`ssh … ma_check_queue` read-only, or the MA UI); operator hears it.
+   MA queue holds 8 local items (MA UI, or a read-only queue query); operator hears it. **This is also the first
+   test that `play_media` accepts a URI list** (spec §8, not probeable in Task 1). If MA refuses it (the log shows
+   `PLAY FAILED`, Nabu says "couldn't start playback"): STOP, roll back, and report — the design needs a different
+   play call.
 2. Mid-playlist, operator asks Nabu any question → afterwards check the MA queue: **still 8 items** (clears spec
    §6's concern) or **only the current track** (confirms it; MR-08c stays widened). Record which.
 
-- [ ] **Step 7: Docs and release** — CHANGELOG entry (what shipped, dry-run fix, test counts, the Step 6.2 result);
-update `ONBOARDING.md` current state and `assistant-capabilities.md` (playlists by name/alias; shuffle not yet);
-BACKLOG `MR-08` → done and, per the Step 6.2 result, confirm or narrow `MR-08c`; release the live gate. Docs commit
-separate from code; merge to `main`, push, remove the worktree.
+- [ ] **Step 8: Docs, release the gate, merge** — in the track's merge PR: the `CHANGELOG.md` entry (§9: added at
+merge — what shipped, the dry-run fix, host and local test counts, the Step 7.2 result); `ONBOARDING.md` current
+state; `assistant-capabilities.md` (playlists by name/alias; shuffle not yet); BACKLOG `MR-08` → done and, per Step
+7.2, confirm or narrow `MR-08c`; and the §10 register row released (Holder *(none)*, Status `FREE — released
+<date>` with the host test count and the rollback path `.bak/<ts>`). Docs in a commit separate from code. Push, open
+the PR from the browser URL; after merge, remove the worktree.
 
-**Rollback (any step after 3):** `ssh costea@192.168.1.68 'cd ~/mass-resolver && cp .bak/<ts>/* .'` then the
-operator restarts again. Aliases only: set `"playlist_aliases": {}` in the host `config.json` and restart.
+**Rollback (any step after 3):** `ssh costea@192.168.1.68 'cd ~/mass-resolver && cp .bak/<ts>/*.py .bak/<ts>/config.json . && rm -rf tests && cp -r .bak/<ts>/tests tests'`
+then the operator restarts again (skip the restart if Step 5 has not happened yet). Aliases only: set
+`"playlist_aliases": {}` in the host `config.json` and restart. Release the §10 row as `FREE — rolled back` via PR.
