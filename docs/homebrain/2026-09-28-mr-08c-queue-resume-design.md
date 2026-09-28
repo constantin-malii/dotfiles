@@ -2,8 +2,7 @@
 
 **Status:** v2 draft for operator review (2026-09-28). v1 direction approved by the operator; v2 folds in the
 peer review of v1 (`dotfiles-61`: confirmation lag, late-landing enqueue, barge-in, pause→question→resume,
-position-anchored identity, and six unestablished assumptions). Three open facts need a short live spike
-(§3.2) **before** implementation. Bundles `MR-08e` (§9).
+position-anchored identity, and six unestablished assumptions). Spike 3 (§3.2) settled the three open facts. Bundles `MR-08e` (§9).
 **Backlog:** `MR-08c` (next), `MR-08e`. **Not in scope:** `MR-08b` (shuffle), `MR-08d` (agent knows playlist
 names), `MR-08f` (STT/wake settings — separately gated).
 
@@ -48,17 +47,21 @@ resolver's websocket), against a **playing** queue:
 | `delete_item(<clip queue_item_id>)` once not current | clip removed; queue back to the original 8 |
 | queue item for a TTS clip (seen earlier the same day) | `name` = TTS id; `media_item.uri` = `builtin://radio/http://192.168.122.10:8123/api/tts_proxy/<id>.<ext>` |
 
-### 3.2 Not established — spike 3 required before coding (operator-gated, ~40 s of sound)
+### 3.2 Spike 3 (2026-09-28, operator-approved live playback experiment, throwaway)
 
-1. **Enqueue on a PAUSED queue.** Production keeps `say_pause_before_reply`, so the enqueue hits a paused
-   queue. Does `enqueue: "play"` still insert after current and play the clip?
-2. **Position freshness.** MA throttles `elapsed_time` (a healthy stream showed a frozen position for 20 s —
-   code comment ~1278). Is `elapsed_time` fresh right after a `media_pause`? Does the queue expose
-   `elapsed_time_last_updated` to extrapolate from?
-3. **`play_index` with `seek_position`.** If MA's `player_queues/play_index` accepts `seek_position`, one call
-   replaces play-from-0-then-seek and removes the audible restart blip.
+Queue before: 8 songs, idle. Queue after: the same 8 songs, clip deleted, left paused.
 
-The plan's first task runs spike 3 and records the answers; §4 names the behaviour for each outcome.
+1. **Enqueue on a PAUSED queue: works.** After HA `media_pause`, `enqueue: "play"` inserted the clip at
+   current+1 and played it (`paused → playing`), then the queue went idle on the clip — same as a playing
+   queue.
+2. **Position: capture before the pause.** While playing, `elapsed_time` + (`now − elapsed_time_last_updated`)
+   was accurate. After the pause MA moved `elapsed_time_last_updated` but **did not refresh `elapsed_time`**,
+   so a post-pause read (raw or extrapolated) is wrong.
+3. **`play_index` accepts `seek_position`:** `play_index(index=<id>, seek_position=18)` resumed at ~18 s in
+   one call (no restart blip).
+4. The clip's queue item stores the **exact URL that was played**, wrapped: the spike played the raw LAN URL
+   and read back `builtin://radio/http://192.168.1.104:8123/api/tts_proxy/<id>.mp3`. The resolver plays
+   the normalised internal URL, so exact equality is against the URL `_say` played.
 
 ## 4. Design
 
@@ -69,8 +72,9 @@ The plan's first task runs spike 3 and records the answers; §4 names the behavi
 2. **Exact, position-anchored clip identity.** A reply clip's `queue_item_id` is recorded only when exactly
    one item sits at the expected position (§4.3-4) **and** matches exactly by URI or name. Deletion targets
    **only** recorded ids. Ambiguous or unmatched → unidentified, never deleted.
-3. **Resume by queue id; seek only when seekable.** Resume is `play_index(<captured id>)` (with
-   `seek_position` if spike 3 confirms it; otherwise `seek` after confirmation), only for seekable media.
+3. **Resume by queue id; seek only when seekable.** Resume is one `play_index(<captured id>,
+   seek_position=<p>)` call (§3.2-3); `p` is the captured position only for seekable media within the seek
+   gates (§4.3-7), else 0.
 4. **Phase-aware fallback.** Never replay by URI after the queue resume has succeeded **or may have
    succeeded** (§4.4).
 5. **URI replay is the final safety path**, used only when failure is positively known; always logged.
@@ -79,7 +83,7 @@ The plan's first task runs spike 3 and records the answers; §4 names the behavi
 
 Thin wrappers returning MA's raw reply (callers check `error_code`), unit-tested with a fake socket:
 `queue_state(queue_id)` (`player_queues/get`), `queue_items(queue_id, offset, limit)`,
-`play_index(queue_id, queue_item_id, seek_position=None)`, `seek(queue_id, position)`,
+`play_index(queue_id, queue_item_id, seek_position=0)`,
 `delete_item(queue_id, queue_item_id)`.
 
 **One MA connection per phase, not per turn.** A reply can run up to `say_reply_timeout` with the socket idle,
@@ -94,12 +98,9 @@ Queue mode is used when `settings.say_queue_resume` is true (default **true**; k
 
 1. **Capture** (before the pause): `queue_state`. Needs `current_item.queue_item_id`. Record `resume_id`,
    `current_index`, `media_type`, `duration`, `seekable = media_type == "track" and duration > 0`, and the
-   position:
-   - if spike 3 shows `elapsed_time` is fresh after a pause: re-read `queue_state` **after** the pause and
-     take `elapsed_time` from that read (same item required, else keep the first);
-   - else, if `elapsed_time_last_updated` exists and the queue was playing: extrapolate
-     `pos = elapsed_time + (now - last_updated)`, capped at `duration`;
-   - else take `elapsed_time` as is (worst case: resume a little early).
+   position, from this pre-pause read only (§3.2-2): if the queue is `playing` and
+   `elapsed_time_last_updated` is present, `pos = elapsed_time + (now − elapsed_time_last_updated)`, capped at
+   `duration`; otherwise `pos = elapsed_time`. Never re-read the position after the pause.
    Also log `stale reply clips near current: N` (items within the read window whose URI is a reply clip) so
    leftovers are visible. Barge-in inheritance (§4.5) applies if the current item is a reply clip.
    Capture failure → **legacy mode** for the whole turn, logged `queue capture unavailable (<why>)`.
@@ -125,8 +126,8 @@ Queue mode is used when `settings.say_queue_resume` is true (default **true**; k
 7. **Resume** (replaces step 9 in queue mode), only if `was_playing` and not superseded — per the decision
    table in §4.4. After a confirmed/unconfirmed resume, **settle check** once after one poll interval: if the
    current item is now a reply clip (a late-landing enqueue displaced the song), `play_index` again **once**.
-   Seek (when not done via `seek_position`): only if seekable, `pos ≥ 2 s` and `pos ≤ duration − 5 s` (seeking
-   to the end would skip the song).
+   Seek gates for `seek_position`: seekable, `pos ≥ 2 s` and `pos ≤ duration − 5 s` (seeking to the end
+   would skip the song); otherwise `seek_position=0`.
 8. **Delete recorded clip ids** that are not current. When the turn resumed, all are non-current. When it did
    not resume (zone was idle, turn stopped/paused playback), the last clip is current and cannot be deleted
    (§3.1): it stays, logged, and a **pending resume** is recorded (§4.6).
@@ -218,7 +219,7 @@ item>)`; not seekable, so no seek. Listener-visible result equals today's, with 
 ## 7. Testing (TDD; new `tests/test_queue_resume.py`, plus `tests/test_maconn.py`)
 
 A `FakeQueue` models MA as observed in §3 and is configurable: enqueue-play inserts after current and plays it
-(also on a paused queue — or not, per spike 3); clip end → idle on the clip, or never idle; delete of the
+(also on a paused queue, §3.2-1); clip end → idle on the clip, or never idle; delete of the
 current item is a no-op; play_index/seek/delete by id; **confirmation lag** (N reads before the new current
 item shows); **late landing** (a raised enqueue whose clip appears after K reads); failure injection per call.
 The fake HA's `music_assistant.play_media` and the fake MA act on the same `FakeQueue`. Existing tests stay
@@ -246,7 +247,7 @@ Required cases, each asserting queue contents and calls, not only flags:
 - **Late landing:** enqueue raises, clip lands current → finish-wait then resume; clip lands after the
   resume → settle check resumes once more and the clip is deleted.
 - **Clip never reaches idle:** finish exits on budget → resume, clip deleted.
-- **Paused queue at enqueue** (per spike 3 outcome).
+- **Paused queue at enqueue** (§3.2-1): paused queue → clip inserted and played the same way.
 - **Barge-in:** B supersedes A mid-clip → queue == original, song resumed once (by B), both turns' clips
   deleted; B supersedes A **before A's post-clip phase** (A recorded nothing) → B records A's clip from its
   own capture and deletes it.
@@ -281,6 +282,5 @@ data (the query is what was spoken).
 
 ## 10. Open points
 
-- Spike 3 (§3.2) — answers recorded in the plan's first task and reflected in §4.3-1, §4.3-3, §4.3-7.
 - The announce chime's MA queue form: covered by exact equality against the URL `_say` actually played
   (resolved before `_say`); confirm when AN-01 is re-enabled (announcements are disabled today).
