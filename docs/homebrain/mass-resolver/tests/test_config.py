@@ -58,6 +58,10 @@ class ConfigTest(unittest.TestCase):
     def test_malformed_playlist_aliases_falls_back_to_empty_dict(self):
         self.assertEqual(config.Settings({"playlist_aliases": ["x"]}).playlist_aliases, {})
 
+    def test_say_queue_resume_default_on_and_switchable(self):
+        self.assertTrue(config.Settings({}).say_queue_resume)
+        self.assertFalse(config.Settings({"say_queue_resume": False}).say_queue_resume)
+
 
 class InteractionTunablesTest(unittest.TestCase):
     def test_defaults(self):

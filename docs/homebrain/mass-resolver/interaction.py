@@ -18,6 +18,105 @@ UNREADABLE_LIMIT = 3
 # narrow the critical section, which is a real check-then-act and a larger change.
 LOCK_HELD_CALL_TIMEOUT = 5.0
 
+# --- MR-08c queue mode (design docs/homebrain/2026-09-28-mr-08c-queue-resume-design.md) -------------------
+_CLIP_WRAPPERS = ("builtin://radio/", "builtin://track/")   # MA's two measured wrappings of a played URL
+CONFIRM_BUDGET_S = 4.0         # how long to poll for play_index to show (MA updates queue state async)
+SEEK_MIN_S = 2.0               # below this, resume from the start
+SEEK_END_MARGIN_S = 5.0        # seeking this close to the end would skip the song
+MAX_EXTRAPOLATE_S = 60.0       # elapsed_time_last_updated is MA's clock, `now` is ours: bound the delta
+
+
+def _ma_ok(reply):
+    return isinstance(reply, dict) and "error_code" not in reply
+
+
+def _float(value):
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def is_reply_clip_uri(uri):
+    """A spent reply clip sitting in an MA queue: a TTS render, a signed URL, or the announce chime.
+    Deliberately NARROWER than _is_reply_uri: a radio station added to MA by URL is also stored as
+    builtin://radio/http..., and must stay a resumable queue item (peer review of the plan, finding 8)."""
+    u = (uri or "").lower()
+    return ("tts_proxy" in u or "authsig=" in u
+            or (u.startswith("builtin://track/") and "/media/local/" in u))
+
+
+def parse_queue_capture(reply, now):
+    """player_queues/get reply -> (capture, None) or (None, why). Position per design 4.3-1: captured
+    before the pause; extrapolated from elapsed_time_last_updated only while playing (MA does not refresh
+    elapsed_time on pause -- spike 3), and only for a sane delta between the two clocks."""
+    if not _ma_ok(reply):
+        return None, "ma error %s" % ((reply or {}).get("error_code") if isinstance(reply, dict) else "no reply")
+    q = reply.get("result") or {}
+    ci = q.get("current_item") or {}
+    qid = ci.get("queue_item_id")
+    if not qid:
+        return None, "no current item"
+    mi = ci.get("media_item") or {}
+    dur = _float(ci.get("duration") or mi.get("duration"))
+    pos = _float(q.get("elapsed_time"))
+    extrapolated = 0.0
+    upd = q.get("elapsed_time_last_updated")
+    if q.get("state") == "playing" and upd is not None:
+        delta = now - _float(upd)
+        if 0.0 <= delta <= MAX_EXTRAPOLATE_S:
+            pos += delta
+            extrapolated = delta
+    if dur > 0:
+        pos = min(pos, dur)
+    return {"item": qid, "index": q.get("current_index"), "pos": pos, "duration": dur,
+            "seekable": mi.get("media_type") == "track" and dur > 0,
+            "uri": mi.get("uri") or ci.get("uri") or "", "state": q.get("state"),
+            "extrapolated": extrapolated}, None
+
+
+def clip_uri_of(item):
+    """The URL a queue item was played from, with exactly one known MA wrapper removed."""
+    mi = item.get("media_item") or {}
+    u = mi.get("uri") or item.get("uri") or ""
+    for w in _CLIP_WRAPPERS:
+        if u.startswith(w):
+            return u[len(w):]
+    return u
+
+
+def tts_id(uri):
+    """The name MA gives a TTS clip: the URL's last path segment without query or extension."""
+    seg = (uri or "").split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1]
+    return seg.rsplit(".", 1)[0] if "." in seg else seg
+
+
+def anchored_clip(items, offset, anchor_index, played_uri):
+    """Exact + position-anchored identity (design 4.3-4). `items` is a window read starting at queue index
+    `offset`; the clip must sit at anchor_index + 1 and match the played URL exactly (name only when the
+    item carries no URI). -> (queue_item_id, index, None) or (None, None, why)."""
+    want = anchor_index + 1
+    rel = want - offset
+    if rel < 0 or rel >= len(items):
+        return None, None, "nothing at index %d" % want
+    it = items[rel]
+    u = clip_uri_of(it)
+    if u:
+        if u == played_uri:
+            return it.get("queue_item_id"), want, None
+        return None, None, "item at index %d differs from the played url" % want
+    if it.get("name") and it.get("name") == tts_id(played_uri):
+        return it.get("queue_item_id"), want, None
+    return None, None, "item at index %d is not the clip" % want
+
+
+def seek_target(target):
+    """seek_position for play_index (design 4.3-7 gates); 0 means from the start."""
+    p, d = target["pos"], target["duration"]
+    if target["seekable"] and p >= SEEK_MIN_S and p <= d - SEEK_END_MARGIN_S:
+        return int(p)
+    return 0
+
 
 class InteractionCapability(capability.Capability):
     name = "interaction"
