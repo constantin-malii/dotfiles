@@ -415,6 +415,31 @@ class QueueModeTest(unittest.TestCase):
         self.assertEqual(r["metadata"]["resume"], "none")
         self.assertEqual(q.cur()["media_item"]["uri"], "builtin://radio/" + CLIP)   # left, logged
 
+    def test_play_index_error_code_falls_back_to_uri_without_delay(self):
+        # fix round 1, item 1: the fallback guard must be is_reply_clip_uri, not _is_reply_uri --
+        # a URL-added radio station is a reply-clip URI's opposite case (a STATION, not a clip), so
+        # the old `_is_reply_uri` guard (built for the legacy single-URI replay) would refuse to
+        # replay it here. Also covers item 4: one queue_state read should decide the outcome --
+        # polling the full CONFIRM_BUDGET_S after a KNOWN error_code only delays the fallback.
+        q = FakeQueue([station(STREAM)], current=0)
+        q.fail["play_index"] = ["error"]
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "fallback_uri")
+        self.assertIn(("replace", STREAM), q.calls)
+        self.assertEqual(len([c for c in q.calls if c[0] == "play_index"]), 1)
+        self.assertEqual(len([c for c in q.calls if c[0] == "replace"]), 1)
+
+    def test_finish_keeps_the_last_clip_when_current_is_unknown(self):
+        # fix round 1, item 3: a failed queue_state read at finish must not be read as "nothing is
+        # current" -- that would let the last recorded clip (the one most likely to BE current) get
+        # "deleted" as MA's current-item no-op, silently dropping its id and overcounting deletes.
+        q = FakeQueue([track(1), track(2)], current=0, state="idle")
+        q.fail["queue_state"] = [None, None, OSError("read")]   # capture ok, record ok, finish fails
+        cap = new_cap()
+        r = say(cap, ctx_for(q))
+        self.assertEqual(r["metadata"]["clips_deleted"], 0)
+        self.assertEqual(len(cap._queue_targets[ZONE]["clips"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

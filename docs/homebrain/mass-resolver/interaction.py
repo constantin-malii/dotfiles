@@ -1588,12 +1588,18 @@ class InteractionCapability(capability.Capability):
         self._queue_publish_clips(zone, my_gen, qm)
         LOG.info("SAY req=%s zone=%s clip=%s queue_item=%s", rid, zone, clip, qid)
 
-    def _queue_confirm(self, ma, queue_id, item, poll_secs):
-        """Poll (bounded, design 4.4) until `item` is current. -> (seen, any_read_ok)."""
+    def _queue_confirm(self, ma, queue_id, item, poll_secs, tries=None):
+        """Poll (bounded, design 4.4) until `item` is current. -> (seen, any_read_ok).
+
+        `tries=None` uses the budget-derived count; a caller that already knows play_index came
+        back with a KNOWN error (e.g. an error_code) passes `tries=1` -- polling the full
+        CONFIRM_BUDGET_S in that case only delays the URI fallback by seconds of silence for an
+        outcome that is already decided."""
         if ma is None:
             return False, False
         reads_ok = False
-        tries = max(1, int(CONFIRM_BUDGET_S / max(poll_secs, 0.05)))
+        if tries is None:
+            tries = max(1, int(CONFIRM_BUDGET_S / max(poll_secs, 0.05)))
         for i in range(tries):
             try:
                 s = ma.queue_state(queue_id)
@@ -1631,7 +1637,11 @@ class InteractionCapability(capability.Capability):
                         why = "ma error %s" % ((r or {}).get("error_code") if isinstance(r, dict) else "no reply")
                 except Exception as e:
                     called, why = "raised", "play_index raised (%r)" % (e,)
-                seen, reads_ok = self._queue_confirm(ma, qid, t["item"], poll_secs)
+                # A KNOWN error_code means the outcome is already decided -- one read is enough to
+                # learn whether it landed anyway; polling the full budget only delays the URI
+                # fallback (design 4.4 peer review finding).
+                confirm_tries = 1 if called == "error" else None
+                seen, reads_ok = self._queue_confirm(ma, qid, t["item"], poll_secs, tries=confirm_tries)
         finally:
             self._ma_close(ma)
         if seen:
@@ -1653,7 +1663,7 @@ class InteractionCapability(capability.Capability):
             LOG.error("SAY req=%s zone=%s resume unknown (%s); not replaying", rid, zone, why)
             return False
         LOG.warning("SAY req=%s zone=%s resume by queue failed (%s); URI fallback", rid, zone, why)
-        if source_id and not self._is_reply_uri(source_id):
+        if source_id and not is_reply_clip_uri(source_id):
             try:
                 self._say_call(ctx, rid, zone, "music_assistant", "play_media",
                                {"entity_id": zone, "media_id": source_id}, timeout=call_timeout)
@@ -1679,9 +1689,18 @@ class InteractionCapability(capability.Capability):
                         cur = ((s.get("result") or {}).get("current_item") or {}).get("queue_item_id")
                 except Exception:
                     pass
+                # The read failed (or MA never replied): `cur` is unknown, not "nothing is current".
+                # Guessing "not current" here would let the LAST recorded clip -- the one most likely
+                # to actually be sitting as current -- get "deleted" as a no-op (MA reports success
+                # for deleting the current item) while we silently drop its id and overcount deletes.
+                unknown_cur_skip = (qm["clips"][-1] if cur is None and qm["resume"] != "confirmed"
+                                    else None)
                 for cid in list(qm["clips"]):
                     if cid == cur:
                         LOG.info("SAY req=%s zone=%s clip left as current item %s (no resume)", rid, zone, cid)
+                        continue
+                    if cid == unknown_cur_skip:
+                        LOG.info("SAY req=%s zone=%s clip %s kept: current item unknown", rid, zone, cid)
                         continue
                     try:
                         r = ma.delete_item(qm["queue_id"], cid)
@@ -2090,8 +2109,12 @@ class InteractionCapability(capability.Capability):
             if qm is not None:
                 if was_playing and qm["target"] is not None and not superseded():
                     replayed = self._queue_resume(ctx, rid, zone, qm, source_id, call_timeout)
-                self._queue_finish(ctx, rid, zone, qm, my_gen)
-                queue_done[0] = True
+                if not superseded():
+                    # A turn superseded after the clip loop (e.g. during the volume restore) must
+                    # NOT finish here -- its clips belong to whichever successor captured next; the
+                    # `finally` already routes that case to _queue_superseded_exit (design 4.5).
+                    self._queue_finish(ctx, rid, zone, qm, my_gen)
+                    queue_done[0] = True
             elif was_playing and source_id and not superseded():
                 try:
                     queue_may_be_replaced[0] = True
