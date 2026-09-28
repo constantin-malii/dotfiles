@@ -31,6 +31,15 @@ class MA(object):
         res = (r or {}).get("result")
         return res.get("items") if isinstance(res, dict) else (res or [])
 
+    def playlist_tracks(self, item_id, provider="library", limit=500):
+        """Tracks of a library playlist (MR-08). Capped: a huge playlist must not make the
+        synchronous tool path slow."""
+        r = self.cmd("music/playlists/playlist_tracks", item_id=str(item_id),
+                     provider_instance_id_or_domain=provider)
+        res = (r or {}).get("result")
+        items = res.get("items") if isinstance(res, dict) else (res or [])
+        return list(items)[:limit]
+
     def play(self, queue_id, uri, option="replace"):
         # "replace" => fresh queue each time (immune to stale/contaminated queue state)
         return self.cmd("player_queues/play_media", queue_id=queue_id, media=uri, option=option)

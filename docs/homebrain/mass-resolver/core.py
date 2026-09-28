@@ -97,11 +97,15 @@ def dispatch(ctx, intent, params, rid=None):
 
     # Single TTS owner: speak via Speaker when spoken_text is present and conditions met.
     # Exception: during a satellite turn the pipeline speaks the reply, so stand down (no double-speak).
+    # A dry-run never speaks -- request flag or the settings-wide flag (MR-08 spec 3.4).
     spk = result.get("spoken_text")
-    if spk and ctx.speaker is not None:
+    dry = bool((params or {}).get("dry_run")) or bool(getattr(ctx.settings, "dry_run", False))
+    if spk and ctx.speaker is not None and not dry:
         if _satellite_turn_in_flight(ctx):
             LOG.info("req=%s ANNOUNCE suppressed: satellite turn in flight; the pipeline speaks the reply", rid)
         elif result.get("ok") or ctx.settings.announce_failures:
             ctx.speaker.speak(spk)
+    elif spk and dry:
+        LOG.info("req=%s ANNOUNCE suppressed: dry-run", rid)
 
     return result

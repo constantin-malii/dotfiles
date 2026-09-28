@@ -310,5 +310,35 @@ class NewsDispatchTest(unittest.TestCase):
         self.assertEqual(spk.said, [])
 
 
+class DryRunSilenceTest(unittest.TestCase):
+    def test_music_not_found_dry_run_param_is_silent(self):
+        ma = FakeMA(data={"artist": [], "album": [], "track": [], "playlist": []})
+        spk = FakeSpeaker()
+        r = core.dispatch(FakeCtx(ma, speaker=spk), "music", {"query": "Nonexistent", "dry_run": True})
+        self.assertFalse(r["ok"])
+        self.assertEqual(spk.said, [])
+
+    def test_music_not_found_settings_dry_run_is_silent(self):
+        ma = FakeMA(data={"artist": [], "album": [], "track": [], "playlist": []})
+        spk = FakeSpeaker()
+        s = FakeSettings(); s.dry_run = True
+        r = core.dispatch(FakeCtx(ma, speaker=spk, settings=s), "music", {"query": "Nonexistent"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(spk.said, [])
+
+    def test_radio_find_dry_run_is_silent(self):          # cross-capability effect, intended (spec 3.4)
+        ma = FakeMA(search=[rb_item("u%d" % i, "Jazz %d" % i) for i in range(4)])
+        spk = FakeSpeaker()
+        r = core.dispatch(FakeCtx(ma, speaker=spk), "radio", {"mode": "find", "genre": "jazz", "dry_run": True})
+        self.assertTrue(r["ok"])
+        self.assertEqual(spk.said, [])
+
+    def test_not_found_without_dry_run_still_speaks(self):
+        ma = FakeMA(data={"artist": [], "album": [], "track": [], "playlist": []})
+        spk = FakeSpeaker()
+        core.dispatch(FakeCtx(ma, speaker=spk), "music", {"query": "Nonexistent"})
+        self.assertEqual(len(spk.said), 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

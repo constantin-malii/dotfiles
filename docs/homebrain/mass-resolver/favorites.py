@@ -42,40 +42,50 @@ def _alias_map(radio_cfg):
 _MIN_ALIAS_KEY = 4          # shorter keys would collide with ordinary words inside a long query
 
 
-def resolve_alias(radio_cfg, query):
-    """Map a spoken/STT-mangled station name onto its canonical name via radio.json `aliases`
-    (returns the query unchanged when there is no alias). Exposed so the MA/RadioBrowser search
-    can use the SAME canonical name as the local favorites match -- otherwise an alias only ever
-    helps stations that happen to be listed in radio.json.
+def match_alias(aliases, query, substring=False):
+    """Provider-neutral alias match -> (key, target) or None. `key` keeps its configured casing.
 
-    Matching is deliberately NOT whole-string equality. The assistant relays the transcription
-    verbatim, so the station argument arrives noisy and over-long -- spelled-out letters and all,
-    e.g. "Radio Norok N O R O C". An alias key is therefore looked for INSIDE the query, longest
-    key first so the most specific alias wins, and also against a compacted form so a spelled-out
-    "N O R O C" collapses to "noroc". Keys shorter than 4 chars are skipped: they would fire on
-    ordinary words."""
-    aliases = _alias_map(radio_cfg)
+    Exact first (case-insensitive, then compacted so "Costea-Mix" == "costea mix"). With
+    substring=True (radio only) an alias key is also looked for INSIDE the query, longest key first,
+    because radio station arguments arrive noisy and over-long. Playlists use the exact form only:
+    a music query spans the whole library and a short alias must not swallow an unrelated title."""
     q = (query or "").strip()
     if not q or not aliases:
-        return q
-    ql = q.lower()
+        return None
     lowered = {}
     for k, v in aliases.items():
-        lowered[k.lower()] = v
+        lowered[k.lower()] = (k, v)
+    ql = q.lower()
     if ql in lowered:                       # exact alias, the cheap and unambiguous case
         return lowered[ql]
     qc = compact(ql)
     # Longest key first so the most specific alias wins; then alphabetical, so equal-length keys
-    # (e.g. "russian radio" / "russian songs") resolve the same way on every run rather than
-    # inheriting dict order.
-    for k in sorted(lowered.keys(), key=lambda x: (-len(x), x)):
+    # resolve the same way on every run rather than inheriting dict order.
+    ordered = sorted(lowered.keys(), key=lambda x: (-len(x), x))
+    if not substring:
+        for k in ordered:
+            if qc and compact(k) == qc:
+                return lowered[k]
+        return None
+    for k in ordered:
         kc = compact(k)
         if len(kc) < _MIN_ALIAS_KEY:
             continue
         if k in ql or (kc and kc in qc):
-            LOG.info("radio alias matched %r inside %r -> %r", k, q, lowered[k])
+            LOG.info("radio alias matched %r inside %r -> %r", k, q, lowered[k][1])
             return lowered[k]
-    return q
+    return None
+
+
+def resolve_alias(radio_cfg, query):
+    """Map a spoken/STT-mangled station name onto its canonical name via radio.json `aliases`
+    (returns the query unchanged when there is no alias). Exposed so the MA/RadioBrowser search
+    can use the SAME canonical name as the local favorites match -- otherwise an alias only ever
+    helps stations that happen to be listed in radio.json. Substring matching, keys shorter than 4
+    chars skipped (they would fire on ordinary words) -- see match_alias."""
+    q = (query or "").strip()
+    hit = match_alias(_alias_map(radio_cfg), q, substring=True)
+    return hit[1] if hit else q
 
 
 def by_name(radio_cfg, query):

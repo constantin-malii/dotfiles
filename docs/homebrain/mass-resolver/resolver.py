@@ -129,6 +129,11 @@ def serve(here):
             time.sleep(backoff); backoff = min(backoff * 2, 60)
 
 
+def _should_announce(res, settings, dry_run):
+    """One-shot CLI failure announce. Never on a dry-run (MR-08 spec 3.4)."""
+    return (not dry_run) and (not res.get("ok")) and bool(res.get("spoken")) and bool(settings.announce_failures)
+
+
 def main():
     config.setup_logging(HERE)
     ap = argparse.ArgumentParser()
@@ -181,7 +186,7 @@ def main():
     finally:
         ma.close()
     # honest feedback also on the one-shot path (when announce configured)
-    if (not res.get("ok")) and res.get("spoken") and ctx.settings.announce_failures:
+    if _should_announce(res, ctx.settings, a.dry_run or ctx.settings.dry_run):
         try:
             ctx.ha.connect(); ctx.ha.announce(res["spoken"], ctx.settings); ctx.ha.close()
         except Exception as e:
