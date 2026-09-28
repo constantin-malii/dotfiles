@@ -1556,11 +1556,15 @@ class InteractionCapability(capability.Capability):
             elif cid != "":
                 blank_for = 0.0
             if (ended and clip_still_current is not None and state.get("state") == "playing"
-                    and cid != ""):
+                    and cid != "" and self._clock() < finish_deadline):
                 # Queue mode: HA says playing but names another item -- ask MA before counting it.
                 # Only a definite True overrides; False and None (read failed) keep today's rule.
                 # Termination is unchanged: this iteration still sleeps and adds to `elapsed`, so the
                 # finish timeout and the turn deadline bound the loop exactly as before.
+                # Gated on the clip's own finish deadline: with no turn deadline (say/say_text) only
+                # the accumulated sleep bounds this loop, and a blocking MA check is not counted in it,
+                # so a stalled clip plus a slow-but-answering MA could otherwise hold the zone far past
+                # the budget. Past the deadline the HA rule applies alone.
                 if clip_still_current() is True:
                     LOG.info("SAY req=%s zone=%s clip=%s HA reports state=%s cid=%s but MA still plays "
                              "the clip; waiting", rid, zone, clip, state.get("state"),

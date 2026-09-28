@@ -152,6 +152,7 @@ class FakeQueue(object):
         self.ma_fails_in_flicker = False             # queue_state raises when read during a flicker read
         self.events = []                             # ("ha", state, cid) / ("ma",) in read order
         self.clip_reads_at_play_index = []           # (clip_reads left, state) at each play_index
+        self.on_flicker_ma_read = None               # hook per such read (e.g. a slow MA advancing a clock)
 
     def _f(self, name):
         seq = self.fail.get(name)
@@ -206,6 +207,9 @@ class FakeQueue(object):
     # MA side
     def queue_state(self):
         self.events.append(("ma",))
+        if self.in_flicker:
+            if self.on_flicker_ma_read is not None:
+                self.on_flicker_ma_read()
         if self.ma_fails_in_flicker and self.in_flicker:
             self.in_flicker = False                  # only the read made for THIS flicker poll fails
             raise OSError("MA read failed during the flicker")
@@ -1091,6 +1095,46 @@ class QueueFlickerTest(unittest.TestCase):
             say(new_cap(), ctx_for(q))
         self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
         self.assertGreater(q.clip_reads_at_play_index[0][0], 0)          # ended on the HA rule
+
+    def test_raised_enqueue_that_landed_also_waits_out_the_flicker(self):
+        # The design 4.3-5 wait (_queue_after_raised_enqueue -> issue=False) is queue mode too.
+        q = self.radio()
+        q.enqueue_raises_after_landing = True
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        self.assertEqual(q.ha_flicker_reads, 0)
+        self.assertEqual(len([c for c in q.calls if c[0] == "enqueue"]), 1)
+        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
+        self.assertEqual(q.ids(), ["st1"])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(len([m for m in lg.output if "but MA still plays the clip; waiting" in m]), 3)
+
+    def test_ma_check_stops_at_the_clip_finish_deadline(self):
+        # say has no turn deadline, so only accumulated sleep bounds the poll and a blocking MA check is not
+        # counted in it. A stalled clip + HA flickering on EVERY read + a slow-but-answering MA (2 s per check)
+        # must not hold the zone past the clip's own finish deadline: past it, the HA rule applies again.
+        clk = [1000.0]
+        q = self.radio(flicker=10 ** 6)
+        q.clip_never_idle = True
+        def slow_ma():
+            clk[0] += 2.0
+        q.on_flicker_ma_read = slow_ma
+        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: clk[0],
+                                                sleeper=FakeSleeper())
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q))
+        # 30 s budget / 2 s per check -> about 15 checks, then two HA "ended" reads end the wait. Without the
+        # gate every one of the 60 polls the sleep budget allows would consult MA.
+        # Each consulted check returns True here (stalled clip still current + playing), so each logs one
+        # override line: that count IS the number of checker calls made during the wait.
+        overrides = [m for m in lg.output if "but MA still plays the clip; waiting" in m]
+        self.assertGreater(len(overrides), 0)
+        self.assertLessEqual(len(overrides), 16)
+        self.assertTrue(any("finish-poll exit" in m for m in lg.output))  # ended on the HA rule
+        self.assertFalse(any("finish-poll gave up" in m for m in lg.output))
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
+        self.assertEqual(r["metadata"]["resume"], "queue")
 
     def test_ha_idle_ends_the_wait_without_an_ma_check(self):
         q = self.radio(flicker=0, play_reads=2)
