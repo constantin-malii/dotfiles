@@ -1614,7 +1614,7 @@ class InteractionCapability(capability.Capability):
                 self._sleeper(poll_secs)
         return False, reads_ok
 
-    def _queue_resume(self, ctx, rid, zone, qm, source_id, call_timeout):
+    def _queue_resume(self, ctx, rid, zone, qm, source_id, call_timeout, superseded=None):
         """Design 4.4 decision table. True when the source is (or may be) playing again."""
         t = qm["target"]
         qid = qm["queue_id"]
@@ -1657,7 +1657,11 @@ class InteractionCapability(capability.Capability):
             qm["seeked"] = seek > 0
             LOG.info("SAY req=%s zone=%s resumed by queue item=%s outcome=%s seek=%s",
                      rid, zone, t["item"], outcome, seek if seek else "skipped")
-            self._queue_settle(ctx, rid, zone, qm, seek, poll_secs, known_clips)
+            # §4.3-7/§4.4: a turn superseded during the play_index + confirm poll no longer owns the
+            # zone -- its successor's clip is not ours to displace. Skip the settle read/re-resume
+            # entirely rather than let it race the successor's own turn.
+            if superseded is None or not superseded():
+                self._queue_settle(ctx, rid, zone, qm, seek, poll_secs, known_clips, superseded=superseded)
             return True
         if outcome == "unknown":
             LOG.error("SAY req=%s zone=%s resume unknown (%s); not replaying", rid, zone, why)
@@ -1680,29 +1684,48 @@ class InteractionCapability(capability.Capability):
         out = {"started": False, "issued": True, "clip": one_clip, "ended": False, "gave_up": "unreadable"}
         ma = None
         cur = None
+        cur_index = None
         try:
             ma = self._ma_open(ctx)
             s = ma.queue_state(qm["queue_id"])
             if _ma_ok(s):
-                cur = (s.get("result") or {}).get("current_item") or {}
+                res = s.get("result") or {}
+                cur = res.get("current_item") or {}
+                cur_index = res.get("current_index")
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s after raised enqueue: read failed (%r)", rid, zone, e)
         finally:
             self._ma_close(ma)
-        if cur and clip_uri_of(cur) == one_uri:
+        # Identify by the same exact rule as anchored_clip (design 4.3-4): URI equality after
+        # wrapper strip, or an equal name when the item carries no URI -- not a looser containment
+        # check. A window of one item anchored at its own index makes anchored_clip apply that rule
+        # here too, rather than duplicating it.
+        landed = False
+        if cur:
+            if cur_index is not None:
+                qid, _, _ = anchored_clip([cur], cur_index, cur_index - 1, one_uri)
+                landed = qid == cur.get("queue_item_id")
+            else:
+                landed = clip_uri_of(cur) == one_uri
+        if landed:
             return self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip, opts, superseded,
                                             enqueue="play", issue=False)
         return out
 
-    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips):
+    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips, superseded=None):
         """Design 4.3-7: one settle re-read after a poll interval. A late-landing enqueue can put a NEW reply
         clip in front of the song; if so, record it (exact + anchored) and resume ONCE more. A clip we already
         knew before the resume just means MA is lagging -- re-resuming would restart the song (peer review
-        finding 1)."""
+        finding 1). A turn superseded by the time settle runs no longer owns the zone -- displacing whatever
+        its successor put there would cut the successor's own reply off (design 4.3-7/4.4)."""
+        if superseded is not None and superseded():
+            return
         self._sleeper(poll_secs)
         t = qm["target"]
         ma = None
         try:
+            if superseded is not None and superseded():
+                return
             ma = self._ma_open(ctx)
             s = ma.queue_state(qm["queue_id"])
             if not _ma_ok(s):
@@ -1715,15 +1738,21 @@ class InteractionCapability(capability.Capability):
             if not is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""):
                 return
             idx = q.get("current_index")
-            if idx is not None and idx >= 1:
-                r = ma.queue_items(qm["queue_id"], offset=idx - 1, limit=2)
+            identified = False
+            if idx is not None and idx >= 0:
+                off = max(0, idx - 1)
+                r = ma.queue_items(qm["queue_id"], offset=off, limit=2)
                 items = (r.get("result") or []) if _ma_ok(r) else []
                 for played in qm["played"]:
-                    got, _, _ = anchored_clip(items, idx - 1, idx - 1, played)
+                    got, _, _ = anchored_clip(items, off, idx - 1, played)
                     if got == cid:
                         if cid not in qm["clips"]:
                             qm["clips"].append(cid)
+                        identified = True
                         break
+            if not identified:
+                qm["unidentified"] += 1
+                LOG.warning("SAY req=%s zone=%s settle: late clip %s UNIDENTIFIED; not recorded", rid, zone, cid)
             ma.play_index(qm["queue_id"], t["item"], seek_position=seek)
             LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; resumed again",
                         rid, zone, cid, t["item"])
@@ -1775,13 +1804,16 @@ class InteractionCapability(capability.Capability):
         with self._lock:
             rec = self._queue_targets.get(zone)
             if rec is not None and rec.get("gen") == my_gen:
-                if qm["resume"] == "confirmed" or qm["target"] is None:
+                # design 4.6: only no-resume / unconfirmed / unknown leave a pending record. A
+                # "fallback_uri" outcome already REPLACED the queue (ha_play_media/play_media), so
+                # the captured item is gone -- keeping a pending record for it would resume nothing.
+                if qm["resume"] in ("confirmed", "fallback_uri") or qm["target"] is None:
                     del self._queue_targets[zone]
                 else:
                     # Did not resume, or resume unconfirmed/unknown: a later "resume" continues from here.
                     rec["live"] = False
                     rec["clips"] = list(qm["clips"])
-        if qm["target"] is not None and qm["resume"] != "confirmed":
+        if qm["target"] is not None and qm["resume"] not in ("confirmed", "fallback_uri"):
             LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
                      rid, zone, qm["target"]["item"], qm["clips"])
 
@@ -2170,7 +2202,8 @@ class InteractionCapability(capability.Capability):
             replayed = False
             if qm is not None:
                 if was_playing and qm["target"] is not None and not superseded():
-                    replayed = self._queue_resume(ctx, rid, zone, qm, source_id, call_timeout)
+                    replayed = self._queue_resume(ctx, rid, zone, qm, source_id, call_timeout,
+                                                  superseded=superseded)
                 if not superseded():
                     # A turn superseded after the clip loop (e.g. during the volume restore) must
                     # NOT finish here -- its clips belong to whichever successor captured next; the
@@ -2261,7 +2294,8 @@ class InteractionCapability(capability.Capability):
                         if was_playing and qm["target"] is not None and qm["resume"] == "none":
                             if queue_may_be_replaced[0]:
                                 self._queue_resume(ctx, rid, zone, qm, source_id,
-                                                   int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                                                   int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0,
+                                                   superseded=superseded)
                             elif paused_by_us[0]:
                                 self._say_call(ctx, rid, zone, "media_player", "media_play", {"entity_id": zone})
                         self._queue_finish(ctx, rid, zone, qm, my_gen)

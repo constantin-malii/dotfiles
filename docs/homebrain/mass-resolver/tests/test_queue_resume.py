@@ -467,9 +467,13 @@ class QueueFailureTest(unittest.TestCase):
 
     def test_play_index_error_and_reads_show_other_item_falls_back_once(self):
         q = self.q8(); q.fail["play_index"] = ["error"]
-        r = say(new_cap(), ctx_for(q))
+        cap = new_cap()
+        r = say(cap, ctx_for(q))
         self.assertEqual(r["metadata"]["resume"], "fallback_uri")
         self.assertEqual(self.replaces(q), [("replace", "library://track/3")])
+        # design 4.6: fallback_uri already replaced the queue -- the captured item is gone, so no
+        # pending record should be left behind for it (only no-resume/unconfirmed/unknown do that).
+        self.assertNotIn(ZONE, cap._queue_targets)
 
     def test_play_index_error_and_reads_fail_falls_back_once(self):
         q = self.q8(); q.fail["play_index"] = ["error"]
@@ -550,6 +554,11 @@ class QueueFailureTest(unittest.TestCase):
         self.assertEqual(q.cur()["queue_item_id"], "t3")
         self.assertEqual(self.replaces(q), [])
         self.assertEqual(r["metadata"]["resume"], "queue")
+        # pins the §4.3-5 wait itself, not just its side effects: only the wait branch
+        # (_play_clip_and_wait with issue=False) observes the clip actually starting, and there
+        # must be no SECOND play_media call trying to enqueue it again.
+        self.assertTrue(r["metadata"]["clips"][0]["started"])
+        self.assertEqual(len([c for c in q.calls if c[0] == "enqueue"]), 1)
 
     def test_enqueue_raised_not_landed_is_not_reported_certainly_silent(self):
         q = self.q8(); q.enqueue_raises_without_landing = True
@@ -564,6 +573,24 @@ class QueueFailureTest(unittest.TestCase):
         self.assertEqual(len(self.play_indexes(q)), 2)       # resumed once more
         self.assertEqual(q.cur()["queue_item_id"], "t3")
         self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+
+    def test_settle_yields_to_a_newer_turn(self):
+        # fix round 1, item 1: a successor B enqueuing its own reply during A's confirm poll (up to
+        # CONFIRM_BUDGET_S) must not have its clip displaced by A's settle check -- A is superseded
+        # and no longer owns the zone (spec §4.3-7 / §4.4: a superseded turn does not resume).
+        q = self.q8(); q.clip_lands_after_play_index = CLIP2
+        box = {}
+
+        def hook(n):
+            if any(c[0] == "play_index" for c in q.calls):
+                with box["cap"]._lock:
+                    gens = box["cap"]._say_gen
+                    gens[ZONE] = gens.get(ZONE, 0) + 1
+
+        cap = new_cap(hook)
+        box["cap"] = cap
+        say(cap, ctx_for(q))
+        self.assertEqual(len(self.play_indexes(q)), 1)
 
 
 if __name__ == "__main__":
