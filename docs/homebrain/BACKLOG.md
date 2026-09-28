@@ -29,11 +29,15 @@ working backlog, every item with all 14 fields as explicit columns.
 - `INF-01` Adopt parallel-agent operating model + maintain this `BACKLOG.md` *(INF)*
 
 ### 🔵 Ready / Next *(all read-only / design / decision; no live gate)*
-- `RQ-03` Music-source / Inc 3 direction decision *(RQ)*
 - `RQ-06` Z-Wave coordinator adoption decision *(RQ)*
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
 - `NL-02` Prompt / `assistant-capabilities.md` lockstep discipline *(NL)*
-- `MR-05` Tidy verbose RadioBrowser station names *(MR)*
+
+> **Pruned 2026-09-27.** Two entries here were stale and sent a reader at work that was already
+> finished. **`MR-05`** shipped 2026-07-07 (`00c795b`) and is deployed — moved to Done below.
+> **`RQ-03`** was decided 2026-07-06 (local-first; see `2026-07-06-rq-03-music-source-decision.md`)
+> and its own detail row already said so. A queue is only useful if its entries are real, so they were
+> removed rather than annotated in place.
 
 ### 🟡 Later
 - `MR-Inc3` acquire (Lidarr, guarded — unblocked by RQ-03 2026-07-06) · `MR-Inc2B` · `MR-Inc4B` · `MR-04` · `MR-06` · `MR-07`
@@ -54,6 +58,7 @@ working backlog, every item with all 14 fields as explicit columns.
 - `HA-01` device & entity inventory · `SA-01` smoke/CO design · `SA-02` water/leak design · `HA-07` device integration roadmap · `RQ-05` purchase-gap *(fulfilled by `HA-07`)* · `AU-01` audio-policy design · `S0` satellite inventory (reSpeaker Living Room)
 - **`AU-02`+`AU-03` interaction duck/restore** (`InteractionCapability`, deployed + live-validated 2026-07-15)
 - **`S1a`** satellite→ceiling duck/restore trigger (HA automation, installed + live-validated 2026-07-15)
+- **`MR-05`** tidy verbose RadioBrowser station names — shipped 2026-07-07 (`00c795b`), deployed, `radiobrowser.tidy_name` + `radio._disp`, 13 + 35 tests green. **Presentation only:** tidying runs *after* matching and dedupe, which use the raw names, and the logs keep the raw name — so it cannot change which station is chosen.
 
 ### 🔬 Research / Purchasing
 - `RQ-01` YTM reliability · `RQ-03` music-source decision *(also Ready)* · `INF-02` HA↔MA reconnect root-cause · `MR-06` semantic match
@@ -115,7 +120,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `MR-Inc3` | Acquire via Lidarr (guarded) | MR | later | repo-code→HA-live | P1 | resolver | RQ-03 ✅ (decided 2026-07-06) | guarded write to Lidarr | `acquire.py`+tests; `.lidarr` secret | host deploy + exposure | restore `.bak/` + un-expose | design `acquire` = guarded Lidarr add+search across both routes (Usenet + Soulseek); see 2026-07-06-rq-03 §7 | tooling §7 |
 | `MR-Inc4B` | Sleep timer + shuffle/repeat + queue | MR | later | repo-code→HA-live | P2 | resolver | MR-Inc4A | media path | `status.py`/`core.py`+tests | exposure | restore `.bak/` + un-expose | inc4a design |
 | `MR-04` | Status aspect enum / per-aspect text | MR | later | repo-code | P2 | resolver | MR-Inc4A | branch-isolated | `status.py`+tests | exposure | `git revert` | inc4a design |
-| `MR-05` | Tidy verbose RadioBrowser names | MR | ready | repo-code | P2 | resolver | — | branch-isolated (cosmetic) | `radio.py`+tests | none | `git revert` | tooling §10 |
+| `MR-05` | Tidy verbose RadioBrowser names | MR | **done** | repo-code | P2 | resolver | — | branch-isolated (cosmetic) | `radiobrowser.py` (`tidy_name`) + `radio.py` (`_disp`) + tests | none | `git revert` | **DONE 2026-07-07 — `00c795b`, deployed (host checksums match `main`), 13 + 35 tests green.** Strips repeated trailing quality tokens (`"Hit FM (UKraine) - 128kb/s"` → `"Hit FM (UKraine)"`), never blanks a name (`"128kbps"` stays), and leaves hand-named favourites alone. Presentation-only by construction. Row was still marked `ready` until 2026-09-27. | tooling §10 |
 | `MR-06` | Semantic / translation match hints | MR | research | repo-code | later | resolver | — | none (spike) | `match.py`+tests | none | `git revert` | tooling §10 |
 | `MR-07` | Provider/metadata/Plex cleanup | MR | later | host-live | P2 | resolver | — | host data edit | none (host/MA) | host change | restore prior MA config | local-music; tooling §10 |
 
