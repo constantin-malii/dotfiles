@@ -1349,7 +1349,7 @@ class InteractionCapability(capability.Capability):
                 self._mic_release(ctx, zone, my_gen, rid)
 
     def _play_clip_and_wait(self, ctx, rid, zone, norm_uri, match_key, clip, opts, superseded,
-                            enqueue=None, issue=True):
+                            enqueue=None, issue=True, clip_still_current=None):
         """Play ONE clip on the zone and wait for it: play_media -> start-poll -> finish-poll.
 
         Everything a TURN owns stays with the caller -- generation ownership, baseline capture, the
@@ -1365,6 +1365,13 @@ class InteractionCapability(capability.Capability):
         accumulated sleep AND, when a deadline is given, by the earlier of that deadline and this
         clip's own timeout -- so a generous turn budget never lets one clip overrun its allowance,
         and a clock that stalls or steps backwards cannot leave the poll unbounded.
+
+        `clip_still_current` (queue mode only; legacy callers pass nothing) is a callable returning
+        True / False / None. It is consulted ONLY when HA says `playing` but its cid names something
+        else: in queue mode the interrupted station stays in MA's queue and HA's cid briefly flips
+        back to it while the clip still plays (live 2026-09-28, a 2.5 s answer cut off at 1.0 s).
+        True means MA confirms this clip is current and playing, so that reading is not counted;
+        False or None (a failed read) counts it exactly as before.
 
         Returns {"started", "issued", "clip", "ended", "gave_up"}. `ended` is True only when the
         clip's end was actually OBSERVED; `gave_up` names why the wait stopped otherwise. Both
@@ -1548,6 +1555,17 @@ class InteractionCapability(capability.Capability):
                     break
             elif cid != "":
                 blank_for = 0.0
+            if (ended and clip_still_current is not None and state.get("state") == "playing"
+                    and cid != ""):
+                # Queue mode: HA says playing but names another item -- ask MA before counting it.
+                # Only a definite True overrides; False and None (read failed) keep today's rule.
+                # Termination is unchanged: this iteration still sleeps and adds to `elapsed`, so the
+                # finish timeout and the turn deadline bound the loop exactly as before.
+                if clip_still_current() is True:
+                    LOG.info("SAY req=%s zone=%s clip=%s HA reports state=%s cid=%s but MA still plays "
+                             "the clip; waiting", rid, zone, clip, state.get("state"),
+                             self._redact_uri(cid)[:80])
+                    ended = False
             if ended:
                 # Require two consecutive observations: a single flicker of state or cid must not
                 # trigger the restore+replay that is heard as a cut-off.
@@ -1602,6 +1620,33 @@ class InteractionCapability(capability.Capability):
                 ma.close()
             except Exception:
                 pass
+
+    def _queue_clip_checker(self, ctx, rid, zone, qm, norm_uri):
+        """The finish poll's MA cross-check for ONE clip (queue mode). Each call opens and closes its own
+        connection -- never a socket held across the wait. -> True only when MA's current item IS this clip
+        (exact clip_uri_of identity) and the queue is playing; False when MA says otherwise; None when the
+        read fails, which the caller treats like False (today's HA rule). Called without _lock held."""
+        queue_id = qm["queue_id"]
+
+        def check():
+            ma = None
+            try:
+                ma = self._ma_open(ctx)
+                s = ma.queue_state(queue_id)
+            except Exception as e:
+                LOG.warning("SAY req=%s zone=%s finish-poll MA check failed (%r); using the HA reading",
+                            rid, zone, e)
+                return None
+            finally:
+                self._ma_close(ma)
+            if not _ma_ok(s):
+                LOG.warning("SAY req=%s zone=%s finish-poll MA check got no usable reply; using the HA "
+                            "reading", rid, zone)
+                return None
+            res = s.get("result") or {}
+            cur = res.get("current_item") or {}
+            return bool(cur) and res.get("state") == "playing" and clip_uri_of(cur) == norm_uri
+        return check
 
     def _queue_capture(self, ctx, rid, zone, my_gen):
         """Design 4.3-1: capture the interrupted item BEFORE the pause. None -> legacy mode for the turn."""
@@ -1861,7 +1906,9 @@ class InteractionCapability(capability.Capability):
                 landed = clip_uri_of(cur) == one_uri
         if landed:
             return self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip, opts, superseded,
-                                            enqueue="play", issue=False)
+                                            enqueue="play", issue=False,
+                                            clip_still_current=self._queue_clip_checker(
+                                                ctx, rid, zone, qm, one_uri))
         return out
 
     def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips, superseded=None):
@@ -2350,8 +2397,9 @@ class InteractionCapability(capability.Capability):
                 queue_may_be_replaced[0] = True
                 if qm is not None:
                     try:
-                        res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
-                                                       opts, superseded, enqueue="play")
+                        res = self._play_clip_and_wait(
+                            ctx, rid, zone, one_uri, one_key, one_clip, opts, superseded, enqueue="play",
+                            clip_still_current=self._queue_clip_checker(ctx, rid, zone, qm, one_uri))
                     except Exception as e:
                         LOG.warning("SAY req=%s zone=%s clip=%s enqueue raised (%r); checking the queue",
                                     rid, zone, one_clip, e)

@@ -145,6 +145,13 @@ class FakeQueue(object):
         self.enqueue_raises_without_landing = False
         self.clip_lands_after_play_index = None      # a clip URL that lands only after play_index
         self.first_wrapper = None                    # store the next clip under this wrapper (identity miss)
+        # Live 2026-09-28: after a clip starts in queue mode, HA's media_content_id briefly names the PREVIOUS
+        # queue item (the station) while MA still plays the clip. QueueHA reports that for the first
+        # `ha_flicker_reads` reads after the clip was first seen playing. The clip keeps playing underneath.
+        self.ha_flicker_reads = 0; self.clip_seen = False; self.in_flicker = False
+        self.ma_fails_in_flicker = False             # queue_state raises when read during a flicker read
+        self.events = []                             # ("ha", state, cid) / ("ma",) in read order
+        self.clip_reads_at_play_index = []           # (clip_reads left, state) at each play_index
 
     def _f(self, name):
         seq = self.fail.get(name)
@@ -164,6 +171,7 @@ class FakeQueue(object):
         wrapper, self.first_wrapper = (self.first_wrapper or "builtin://radio/"), None
         self.items.insert(self.current + 1, clip_item("c%d" % self.n, uri, wrapper))
         self.current += 1; self.state = "playing"; self.clip_reads = self.clip_play_reads
+        self.clip_seen = False
 
     def cur(self):
         return self.items[self.current] if 0 <= self.current < len(self.items) else None
@@ -197,6 +205,10 @@ class FakeQueue(object):
 
     # MA side
     def queue_state(self):
+        self.events.append(("ma",))
+        if self.ma_fails_in_flicker and self.in_flicker:
+            self.in_flicker = False                  # only the read made for THIS flicker poll fails
+            raise OSError("MA read failed during the flicker")
         r = self._f("queue_state")
         if r is not None:
             return r
@@ -216,6 +228,7 @@ class FakeQueue(object):
 
     def play_index(self, item_id, seek_position):
         self.calls.append(("play_index", item_id, seek_position))
+        self.clip_reads_at_play_index.append((self.clip_reads, self.state))
         r = self._f("play_index")
         if r is self.NO_REPLY:
             return None
@@ -274,6 +287,14 @@ class QueueHA(FakeHA):
             (st, mid), self.first_state = self.first_state, None
             return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
         st, mid = self.q.ha_state()
+        q = self.q
+        q.in_flicker = False
+        if st == "playing" and interaction.is_reply_clip_uri(mid):
+            if q.clip_seen and q.ha_flicker_reads > 0 and q.current > 0:
+                q.ha_flicker_reads -= 1; q.in_flicker = True
+                mid = q.items[q.current - 1]["media_item"]["uri"]      # the station, not the clip
+            q.clip_seen = True
+        q.events.append(("ha", st, mid))
         return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
     def call_service_rest(self, domain, service, data, timeout=5):
         self.calls.append((domain, service, data)); self.timeouts.append((service, timeout))
@@ -1007,6 +1028,82 @@ class FinalReviewFixTest(unittest.TestCase):
         rec = cap._queue_targets[ZONE]
         self.assertFalse(rec["live"])
         self.assertEqual(rec["target"]["item"], "t3")
+
+
+class QueueFlickerTest(unittest.TestCase):
+    """Live 2026-09-28: `finish-poll exit after 1.0s: state=playing cid=library://radio/2`. In queue mode the
+    station stays in MA's queue, so HA's media_content_id can briefly name it while the reply clip still plays;
+    two such reads used to end the wait and resume the station over the tail of the answer."""
+
+    def radio(self, flicker=3, play_reads=6):
+        q = FakeQueue([station()], current=0, elapsed=1799.0)
+        q.clip_play_reads = play_reads                # the clip plays for several reads, then goes idle
+        q.ha_flicker_reads = flicker
+        return q
+
+    def test_station_cid_flicker_waits_for_the_clip_to_really_end(self):
+        q = self.radio()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        self.assertEqual(q.ha_flicker_reads, 0)                          # the flicker was actually served
+        # The resume happened only once the clip had played out and HA saw it idle -- not mid-answer.
+        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
+        self.assertEqual(q.ids(), ["st1"])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertTrue(r["metadata"]["clips"][0]["ended"])
+        overrides = [m for m in lg.output if "but MA still plays the clip; waiting" in m]
+        self.assertEqual(len(overrides), 3)                              # one per flicker read
+        self.assertFalse(any("finish-poll exit" in m and "radio/4" in m for m in lg.output))
+
+    def test_override_uses_short_lived_connections(self):
+        q = self.radio()
+        ctx = ctx_for(q)
+        say(new_cap(), ctx)
+        self.assertTrue(ctx.mas and all(m.s is None for m in ctx.mas))  # no socket held across the wait
+
+    def test_ma_read_failure_during_flicker_falls_back_to_the_ha_rule(self):
+        q = self.radio()
+        q.ma_fails_in_flicker = True
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        # Today's rule: two consecutive "ended" reads end the wait, clip still playing underneath.
+        self.assertEqual(len(q.clip_reads_at_play_index), 1)
+        left, st = q.clip_reads_at_play_index[0]
+        self.assertGreater(left, 0)
+        self.assertEqual(st, "playing")
+        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
+        self.assertTrue(any("finish-poll exit" in m for m in lg.output))
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(q.ids(), ["st1"])
+
+    def test_ma_reporting_another_item_counts_the_observation(self):
+        # MA itself no longer has the clip current: the HA reading is believed, as today.
+        q = self.radio()
+        orig = q.queue_state
+        def moved_on():
+            r = orig()
+            if q.in_flicker:
+                r = {"result": dict(r["result"], current_item=station(), current_index=0)}
+            return r
+        q.queue_state = moved_on
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx_for(q))
+        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
+        self.assertGreater(q.clip_reads_at_play_index[0][0], 0)          # ended on the HA rule
+
+    def test_ha_idle_ends_the_wait_without_an_ma_check(self):
+        q = self.radio(flicker=0, play_reads=2)
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        ev = q.events
+        idle = [i for i, e in enumerate(ev) if e[0] == "ha" and e[1] == "idle"]
+        self.assertGreaterEqual(len(idle), 2)
+        # The two idle reads that end the wait are consecutive HA reads: no MA read between them.
+        self.assertEqual(idle[1], idle[0] + 1)
+        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
+        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
+        self.assertEqual(r["metadata"]["resume"], "queue")
 
 
 if __name__ == "__main__":
