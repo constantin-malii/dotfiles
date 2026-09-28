@@ -38,7 +38,7 @@ reviewed by an independent agent and by peer session `dotfiles-61`). Read it bef
 2. **An alias must never play something else** — a missing/renamed target or a no-local playlist returns
    `not_found`, never an artist and never a different playlist. Tests in Task 4.
 3. **MA's automatic playlists must never be treated as curated** — curated = builtin mapping + `is_editable` true
-   + `is_dynamic` not true; a missing field fails closed. Assumption (spec 3.1): automatic lists are non-editable
+   + `is_dynamic` false — both flags present with exactly those values; a missing flag fails closed. Assumption (spec 3.1): automatic lists are non-editable
    (8/8 observed); if a future MA broke that, only that list's local tracks would play. Tests in Task 3.
 4. **A curated playlist must play only local tracks** even when all are local (no playlist-URI play). Test in Task 3.
 5. **A dry-run must never speak or play**, on `/command` (params or settings flag) and on the CLI. Tests in Task 5.
@@ -48,7 +48,7 @@ reviewed by an independent agent and by peer session `dotfiles-61`). Read it bef
 ### Task 1: Live read-only probe of the MA shapes (no code)
 
 > **DONE 2026-09-27 (branch commit `4504607`).** The numeric-id assumption was **disproved** (the builtin mapping
-> id is the playlist name); the curated rule is now builtin + `is_editable` + not `is_dynamic` (spec 3.1, Task 3),
+> id is the playlist name); the curated rule is now builtin + `is_editable is True` + `is_dynamic is False` (spec 3.1, Task 3),
 > read from the same `ma.library("playlist")` listing `music.py` uses. Library id `28` ≠ mapping id; tracks come as
 > a plain list, `partial=False`, 8 local. The steps below are kept as the record of what was run.
 
@@ -441,6 +441,15 @@ class CuratedPlaylistTest(unittest.TestCase):
         self.assertEqual(r["error"]["code"], "not_found")
         self.assertEqual(ma.track_calls, [])
 
+    def test_missing_is_dynamic_fails_closed(self):
+        pl = curated("mix", "5")
+        del pl["is_dynamic"]                          # editable, but we cannot tell it is not dynamic
+        ma = FakeMA({"playlist": [pl]}, {"5": EIGHT})
+        r = run(ma, "mix", "playlist")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "not_found")
+        self.assertEqual(ma.track_calls, [])
+
     def test_m3u_playlist_unchanged(self):
         ma = FakeMA({"playlist": [smb("costea-playlist", "costea-playlist.m3u")]})
         r = run(ma, "costea-playlist", "playlist")
@@ -524,12 +533,13 @@ def _has_builtin(it):
 
 
 def _is_curated(it):
-    """A playlist the operator made in Music Assistant: a `builtin` mapping, editable, not dynamic.
-    MA's automatic lists (random_tracks, infinite_mix, ...) are non-editable (8/8 observed,
-    2026-09-27) and the infinite_mix family is also dynamic. A missing field fails closed.
+    """A playlist the operator made in Music Assistant: a `builtin` mapping, is_editable exactly
+    True and is_dynamic exactly False. MA's automatic lists (random_tracks, infinite_mix, ...) are
+    non-editable (8/8 observed, 2026-09-27) and the infinite_mix family is also dynamic. Both flags
+    must be present: a missing or non-boolean one fails closed (identity checks, not truthiness).
     The builtin mapping's item_id is NOT used: for a user playlist it is the playlist's name."""
     return (_has_builtin(it) and it.get("is_editable") is True
-            and it.get("is_dynamic") is not True)
+            and it.get("is_dynamic") is False)
 
 
 def _library(ma, media_type, lib):
@@ -1082,7 +1092,8 @@ revert with `git checkout -- <file>`:
 | Mutation (in `music.py` unless noted) | Run | Must fail |
 |---|---|---|
 | `_is_curated`: drop `it.get("is_editable") is True` | `tests.test_playlist` | `test_automatic_non_editable_playlists_are_never_curated` |
-| `_is_curated`: drop `it.get("is_dynamic") is not True` | `tests.test_playlist` | `test_editable_but_dynamic_playlist_is_never_curated` |
+| `_is_curated`: drop `it.get("is_dynamic") is False` | `tests.test_playlist` | `test_editable_but_dynamic_playlist_is_never_curated` |
+| `_is_curated`: weaken to `it.get("is_dynamic") is not True` | `tests.test_playlist` | `test_missing_is_dynamic_fails_closed` |
 | `_curated_tracks`: append every track's uri, local or not | `tests.test_playlist` | `test_mixed_plays_only_local_tracks_with_note` |
 | `_lookup` alias branch: call `_resolve_all(ma, target, _types(settings, "playlist"), ...)` instead of `_resolve_type(... exact=True)` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` (artist named like the target) |
 | `_lookup` alias branch: on a miss, fall through to resolving the phrase instead of `return hit, nl, key` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` ("Costea Mix" artist) |
@@ -1091,14 +1102,14 @@ revert with `git checkout -- <file>`:
 | `resolve`: try the `shuffle `-stripped phrase first | `tests.test_playlist` | `test_title_starting_with_shuffle_still_resolves_unstripped` |
 | `core.py`: remove `and not dry` | `tests.test_core` | `test_music_not_found_dry_run_param_is_silent` |
 
-Record the table's outcome (all eight caught) in the commit message. A mutation that survives means its test
+Record the table's outcome (all ten caught) in the commit message. A mutation that survives means its test
 does not pin the behaviour — fix the test, not the table.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add docs/homebrain/mass-resolver/tests/test_playlist.py
-git commit -m "test(resolver): MR-08 dispatch integration; full suite green; mutation check 8/8 caught"
+git commit -m "test(resolver): MR-08 dispatch integration; full suite green; mutation check 10/10 caught"
 ```
 
 - [ ] **Step 6: Whole-branch review** — request a fresh code review of `main..HEAD` (resolver code + tests) before

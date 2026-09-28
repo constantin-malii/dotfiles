@@ -55,7 +55,8 @@ punctuation and apostrophes ("Costea's mix") behave predictably.
    nothing is re-scanned. For `playlist`, a candidate is acceptable when either:
    - it has an available `filesystem_smb` mapping — `.m3u`, **today's behaviour, unchanged**; or
    - it is a **curated MA playlist**: it has a `builtin` mapping **and** the playlist's `is_editable` is `true`
-     **and** its `is_dynamic` is not `true`. A missing field **fails closed** (not curated, logged
+     **and** its `is_dynamic` is `false` — **both flags must be present with exactly those values**; a missing or
+     non-boolean flag **fails closed** (not curated, logged
      `reason=not-curated`). The builtin mapping's `item_id` is ignored — for a user playlist it is the playlist's
      *name* (probe 2026-09-27), not a number. **Stated assumption:** MA's automatic lists are non-editable (8/8
      observed on the running MA: `random_tracks`, `all_favorite_tracks`, `infinite_mix`, `infinite_mix_favorites`,
@@ -134,7 +135,8 @@ The name used is the phrase the user said (alias key or query). `validate` picks
     `not_found`, **no** fall-through to an artist; a renamed target does not fuzzy-match another playlist; a short
     alias does not hijack a longer unrelated query; compacted (spelled-out) key matches;
   - curated MA playlist (builtin, editable, not dynamic, name-like mapping id) accepted; builtin + not editable
-    rejected; builtin + editable + dynamic rejected; missing `is_editable` rejected (fail closed); fetch uses the
+    rejected; builtin + editable + dynamic rejected; missing `is_editable` or missing `is_dynamic` rejected (fail closed);
+    fetch uses the
     library id even when the mapping id differs;
   - curated playlist always plays the local-track list (all-local and mixed), `md["uri"]` a string, `md["uris"]`
     the list, mixed → note in `chat_text`; none-local → `not_found` with the "no songs" line; tracks fetched only for
