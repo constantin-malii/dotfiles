@@ -96,13 +96,15 @@ Expected: `PLAYLIST` lines for the three playlists; `TRACKS type: list count: 8`
 - [ ] **Step 3: Record the facts and adapt if needed**
 
 If the curated mapping is **not** `builtin` + numeric `item_id`, or tracks arrive as `partial` chunks, STOP and
-report to the operator before Task 3 (the design depends on both). Otherwise record the observed values as an empty
-commit so the evidence travels with the branch:
+report to the operator before Task 3 (the design depends on both). Also record whether the playlist's library
+`item_id` equals its `builtin` mapping's `item_id`: the code fetches by the library id with provider `library`
+either way (and a test pins that), so a difference is expected-safe — but note it, since it is evidence for that
+choice. Otherwise record the observed values as an empty commit so the evidence travels with the branch:
 
 ```bash
 git commit --allow-empty -m "chore(mr-08): probe confirms MA playlist shapes
 
-curated playlist 28 mapping: <provider_domain>/<item_id>; playlist_tracks returns <list|dict>, partial=<value>,
+curated playlist 28 mapping: <provider_domain>/<item_id> (library id <equal|differs>); playlist_tracks returns <list|dict>, partial=<value>,
 <N> tracks; local track mapping: filesystem_smb provider_instance=<value>, item_id=<value>, available=<value>"
 ```
 
@@ -431,6 +433,17 @@ class CuratedPlaylistTest(unittest.TestCase):
         self.assertEqual(ma.track_limits, [music.PLAYLIST_TRACK_CAP])
         self.assertEqual(len(ma.played[0]), music.PLAYLIST_TRACK_CAP)
 
+    def test_curated_mapping_id_differing_from_library_id_fetches_by_library_id(self):
+        # MA need not keep the builtin mapping id equal to the library id; the fetch uses provider
+        # "library", so it must pass the library id.
+        pl = curated("mix", "5")
+        pl["provider_mappings"][0]["item_id"] = "77"
+        ma = FakeMA({"playlist": [pl]}, {"5": EIGHT, "77": [ytm_track("wrong", "w")]})
+        r = run(ma, "mix", "playlist")
+        self.assertTrue(r["ok"])
+        self.assertEqual(ma.track_calls, ["5"])
+        self.assertEqual(len(ma.played[0]), 8)
+
     def test_artist_play_never_fetches_playlist_tracks(self):
         ma = FakeMA({"artist": [smb("Rammstein", "42")]})
         r = run(ma, "Rammstein", "artist")
@@ -495,7 +508,9 @@ def _library(ma, media_type, lib):
 def _curated_tracks(ma, it, settings):
     """(local track uris in playlist order, total track count). Local = an available
     preferred-provider mapping; the list is always used, even when every track is local, so MA
-    never picks a non-local source for a library track (spec 3.1-4)."""
+    never picks a non-local source for a library track (spec 3.1-4).
+    Fetched by the LIBRARY item_id with provider "library" -- not the builtin mapping's id, which
+    MA need not keep equal to it; the mapping only decides whether the playlist is curated."""
     tracks = ma.playlist_tracks(it.get("item_id"), limit=PLAYLIST_TRACK_CAP)
     uris = []
     for t in tracks:
@@ -1127,16 +1142,18 @@ print("aliases:", c["playlist_aliases"])
 EOF'
 ```
 
-Run the precedent modules plus every copied one, **by name** (not `discover` — local-only modules such as
-`test_ha_export` need files the host does not carry):
+Run every module **actually present** in the staged `tests/` — the host's own modules plus the ones just copied —
+by name, with the list derived from the directory rather than hardcoded (not `discover`, and not a fixed list that
+could name a module the host lacks):
 
 ```bash
-ssh costea@192.168.1.68 'cd ~/mr08-staging/mass-resolver && python3 --version && python3 -m py_compile *.py && echo COMPILE OK && python3 -m unittest tests.test_interaction tests.test_py35_compat tests.test_haconn tests.test_config tests.test_wsutil tests.test_playlist tests.test_music tests.test_core tests.test_favorites tests.test_maconn tests.test_resolver 2>&1 | tail -3'
+ssh costea@192.168.1.68 'cd ~/mr08-staging/mass-resolver && M=$(cd tests && ls test_*.py | sed "s/\.py$//; s/^/tests./" | tr "\n" " ") && echo "modules: $M" && python3 --version && python3 -m py_compile *.py && echo COMPILE OK && python3 -m unittest $M 2>&1 | tail -3'
 ```
 
-Expected: `Python 3.5.2`, `COMPILE OK`, `OK`. Record the count (baseline 493 plus the added modules). If a copied
-module fails only because it imports something the host has never carried, record it, drop it from the list, and
-say so in the CHANGELOG — that is not a regression. **Any other failure: STOP.** Nothing live has changed; delete
+Expected: `Python 3.5.2`, `COMPILE OK`, `OK`. Record the module list and the count (baseline 493 plus the added
+modules). If a copied module fails only because it imports something the host has never carried, record it,
+**delete that file from the staged `tests/`** (so live matches what was tested), re-run, and say so in the
+CHANGELOG — that is not a regression. **Any other failure: STOP.** Nothing live has changed; delete
 `~/mr08-staging` and fix locally.
 
 Mirror the alias key into the repo `config.json`, run `python -m unittest tests.test_config -v` locally
@@ -1146,11 +1163,12 @@ Mirror the alias key into the repo `config.json`, run `python -m unittest tests.
 - [ ] **Step 4: Promote staging to live, verified by sha256**
 
 ```bash
-ssh costea@192.168.1.68 'S=~/mr08-staging/mass-resolver; cd ~/mass-resolver && for f in music.py maconn.py favorites.py config.py core.py resolver.py config.json tests/test_playlist.py tests/test_music.py tests/test_core.py tests/test_favorites.py tests/test_maconn.py tests/test_config.py tests/test_resolver.py; do cp -p $S/$f $f; done && (cd $S && sha256sum music.py maconn.py favorites.py config.py core.py resolver.py config.json tests/test_*.py | sort) > /tmp/mr08.staged && (sha256sum music.py maconn.py favorites.py config.py core.py resolver.py config.json $(cd $S && ls tests/test_*.py) | sort) > /tmp/mr08.live && diff /tmp/mr08.staged /tmp/mr08.live && echo PROMOTED-SHA-MATCH'
+ssh costea@192.168.1.68 'S=~/mr08-staging/mass-resolver; cd ~/mass-resolver && F="music.py maconn.py favorites.py config.py core.py resolver.py config.json $(cd $S && ls tests/test_*.py | tr "\n" " ")" && for f in $F; do cp -p $S/$f $f; done && (cd $S && sha256sum $F | sort) > /tmp/mr08.staged && (sha256sum $F | sort) > /tmp/mr08.live && diff /tmp/mr08.staged /tmp/mr08.live && echo PROMOTED-SHA-MATCH'
 ```
 
-(Include `tests/test_radio*.py` in the loop if they were staged.) Expected `PROMOTED-SHA-MATCH`. The running service
-still has the old code in memory until Step 5.
+The file list is every test module in staging (the ones that ran green in Step 3; unchanged host modules are
+copied onto themselves, harmlessly), so there is no conditional to remember. Expected `PROMOTED-SHA-MATCH`. The
+running service still has the old code in memory until Step 5.
 
 - [ ] **Step 5: Operator restarts the service** — ask them to run:
 `! ssh -t costea@192.168.1.68 'sudo systemctl restart mass-resolver'`
