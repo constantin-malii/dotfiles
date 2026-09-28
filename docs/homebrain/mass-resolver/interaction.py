@@ -538,14 +538,37 @@ class InteractionCapability(capability.Capability):
                     LOG.warning("RESUME req=%s zone=%s pending queue resume refused (%s); current logic",
                                 rid, zone, r.get("error_code") if isinstance(r, dict) else "no reply")
                     return None
+                # Deleting the current item is a no-op MA reports as success (design 3): confirm the
+                # song actually became current before deleting, or a lagging queue_state can make us
+                # "delete" the very clip still playing while believing it gone.
+                poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
+                seen, _ = self._queue_confirm(ma, queue_id, t["item"], poll_secs)
+                kept = []
                 for cid in rec["clips"]:
+                    if not seen and cid == cur_id:
+                        kept.append(cid)
+                        LOG.info("RESUME req=%s zone=%s clip %s kept: was still current, unconfirmed resume",
+                                 rid, zone, cid)
+                        continue
                     try:
-                        ma.delete_item(queue_id, cid)
+                        dr = ma.delete_item(queue_id, cid)
+                        if not _ma_ok(dr):
+                            kept.append(cid)
+                            LOG.warning("RESUME req=%s zone=%s delete refused for %s (%s)", rid, zone, cid,
+                                        dr.get("error_code") if isinstance(dr, dict) else "no reply")
                     except Exception as e:
+                        kept.append(cid)
                         LOG.warning("RESUME req=%s zone=%s delete failed for %s (%r)", rid, zone, cid, e)
-                LOG.info("RESUME req=%s zone=%s resumed pending queue item %s (clips deleted: %s)",
-                         rid, zone, t["item"], rec["clips"])
-                self.note_playback(ctx, zone, t.get("uri") or "queue")
+                if not kept:
+                    LOG.info("RESUME req=%s zone=%s resumed pending queue item %s (clips deleted: %s)",
+                             rid, zone, t["item"], rec["clips"])
+                    self.note_playback(ctx, zone, t.get("uri") or "queue")
+                else:
+                    with self._lock:
+                        cur_rec = self._queue_targets.get(zone)
+                        if cur_rec is not None and cur_rec.get("gen") == rec.get("gen"):
+                            cur_rec["clips"] = kept
+                    LOG.info("RESUME req=%s zone=%s resume pending: clips kept %s", rid, zone, kept)
                 return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                              metadata={"resumed": True, "uri": t.get("uri"), "how": "queue_pending",
                                        "zone": zone})

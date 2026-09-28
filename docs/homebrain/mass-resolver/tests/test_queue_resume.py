@@ -647,13 +647,41 @@ class QueueContinuityTest(unittest.TestCase):
         self.assertEqual(q.cur()["queue_item_id"], "t2")
         self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "t2", 47)])
 
+    def test_pending_resume_confirms_before_deleting_the_lagging_clip(self):
+        # fix round 1: play_index lags 3 reads before landing. Deleting BEFORE confirming would hit
+        # the clip while it is still "current" -- MA treats that delete as a no-op, so the clip would
+        # survive while the log claims it was deleted. The confirm must wait the lag out first.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        q.lag = 3
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])         # c1 actually gone, not left behind
+
+    def test_pending_resume_keeps_a_clip_still_current_when_unconfirmed(self):
+        # fix round 1: play_index never confirms within budget. The clip that was current when this
+        # resume started must be KEPT (not deleted-as-no-op-and-forgotten), and the record must stay
+        # pending with it, so a later resume can still find it.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        q.lag = 50
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertIn("c1", cap._queue_targets[ZONE]["clips"])
+        self.assertIn("c1", q.ids())
+
     def test_pause_two_questions_resume(self):
         q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
         ctx = ctx_for(q)
         cap = new_cap()
         say(cap, ctx)
         say(cap, ctx, uri=CLIP2, rid="rid2")
-        capability.run(cap, ctx, {"mode": "resume"}, "rid3")
+        r3 = capability.run(cap, ctx, {"mode": "resume"}, "rid3")
+        self.assertEqual(r3["metadata"]["how"], "queue_pending")
         self.assertEqual(q.ids(), ["t1", "t2", "t3"])
         self.assertEqual(q.cur()["queue_item_id"], "t2")
 
