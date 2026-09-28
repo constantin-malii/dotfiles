@@ -117,7 +117,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `MR-04` | Status aspect enum / per-aspect text | MR | later | repo-code | P2 | resolver | MR-Inc4A | branch-isolated | `status.py`+tests | exposure | `git revert` | inc4a design |
 | `MR-05` | Tidy verbose RadioBrowser names | MR | ready | repo-code | P2 | resolver | — | branch-isolated (cosmetic) | `radio.py`+tests | none | `git revert` | tooling §10 |
 | `MR-06` | Semantic / translation match hints | MR | research | repo-code | later | resolver | — | none (spike) | `match.py`+tests | none | `git revert` | tooling §10 |
-| `MR-08` | Play curated playlists by voice (aliases + shuffle) | MR | design | repo-code→host-live | P1 | resolver | — | resolver deploy (single live gate) | `music.py`,`maconn.py`,`favorites.py`,`core.py`,`resolver.py`+tests; `config.json` `playlist_aliases` | host deploy (no HA/exposure change) | restore `.bak/<ts>/` + restart | 2026-09-27-mr-08-playlist-voice-design.md |
+| `MR-08` | Play curated playlists by voice (aliases; shuffle → MR-08b) | MR | design | repo-code→host-live | P1 | resolver | — | resolver deploy (single live gate) | `music.py`,`maconn.py`,`favorites.py`,`core.py`,`resolver.py`+tests; `config.json` `playlist_aliases` | host deploy (no HA/exposure change) | restore `.bak/<ts>/` + restart | 2026-09-27-mr-08-playlist-voice-design.md |
 | `MR-07` | Provider/metadata/Plex cleanup | MR | later | host-live | P2 | resolver | — | host data edit | none (host/MA) | host change | restore prior MA config | local-music; tooling §10 |
 
 ### P — PCL / homebrain-companion
