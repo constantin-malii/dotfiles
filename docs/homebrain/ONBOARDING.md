@@ -25,6 +25,36 @@ A host-side **`mass-resolver`** service (Python 3.5, on the host `costea@192.168
 
 Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 
+### AN-01 — phone announcements on the ceiling: BUILT, DEPLOYED, and DISABLED (2026-09-27)
+
+The `interaction` capability gained an **`announce`** mode (chime + message, microphone muted for
+the duration, volume raised and restored, turn lock, dead-man). It is deployed and it is **switched
+off**, because announcements fail roughly **1 in 7** for a reason outside the resolver.
+
+- **Do not re-enable `automation.voice_ceiling_announce`** expecting it to work. One toggle turns it
+  back on; that is also the kill switch. `rest_command.resolver_command_announce` exists (dedicated,
+  `timeout: 200`) and nothing else calls it.
+- **The failure:** MA skips the TTS item as unplayable ~91 ms in, having asked HA's `tts_proxy` for a
+  `.flac` variant of a url that was minted as `.mp3`; HA 404s it. No audio is produced, **and the
+  player still reports `playing`**, which is what let a failed announcement hold the satellite
+  microphone muted for 52 s.
+- **What the resolver now does about it:** reports honestly rather than claiming success — three
+  outcomes (never started / ended / started-but-end-unobserved); never treats a failed HA read as an
+  observation; serialises the microphone handover so an older turn cannot unmute a newer one; bounds
+  the HA calls made while `_lock` is held; and **logs the resolved TTS url whole and redacted**, so
+  the next failure is self-diagnosing instead of needing MA's log a day later.
+- **What it does NOT do:** make announcements work. That needs the upstream fix.
+- **`say` / `say_text` are unaffected and remain the proven audible route.** They share the clip
+  loop, so they inherit the reporting and safety changes, but their `ok` semantics are deliberately
+  unchanged for S1b's satellite reply automation.
+
+History, measurements and two **retracted** root causes are in
+[`2026-09-08-an-01-post-g3-clip-completion-correction.md`](./2026-09-08-an-01-post-g3-clip-completion-correction.md)
+— read its later sections first; the earlier ones are superseded and say so.
+
+---
+
+
 ---
 
 ## 1. The system at a glance
@@ -129,11 +159,22 @@ Authoritative F1 / F1-R / capabilities / local-music / CHANGELOG docs: see §14.
 - ✅ **Phone voice control (Phase 2)** — Companion app → Whisper STT → `automation.voice_ceiling_speakers` → ceiling. **Text replies only** (Piper TTS disabled in pipeline). Generic spoken-number volume parsing.
 - ✅ **ChatGPT/OpenAI assistant** — separate "ChatGPT" pipeline; runs the exposed resolver media tools (`play_music`/`play_radio`/`find_stations`) and the ceiling control scripts, and reads `weather.forecast_home` only. `expose_new_entities` off. Deterministic assistant stays default.
 - ✅ **HA app-layer state is version-controlled** — managed scripts, automations, Assist pipelines, satellite selects, exposure, and metadata are captured under [`ha/`](ha/). Changes are exported and reviewed through the managed-state runbook in §14.
-- ⚠️ **Ceiling TTS announcements via `tts.speak` DO NOT WORK** (corrected 2026-09-05). `tts.speak` → MA
-  `play_announcement` fails on this player: `Ceiling: Announce: Error executing script ... Failed to
-  stream audio`. MA's docs give the precondition — announcements need correct **state + elapsed-time**
-  reporting, which Universal→Squeezelite does not provide (the same defect behind the stop-wedge).
-  `script.ceiling_announce` is therefore **broken**; it moves the volume and plays nothing.
+- ⚠️ **Ceiling TTS announcements via `tts.speak` DO NOT WORK** (observed 2026-09-05; **cause
+  corrected 2026-09-27**). `tts.speak` → MA `play_announcement` fails on this player:
+  `Ceiling: Announce: Error executing script ... Failed to stream audio`. `script.ceiling_announce`
+  is therefore **broken**; it moves the volume and plays nothing.
+  ⛔ **The reason recorded here until 2026-09-27 was wrong.** It said announcements need correct
+  state + elapsed-time reporting, which Universal→Squeezelite does not provide — the stop-wedge
+  defect. Music Assistant's own log says otherwise: `Failed to stream audio` is preceded by
+  `Error opening input file .../api/tts_proxy/<id>.flac` → **`Server returned 404 Not Found`**. HA
+  minted only an `.mp3`; MA asked for a `.flac` variant that does not exist. Elapsed-time reporting
+  is not implicated.
+  **This is the same fault as the AN-01 announce failure** — not a separate `tts.speak` problem — so
+  neither path escapes it by switching to the other. Full evidence, including the 8/8 correlation
+  with MA's "breaking out to single item stream", is in
+  [`2026-09-08-an-01-post-g3-clip-completion-correction.md`](./2026-09-08-an-01-post-g3-clip-completion-correction.md),
+  and the upstream report is drafted in
+  [`upstream-issue-draft-tts-flac-404.md`](./upstream-issue-draft-tts-flac-404.md).
   **Use the resolver instead:** `interaction` mode **`say_text`** resolves text via HA
   `/api/tts_get_url` and plays the clip with `play_media` — the proven audible route, inheriting duck,
   restore, replay and the reply-started guard.
