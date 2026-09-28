@@ -15,8 +15,10 @@ pending resume. Anything that fails before the capture completes runs today's le
 **Tech Stack:** Python 3.5-compatible stdlib, `unittest`, raw-socket MA WebSocket client (`maconn.py`), HA REST.
 
 **Spec:** `docs/homebrain/2026-09-28-mr-08c-queue-resume-design.md` (v2; operator-approved as the design basis;
-peer review `dotfiles-61` aligned; spike 3 results in §3.2). Read it before starting — §3 (measured MA behaviour),
-§4.3–§4.6 (the algorithm), §4.4 (decision table) are binding.
+peer review `dotfiles-61` aligned; spike 3 results in §3.2). Read §3 (measured MA behaviour), §4.3–§4.6 (the
+algorithm) and §4.4 (decision table) before starting — they are binding. This plan revision folds in the peer
+review of the first plan draft (settle vs lag, eager recovery, superseded-without-successor, the AN-01 honesty
+rule, live-anchor identity, clock skew, radio-by-URL, and four smaller points).
 
 ## Global Constraints
 
@@ -28,10 +30,12 @@ peer review `dotfiles-61` aligned; spike 3 results in §3.2). Read it before sta
   `python -m unittest tests.test_queue_resume -v`.
 - **The legacy path must stay byte-for-byte in behaviour**: every existing test in `tests/test_interaction.py`
   passes **unmodified** (their `FakeCtx` has no `ma_factory`, which selects legacy mode). If an existing test
-  would have to change, STOP and report it — except the one guard named in Task 5 Step 3.
+  would have to change, STOP and report it — the only permitted legacy change is the one named in Task 5 Step 3d.
 - Queue mode is on only when `settings.say_queue_resume` (default True), `ctx.ma_factory` and
   `settings.queue_id` all exist. Every new setting is read with `getattr(..., default)`.
 - **One MA connection per phase** (`_ma_open` / `_ma_close`), never held across a clip wait.
+- In queue mode, "is this a spent reply clip?" uses the new **`is_reply_clip_uri`** (TTS / signed URL / announce
+  chime) — never `_is_reply_uri`, which also matches a radio station stored as `builtin://radio/http…`.
 - URI replay (`music_assistant.play_media` without `enqueue`) in queue mode only per the §4.4 table
   (outcome `fallback_uri`), never after `play_index` was confirmed or may have landed.
 - Delete only recorded queue item ids; never delete by URI match or guess.
@@ -41,14 +45,14 @@ peer review `dotfiles-61` aligned; spike 3 results in §3.2). Read it before sta
 
 ## Review Focus
 
-1. **Double play** — a URI replay after `play_index` succeeded or may have: pinned by the confirmation-lag,
-   raised-and-unknown and exception-after-resume tests (Tasks 3–4).
-2. **Deleting the wrong item** — a leftover identical clip earlier in the queue, a containment-only URI at the
-   anchor, a queue longer than one read window: pinned in Tasks 2–3.
-3. **Silence after the answer** — late-landing enqueue, clip that never reaches idle, pause→question→resume:
-   pinned in Tasks 4–5.
-4. **Barge-in** resuming the first answer's clip instead of the song: pinned in Task 5.
-5. **Legacy regressions** — kill switch and no-`ma_factory` contexts give today's exact calls: Task 3 + the
+1. **Double play / double restart** — URI replay after `play_index` succeeded or may have; settle re-resuming on a
+   merely lagging MA: pinned by the lag, raised-unknown and exception-after-resume tests (Task 4).
+2. **Deleting the wrong item** — identical earlier leftovers, the same fixed reply twice (the anchor itself an
+   identical clip), a containment-only URI, long queues: Tasks 2–3, 5.
+3. **Silence** — late-landing enqueue, a clip that never goes idle, pause→question→resume, a turn superseded by
+   one that never captures: Tasks 4–5.
+4. **Barge-in** resuming the first answer's clip instead of the song: Task 5.
+5. **Legacy regressions** — kill switch, no-`ma_factory` contexts, radio stations added by URL: Task 3 + the
    untouched existing suite.
 
 ---
@@ -145,11 +149,12 @@ git commit -m "feat(resolver): MA queue helpers - state, items window, play_inde
 - Test: `docs/homebrain/mass-resolver/tests/test_config.py`
 
 **Interfaces:**
-- Produces (module level in `interaction`): `_ma_ok(reply) -> bool`; `parse_queue_capture(reply, now) ->
-  (cap|None, why|None)` where `cap = {"item","index","pos","duration","seekable","uri","state"}`;
-  `clip_uri_of(item) -> str`; `tts_id(uri) -> str`; `anchored_clip(items, offset, anchor_index, played_uri)
-  -> (queue_item_id|None, index|None, why|None)`; `seek_target(target) -> int`; constants `CONFIRM_BUDGET_S =
-  4.0`, `SEEK_MIN_S = 2.0`, `SEEK_END_MARGIN_S = 5.0`; `Settings.say_queue_resume` (default True).
+- Produces (module level in `interaction`): `_ma_ok(reply) -> bool`; `is_reply_clip_uri(uri) -> bool`;
+  `parse_queue_capture(reply, now) -> (cap|None, why|None)` where
+  `cap = {"item","index","pos","duration","seekable","uri","state","extrapolated"}`; `clip_uri_of(item) -> str`;
+  `tts_id(uri) -> str`; `anchored_clip(items, offset, anchor_index, played_uri) -> (queue_item_id|None,
+  index|None, why|None)`; `seek_target(target) -> int`; constants `CONFIRM_BUDGET_S = 4.0`, `SEEK_MIN_S = 2.0`,
+  `SEEK_END_MARGIN_S = 5.0`, `MAX_EXTRAPOLATE_S = 60.0`; `Settings.say_queue_resume` (default True).
 
 - [ ] **Step 1: Write the failing tests** — create `tests/test_queue_resume.py`:
 
@@ -160,8 +165,9 @@ import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import interaction
 
-CLIP = "http://192.168.122.10:8123/api/tts_proxy/abc123.mp3"
+CLIP = "http://192.168.122.10:8123/api/tts_proxy/abc123.mp3"     # on say_internal_base: normalises to itself
 CLIP2 = "http://192.168.122.10:8123/api/tts_proxy/def456.mp3"
+STREAM = "builtin://radio/http://stream.example.net/live"         # a radio station added to MA by URL
 
 
 def track(n, dur=240):
@@ -169,13 +175,22 @@ def track(n, dur=240):
             "media_item": {"uri": "library://track/%d" % n, "media_type": "track", "duration": dur}}
 
 
-def station():
+def station(uri="library://radio/4"):
     return {"queue_item_id": "st1", "name": "Radio", "duration": 0,
-            "media_item": {"uri": "library://radio/4", "media_type": "radio"}}
+            "media_item": {"uri": uri, "media_type": "radio"}}
 
 
 def clip_item(qid, uri, wrapper="builtin://radio/"):
     return {"queue_item_id": qid, "name": interaction.tts_id(uri), "media_item": {"uri": wrapper + uri}}
+
+
+class ReplyClipUriTest(unittest.TestCase):
+    def test_narrow_predicate(self):
+        self.assertTrue(interaction.is_reply_clip_uri("builtin://radio/" + CLIP))
+        self.assertTrue(interaction.is_reply_clip_uri("http://x/y.wav?authSig=abc"))
+        self.assertTrue(interaction.is_reply_clip_uri("builtin://track/http://h/media/local/timer_chime.wav"))
+        self.assertFalse(interaction.is_reply_clip_uri(STREAM))          # a station, not a clip
+        self.assertFalse(interaction.is_reply_clip_uri("library://track/3"))
 
 
 class ParseCaptureTest(unittest.TestCase):
@@ -194,14 +209,21 @@ class ParseCaptureTest(unittest.TestCase):
     def test_extrapolates_while_playing(self):
         cap, _ = interaction.parse_queue_capture(self.reply(elapsed_time_last_updated=993.0), 1000.0)
         self.assertAlmostEqual(cap["pos"], 47.0)
+        self.assertAlmostEqual(cap["extrapolated"], 7.0)
 
     def test_no_extrapolation_when_paused(self):
         cap, _ = interaction.parse_queue_capture(
-            self.reply(state="paused", elapsed_time_last_updated=900.0), 1000.0)
+            self.reply(state="paused", elapsed_time_last_updated=990.0), 1000.0)
         self.assertAlmostEqual(cap["pos"], 40.0)
 
+    def test_skewed_clock_is_not_trusted(self):
+        for upd in (0.0, 1100.0):                     # delta 1000 s, or negative: two clocks disagree
+            cap, _ = interaction.parse_queue_capture(self.reply(elapsed_time_last_updated=upd), 1000.0)
+            self.assertAlmostEqual(cap["pos"], 40.0)
+
     def test_position_capped_at_duration(self):
-        cap, _ = interaction.parse_queue_capture(self.reply(elapsed_time_last_updated=0.0), 1000.0)
+        cap, _ = interaction.parse_queue_capture(
+            self.reply(elapsed_time=239.0, elapsed_time_last_updated=990.0), 1000.0)
         self.assertEqual(cap["pos"], 240.0)
 
     def test_radio_not_seekable(self):
@@ -292,6 +314,7 @@ _CLIP_WRAPPERS = ("builtin://radio/", "builtin://track/")   # MA's two measured 
 CONFIRM_BUDGET_S = 4.0         # how long to poll for play_index to show (MA updates queue state async)
 SEEK_MIN_S = 2.0               # below this, resume from the start
 SEEK_END_MARGIN_S = 5.0        # seeking this close to the end would skip the song
+MAX_EXTRAPOLATE_S = 60.0       # elapsed_time_last_updated is MA's clock, `now` is ours: bound the delta
 
 
 def _ma_ok(reply):
@@ -305,10 +328,19 @@ def _float(value):
         return 0.0
 
 
+def is_reply_clip_uri(uri):
+    """A spent reply clip sitting in an MA queue: a TTS render, a signed URL, or the announce chime.
+    Deliberately NARROWER than _is_reply_uri: a radio station added to MA by URL is also stored as
+    builtin://radio/http..., and must stay a resumable queue item (peer review of the plan, finding 8)."""
+    u = (uri or "").lower()
+    return ("tts_proxy" in u or "authsig=" in u
+            or (u.startswith("builtin://track/") and "/media/local/" in u))
+
+
 def parse_queue_capture(reply, now):
     """player_queues/get reply -> (capture, None) or (None, why). Position per design 4.3-1: captured
     before the pause; extrapolated from elapsed_time_last_updated only while playing (MA does not refresh
-    elapsed_time on pause -- spike 3)."""
+    elapsed_time on pause -- spike 3), and only for a sane delta between the two clocks."""
     if not _ma_ok(reply):
         return None, "ma error %s" % ((reply or {}).get("error_code") if isinstance(reply, dict) else "no reply")
     q = reply.get("result") or {}
@@ -319,14 +351,19 @@ def parse_queue_capture(reply, now):
     mi = ci.get("media_item") or {}
     dur = _float(ci.get("duration") or mi.get("duration"))
     pos = _float(q.get("elapsed_time"))
+    extrapolated = 0.0
     upd = q.get("elapsed_time_last_updated")
     if q.get("state") == "playing" and upd is not None:
-        pos += max(0.0, now - _float(upd))
+        delta = now - _float(upd)
+        if 0.0 <= delta <= MAX_EXTRAPOLATE_S:
+            pos += delta
+            extrapolated = delta
     if dur > 0:
         pos = min(pos, dur)
     return {"item": qid, "index": q.get("current_index"), "pos": pos, "duration": dur,
             "seekable": mi.get("media_type") == "track" and dur > 0,
-            "uri": mi.get("uri") or ci.get("uri") or "", "state": q.get("state")}, None
+            "uri": mi.get("uri") or ci.get("uri") or "", "state": q.get("state"),
+            "extrapolated": extrapolated}, None
 
 
 def clip_uri_of(item):
@@ -394,10 +431,12 @@ git commit -m "feat(resolver): queue-mode helpers - capture parsing, exact ancho
 **Interfaces:**
 - Consumes: Task 1 helpers on the MA object; Task 2 module functions.
 - Produces (methods on `InteractionCapability`): `_ma_open(ctx)`, `_ma_close(ma)`, `_queue_on(ctx)`,
-  `_queue_capture(ctx, rid, zone, my_gen) -> qm|None`, `_queue_record_clip(ctx, rid, zone, qm, played_uri,
-  clip)`, `_queue_resume(ctx, rid, zone, qm, source_id, call_timeout) -> bool`, `_queue_finish(ctx, rid, zone,
-  qm, my_gen)`; `_play_clip_and_wait(..., enqueue=None, issue=True)`; `self._queue_targets` (zone → record,
-  guarded by `_lock`). `qm` dict keys: `queue_id, cap, target, clips, played, anchor, unidentified, resume,
+  `_queue_capture(ctx, rid, zone, my_gen) -> qm|None`, `_queue_adopt_target(qm, rid, zone)`,
+  `_queue_record_clip(ctx, rid, zone, qm, played_uri, clip, my_gen)`, `_queue_confirm(ma, queue_id, item,
+  poll_secs) -> (seen, any_read_ok)`, `_queue_resume(ctx, rid, zone, qm, source_id, call_timeout) -> bool`,
+  `_queue_settle(ctx, rid, zone, qm, seek, poll_secs, known_clips)`, `_queue_finish(ctx, rid, zone, qm,
+  my_gen)`; `_play_clip_and_wait(..., enqueue=None, issue=True)`; `self._queue_targets` (zone → record, guarded
+  by `_lock`). `qm` keys: `queue_id, cap, target, clips, played, unrecorded, anchor, unidentified, resume,
   seeked, deleted, inherited_from`.
 
 - [ ] **Step 1: Write the failing tests** — append to `tests/test_queue_resume.py` (above `if __name__`):
@@ -407,21 +446,22 @@ import capability
 from tests.test_interaction import FakeHA, FakeSettings, FakeSleeper, FakeTimer
 
 ZONE = "media_player.ceiling_speakers"
-_is_reply = interaction.InteractionCapability._is_reply_uri
 
 
 class FakeQueue(object):
     """MA's queue as measured (design 3): enqueue=play inserts after current and plays it (also when paused);
     a clip plays for `clip_play_reads` HA reads then goes idle (or never, with clip_never_idle); deleting the
-    current item is a no-op; play_index by id at a position. `lag` = confirming reads before a play_index
-    shows. `fail[name]` = list consumed per call: None (normal), "error", or an Exception to raise."""
+    current item is a no-op; play_index by id at a position. `lag` = confirming reads before a play_index shows.
+    `fail[name]` = list consumed per call: None (normal), "error", or an Exception to raise."""
     def __init__(self, items, current=0, state="playing", elapsed=47.0, last_upd=None):
         self.items = list(items); self.current = current; self.state = state
         self.elapsed = elapsed; self.last_upd = last_upd
         self.calls = []; self.fail = {}; self.lag = 0; self._pending = None
         self.clip_reads = 0; self.clip_play_reads = 1; self.clip_never_idle = False; self.n = 0
         self.enqueue_raises_after_landing = False
+        self.enqueue_raises_without_landing = False
         self.clip_lands_after_play_index = None      # a clip URL that lands only after play_index
+        self.first_wrapper = None                    # store the next clip under this wrapper (identity miss)
 
     def _f(self, name):
         seq = self.fail.get(name)
@@ -436,7 +476,8 @@ class FakeQueue(object):
 
     def _insert_clip(self, uri):
         self.n += 1
-        self.items.insert(self.current + 1, clip_item("c%d" % self.n, uri))
+        wrapper, self.first_wrapper = (self.first_wrapper or "builtin://radio/"), None
+        self.items.insert(self.current + 1, clip_item("c%d" % self.n, uri, wrapper))
         self.current += 1; self.state = "playing"; self.clip_reads = self.clip_play_reads
 
     def cur(self):
@@ -447,20 +488,22 @@ class FakeQueue(object):
         uri = data["media_id"]
         if data.get("enqueue") == "play":
             self.calls.append(("enqueue", uri))
+            if self.enqueue_raises_without_landing:
+                raise OSError("REST timeout; the enqueue never landed")
             self._insert_clip(uri)
             if self.enqueue_raises_after_landing:
                 raise OSError("REST timeout after the enqueue landed")
         else:
             self.calls.append(("replace", uri))
             self.n += 1
-            self.items = [clip_item("r%d" % self.n, uri) if _is_reply(None, uri) else
+            self.items = [clip_item("r%d" % self.n, uri) if interaction.is_reply_clip_uri(uri) else
                           {"queue_item_id": "r%d" % self.n, "name": uri, "media_item": {"uri": uri}}]
-            self.current = 0; self.state = "playing"; self.clip_reads = 1
+            self.current = 0; self.state = "playing"; self.clip_reads = self.clip_play_reads
 
     def ha_state(self):
         ci = self.cur()
         mid = ((ci or {}).get("media_item") or {}).get("uri") or ""
-        if ci is not None and _is_reply(None, mid) and self.state == "playing":
+        if ci is not None and interaction.is_reply_clip_uri(mid) and self.state == "playing":
             if self.clip_reads > 0:
                 self.clip_reads -= 1
             elif not self.clip_never_idle:
@@ -534,7 +577,7 @@ class QueueHA(FakeHA):
     """HA whose ceiling entity reflects the FakeQueue, and whose services act on it."""
     def __init__(self, q, volume=0.3):
         FakeHA.__init__(self)
-        self.q = q; self.volume = volume
+        self.q = q; self.volume = volume; self.volume_boom = False
     def get_entity_state(self, entity_id, timeout=None):
         self.state_timeouts.append(timeout)
         st, mid = self.q.ha_state()
@@ -548,6 +591,8 @@ class QueueHA(FakeHA):
         elif service == "media_play":
             self.q.state = "playing"
         elif service == "volume_set":
+            if self.volume_boom and abs(data["volume_level"] - 0.40) < 0.001:
+                raise OSError("volume_set failed")
             self.volume = data["volume_level"]
 
 
@@ -569,11 +614,11 @@ def new_cap(hook=None):
                                              sleeper=FakeSleeper(hook))
 
 
-def say(cap, ctx, uri=CLIP, uris=None):
+def say(cap, ctx, uri=CLIP, uris=None, rid="rid1"):
     p = {"mode": "say", "uri": uri}
     if uris:
         p["uris"] = uris
-    return capability.run(cap, ctx, p, "rid1")
+    return capability.run(cap, ctx, p, rid)
 
 
 def ctx_for(q):
@@ -629,12 +674,27 @@ class QueueModeTest(unittest.TestCase):
         self.assertEqual(q.ids(), ["st1"])
         self.assertEqual(r["metadata"]["resume"], "queue")
 
+    def test_radio_station_added_by_url_is_resumed_not_mistaken_for_a_clip(self):
+        q = FakeQueue([station(STREAM)], current=0, elapsed=10.0)
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+
     def test_multi_clip_turn_chained_anchors(self):
         q = FakeQueue([track(1), track(2), track(3)], current=1)
         say(new_cap(), ctx_for(q), uris=[CLIP, CLIP2])
         self.assertEqual(q.ids(), ["t1", "t2", "t3"])
         self.assertEqual(len([c for c in q.calls if c[0] == "delete"]), 2)
         self.assertEqual(len([c for c in q.calls if c[0] == "play_index"]), 1)
+
+    def test_unidentified_clip_does_not_cascade(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1)
+        q.first_wrapper = "odd://"                     # the first clip's queue uri will not match exactly
+        r = say(new_cap(), ctx_for(q), uris=[CLIP, CLIP2])
+        self.assertEqual(r["metadata"]["clips_unidentified"], 1)
+        deletes = [c[1] for c in q.calls if c[0] == "delete"]
+        self.assertEqual(deletes, ["c2"])              # the second clip is still found at the live anchor
+        self.assertNotIn("c2", q.ids())
 
     def test_paused_queue_at_enqueue(self):
         q = FakeQueue([track(1), track(2)], current=0)
@@ -675,15 +735,15 @@ class QueueModeTest(unittest.TestCase):
         self.assertEqual(q.cur()["media_item"]["uri"], "builtin://radio/" + CLIP)   # left, logged
 ```
 
-(`test_paused_queue_at_enqueue`: `FakeSettings` leaves `say_pause_before_reply` at its default True, so
-`QueueHA` sets the queue `paused` before the enqueue — the production order measured in spike 3.)
+`test_paused_queue_at_enqueue`: `FakeSettings` leaves `say_pause_before_reply` at its default True, so `QueueHA`
+sets the queue `paused` before the enqueue — the production order measured in spike 3.
 
 - [ ] **Step 2: Run to verify they fail** — `python -m unittest tests.test_queue_resume.QueueModeTest -v`
   → FAIL (queue replaced: `("replace", CLIP)` calls; `KeyError: 'resume'`).
 
 - [ ] **Step 3: Implement.**
 
-3a. In `__init__`, after `self._replies = {}` block:
+3a. In `__init__`, after the `self._replies = {}` block:
 
 ```python
         self._queue_targets = {}                      # MR-08c: zone -> {"gen", "rid", "target", "clips",
@@ -750,7 +810,7 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
             try:
                 r = ma.queue_items(queue_id, offset=max(0, (cap["index"] or 0) - 10), limit=25)
                 window = (r.get("result") or []) if _ma_ok(r) else []
-                stale = sum(1 for x in window if self._is_reply_uri(
+                stale = sum(1 for x in window if is_reply_clip_uri(
                     (x.get("media_item") or {}).get("uri") or x.get("uri") or ""))
             except Exception:
                 pass
@@ -759,22 +819,23 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
             return None
         finally:
             self._ma_close(ma)
-        qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [],
+        qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [], "unrecorded": [],
               "anchor": cap["index"] or 0, "unidentified": 0, "resume": "none", "seeked": False,
               "deleted": 0, "inherited_from": None}
         self._queue_adopt_target(qm, rid, zone)
         with self._lock:
             self._queue_targets[zone] = {"gen": my_gen, "rid": rid, "target": qm["target"],
                                          "clips": list(qm["clips"]), "live": True}
-        LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f seekable=%s stale_reply_clips=%d",
-                 rid, zone, cap["item"], cap["index"], cap["pos"], cap["seekable"], stale)
+        LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f (extrapolated %.1fs) seekable=%s "
+                 "stale_reply_clips=%d", rid, zone, cap["item"], cap["index"], cap["pos"], cap["extrapolated"],
+                 cap["seekable"], stale)
         return qm
 
     def _queue_adopt_target(self, qm, rid, zone):
         """Which item this turn resumes. Task 3: the captured item, unless it is itself a reply clip.
-        (Task 5 extends this with barge-in / pending-resume inheritance, design 4.5-4.6.)"""
+        (Task 5 replaces this with barge-in / pending-resume inheritance, design 4.5-4.6.)"""
         cap = qm["cap"]
-        if self._is_reply_uri(cap["uri"]):
+        if is_reply_clip_uri(cap["uri"]):
             LOG.info("SAY req=%s zone=%s current queue item %s is a reply clip; no resume target",
                      rid, zone, cap["item"])
             return
@@ -786,28 +847,42 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
             if rec is not None and rec.get("gen") == my_gen:
                 rec["clips"] = list(qm["clips"])
 
-    def _queue_record_clip(self, ctx, rid, zone, qm, played_uri, clip, my_gen=None):
-        """Design 4.3-4: record this clip's queue id by exact, position-anchored identity."""
-        qm["played"].append(played_uri)
+    def _queue_record_clip(self, ctx, rid, zone, qm, played_uri, clip, my_gen):
+        """Design 4.3-4: record this clip's queue id by exact identity at the anchored position. enqueue=play
+        makes the clip CURRENT, so the live current item at anchor+1 is checked first and a window read at the
+        anchor is the fallback. The anchor follows the live current index, so one miss cannot cascade onto
+        the next clip of the same turn."""
         ma = None
+        qid, idx, why = None, None, None
+        cur_idx, cur_is_clip = None, False
         try:
             ma = self._ma_open(ctx)
-            r = ma.queue_items(qm["queue_id"], offset=qm["anchor"], limit=5)
-            items = (r.get("result") or []) if _ma_ok(r) else []
-            qid, idx, why = anchored_clip(items, qm["anchor"], qm["anchor"], played_uri)
+            s = ma.queue_state(qm["queue_id"])
+            if _ma_ok(s):
+                q = s.get("result") or {}
+                ci = q.get("current_item") or {}
+                cur_idx = q.get("current_index")
+                cur_is_clip = is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or "")
+                if cur_idx == qm["anchor"] + 1 and ci.get("queue_item_id"):
+                    qid, idx, why = anchored_clip([ci], cur_idx, qm["anchor"], played_uri)
+            if qid is None:
+                r = ma.queue_items(qm["queue_id"], offset=qm["anchor"], limit=5)
+                items = (r.get("result") or []) if _ma_ok(r) else []
+                qid, idx, why = anchored_clip(items, qm["anchor"], qm["anchor"], played_uri)
         except Exception as e:
             qid, idx, why = None, None, "read failed (%r)" % (e,)
         finally:
             self._ma_close(ma)
         if qid is None:
             qm["unidentified"] += 1
+            if cur_is_clip and cur_idx is not None:
+                qm["anchor"] = cur_idx              # the next clip is inserted after this one
             LOG.warning("SAY req=%s zone=%s clip=%s queue_item UNIDENTIFIED (%s)", rid, zone, clip, why)
             return
         if qid not in qm["clips"]:
             qm["clips"].append(qid)
         qm["anchor"] = idx
-        if my_gen is not None:
-            self._queue_publish_clips(zone, my_gen, qm)
+        self._queue_publish_clips(zone, my_gen, qm)
         LOG.info("SAY req=%s zone=%s clip=%s queue_item=%s", rid, zone, clip, qid)
 
     def _queue_confirm(self, ma, queue_id, item, poll_secs):
@@ -836,6 +911,7 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
         qid = qm["queue_id"]
         seek = seek_target(t)
         poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
+        known_clips = list(qm["clips"])              # clips we already knew BEFORE this resume
         qm["resume"] = "attempted"
         called, why, seen, reads_ok = "ok", None, False, False
         ma = None
@@ -868,7 +944,7 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
             qm["seeked"] = seek > 0
             LOG.info("SAY req=%s zone=%s resumed by queue item=%s outcome=%s seek=%s",
                      rid, zone, t["item"], outcome, seek if seek else "skipped")
-            self._queue_settle(ctx, rid, zone, qm, seek, poll_secs)
+            self._queue_settle(ctx, rid, zone, qm, seek, poll_secs, known_clips)
             return True
         if outcome == "unknown":
             LOG.error("SAY req=%s zone=%s resume unknown (%s); not replaying", rid, zone, why)
@@ -883,7 +959,7 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
                 LOG.warning("SAY req=%s zone=%s URI fallback failed (%r); source NOT resumed", rid, zone, e)
         return False
 
-    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs):
+    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips):
         """Task 3: no-op placeholder with the final signature; Task 4 fills it (design 4.3-7)."""
         return None
 
@@ -930,24 +1006,47 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
         if qm["target"] is not None and qm["resume"] != "confirmed":
             LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
                      rid, zone, qm["target"]["item"], qm["clips"])
+
+    def _queue_superseded_exit(self, ctx, rid, zone, qm, my_gen):
+        """Design 4.5: a successor that CAPTURED owns the resume. If none did -- e.g. an announcement claimed
+        the generation and aborted before reaching _say -- this turn's record would stay live forever and
+        nobody would resume: record any unrecorded clips and turn it into a pending resume."""
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            mine = rec is not None and rec.get("gen") == my_gen
+        if not mine:
+            return
+        for uri in list(qm["unrecorded"]):
+            self._queue_record_clip(ctx, rid, zone, qm, uri, self._clip_id(uri), my_gen)
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            if rec is not None and rec.get("gen") == my_gen:
+                rec["live"] = False
+                rec["clips"] = list(qm["clips"])
+        LOG.info("SAY req=%s zone=%s superseded with no successor capture; pending resume recorded", rid, zone)
 ```
 
 3d. `_say` edits:
-- Before `try:` (line with `replay_done = [False]`), add: `qm = None` and `queue_done = [False]`.
+- Before `try:` (next to `replay_done = [False]`), add: `qm = None` and `queue_done = [False]`.
 - First statement inside the `try:` (before `# 3. normalise`):
 
 ```python
             # MR-08c: capture the interrupted queue item BEFORE the pause and any enqueue (design 4.3-1).
             qm = self._queue_capture(ctx, rid, zone, my_gen)
 ```
-- In the clip loop, replace the `res = self._play_clip_and_wait(...)` call with:
+- In the clip loop, keep the existing `queue_may_be_replaced[0] = True` line, and replace the
+  `res = self._play_clip_and_wait(...)` call with:
 
 ```python
                 res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
                                                opts, superseded,
                                                enqueue=("play" if qm is not None else None))
                 if qm is not None:
-                    self._queue_record_clip(ctx, rid, zone, qm, one_uri, one_clip, my_gen)
+                    qm["played"].append(one_uri)
+                    if superseded():
+                        qm["unrecorded"].append(one_uri)   # a successor may own the queue now
+                    else:
+                        self._queue_record_clip(ctx, rid, zone, qm, one_uri, one_clip, my_gen)
 ```
 - Replace the whole step 9 block (`# 9. replay source ...` through its `except` line) with:
 
@@ -969,30 +1068,37 @@ replace the play call block (the `self._say_call(... "play_media" ...)` + `out["
                     replay_done[0] = True       # the finally must not replay a second time
                 except Exception as e:
                     LOG.warning("SAY req=%s zone=%s replay failed (%r); source NOT resumed", rid, zone, e)
-            resume_mode = {"confirmed": "queue"}.get(qm["resume"], qm["resume"]) if qm is not None else "legacy"
+            resume_mode = ({"confirmed": "queue"}.get(qm["resume"], qm["resume"]) if qm is not None
+                           else "legacy")
 ```
-- Final log + return metadata: change the `LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s ...` line to
-  append `resume=%s` with `resume_mode`, and add to the metadata dict:
+- Final log + return metadata: append `resume=%s` (with `resume_mode`) to the
+  `LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s ...` line, and add to the metadata dict:
   `"resume": resume_mode, "seeked": bool(qm and qm["seeked"]), "clips_deleted": (qm["deleted"] if qm else 0),
   "clips_unidentified": (qm["unidentified"] if qm else 0),`
 - `finally:` — wrap the two legacy recovery blocks (the `replayed_here = False ... abort-replay` block and the
-  un-pause block) in `if qm is None:` (indent them one level; keep their content byte-identical), and add
-  before `release_reply()`:
+  un-pause block, which reads `replayed_here`) together in `if qm is None:` (indent one level; content
+  byte-identical), and add before `release_reply()`:
 
 ```python
             if qm is not None:
-                # Queue mode: the queue was never replaced. If we died before step 9, resume per the design
-                # 4.4 table on fresh connections; once play_index was issued, never re-decide here.
-                if not queue_done[0] and not superseded():
-                    try:
+                try:
+                    if superseded():
+                        self._queue_superseded_exit(ctx, rid, zone, qm, my_gen)
+                    elif not queue_done[0]:
+                        # Died before step 9. Only act on what WE changed (peer review finding 2):
+                        #  - a clip may sit in front of the song -> resume the captured item (table 4.4);
+                        #  - we only paused -> the queue is exactly as it was: un-pause in place;
+                        #  - neither -> the song was never interrupted: do nothing.
                         if was_playing and qm["target"] is not None and qm["resume"] == "none":
-                            self._queue_resume(ctx, rid, zone, qm, source_id,
-                                               int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                            if queue_may_be_replaced[0]:
+                                self._queue_resume(ctx, rid, zone, qm, source_id,
+                                                   int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0)
+                            elif paused_by_us[0]:
+                                self._say_call(ctx, rid, zone, "media_player", "media_play", {"entity_id": zone})
                         self._queue_finish(ctx, rid, zone, qm, my_gen)
-                    except Exception as e:
-                        LOG.error("SAY req=%s zone=%s queue recovery failed (%r)", rid, zone, e)
+                except Exception as e:
+                    LOG.error("SAY req=%s zone=%s queue recovery failed (%r)", rid, zone, e)
 ```
-Note `replayed_here` is read by the un-pause condition — keep both legacy blocks inside the same `if qm is None:`.
 
 - [ ] **Step 4: Run** — `python -m unittest tests.test_queue_resume tests.test_interaction -v` → all PASS,
   `test_interaction` unmodified.
@@ -1006,7 +1112,7 @@ git commit -m "feat(resolver): replies keep the queue - enqueue the clip, resume
 
 ---
 
-### Task 4: Failure handling — decision table, late landing, settle check, `finally`
+### Task 4: Failure handling — decision table, late landing, settle check, recovery
 
 **Files:**
 - Modify: `docs/homebrain/mass-resolver/interaction.py` (`_queue_settle` body; clip loop try/except; new
@@ -1015,7 +1121,7 @@ git commit -m "feat(resolver): replies keep the queue - enqueue the clip, resume
 
 **Interfaces:**
 - Consumes: Task 3 methods. Produces: `_queue_after_raised_enqueue(ctx, rid, zone, qm, one_uri, one_key,
-  one_clip, opts, superseded, my_gen) -> res dict` (same shape as `_play_clip_and_wait`'s).
+  one_clip, opts, superseded) -> res dict` (same shape as `_play_clip_and_wait`'s).
 
 - [ ] **Step 1: Write the failing tests** — append:
 
@@ -1027,17 +1133,22 @@ class QueueFailureTest(unittest.TestCase):
     def replaces(self, q):
         return [c for c in q.calls if c[0] == "replace"]
 
+    def play_indexes(self, q):
+        return [c for c in q.calls if c[0] == "play_index"]
+
     def test_confirmation_lag_within_budget_is_confirmed(self):
         q = self.q8(); q.lag = 3
         r = say(new_cap(), ctx_for(q))
         self.assertEqual(r["metadata"]["resume"], "queue")
         self.assertEqual(self.replaces(q), [])
+        self.assertEqual(len(self.play_indexes(q)), 1)
 
-    def test_lag_beyond_budget_is_unconfirmed_and_never_replays(self):
+    def test_lag_beyond_budget_is_unconfirmed_and_never_replays_or_restarts(self):
         q = self.q8(); q.lag = 50
         r = say(new_cap(), ctx_for(q))
         self.assertEqual(r["metadata"]["resume"], "unconfirmed")
         self.assertEqual(self.replaces(q), [])
+        self.assertEqual(len(self.play_indexes(q)), 1)     # settle must not re-resume a merely lagging MA
 
     def test_play_index_error_and_reads_show_other_item_falls_back_once(self):
         q = self.q8(); q.fail["play_index"] = ["error"]
@@ -1047,14 +1158,14 @@ class QueueFailureTest(unittest.TestCase):
 
     def test_play_index_error_and_reads_fail_falls_back_once(self):
         q = self.q8(); q.fail["play_index"] = ["error"]
-        q.fail["queue_state"] = [None] + [OSError("read")] * 30        # capture ok, then every read fails
+        q.fail["queue_state"] = [None, None] + [OSError("read")] * 30   # capture + record ok, then all fail
         r = say(new_cap(), ctx_for(q))
         self.assertEqual(r["metadata"]["resume"], "fallback_uri")
         self.assertEqual(len(self.replaces(q)), 1)
 
     def test_play_index_raised_and_reads_fail_is_unknown_no_replay(self):
         q = self.q8(); q.fail["play_index"] = [OSError("timeout")]
-        q.fail["queue_state"] = [None] + [OSError("read")] * 30
+        q.fail["queue_state"] = [None, None] + [OSError("read")] * 30
         r = say(new_cap(), ctx_for(q))
         self.assertEqual(r["metadata"]["resume"], "unknown")
         self.assertEqual(self.replaces(q), [])
@@ -1076,10 +1187,10 @@ class QueueFailureTest(unittest.TestCase):
             say(cap, ctx_for(q))
         except Exception:
             pass
-        self.assertEqual(len([c for c in q.calls if c[0] == "play_index"]), 1)
+        self.assertEqual(len(self.play_indexes(q)), 1)
         self.assertEqual(self.replaces(q), [])
 
-    def test_exception_before_play_index_resumes_in_finally(self):
+    def test_exception_after_enqueue_resumes_in_recovery(self):
         q = self.q8()
         cap = new_cap()
         def boom(*a, **k):
@@ -1089,8 +1200,33 @@ class QueueFailureTest(unittest.TestCase):
             say(cap, ctx_for(q))
         except Exception:
             pass
-        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "t3", 47)])
+        self.assertEqual(self.play_indexes(q), [("play_index", "t3", 47)])
         self.assertEqual(self.replaces(q), [])
+
+    def test_exception_after_pause_before_enqueue_unpauses_in_place(self):
+        q = self.q8()
+        ctx = ctx_for(q); ctx.ha.volume_boom = True           # the reply-volume write fails after the pause
+        try:
+            say(new_cap(), ctx)
+        except Exception:
+            pass
+        self.assertEqual(self.play_indexes(q), [])
+        self.assertEqual([c for c in q.calls if c[0] == "enqueue"], [])
+        self.assertIn(("media_player", "media_play", {"entity_id": ZONE}), ctx.ha.calls)
+
+    def test_exception_before_pause_leaves_the_song_alone(self):
+        q = self.q8()
+        ctx = ctx_for(q)
+        cap = new_cap()
+        def boom(*a, **k):
+            raise RuntimeError("before the pause")
+        cap._warn_if_double_speak = boom
+        try:
+            say(cap, ctx)
+        except Exception:
+            pass
+        self.assertEqual(self.play_indexes(q), [])
+        self.assertEqual([c for c in ctx.ha.calls if c[1] in ("media_play", "media_pause")], [])
 
     def test_enqueue_raised_but_landed_waits_then_resumes_and_deletes(self):
         q = self.q8(); q.enqueue_raises_after_landing = True
@@ -1100,25 +1236,38 @@ class QueueFailureTest(unittest.TestCase):
         self.assertEqual(self.replaces(q), [])
         self.assertEqual(r["metadata"]["resume"], "queue")
 
+    def test_enqueue_raised_not_landed_is_not_reported_certainly_silent(self):
+        q = self.q8(); q.enqueue_raises_without_landing = True
+        r = say(new_cap(), ctx_for(q))
+        self.assertFalse(r["metadata"]["likely_silent"])     # AN-01 honesty rule: unknown, not a denial
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+
     def test_clip_landing_after_resume_is_caught_by_settle(self):
         q = self.q8(); q.clip_lands_after_play_index = CLIP
         say(new_cap(), ctx_for(q))
-        self.assertEqual(len([c for c in q.calls if c[0] == "play_index"]), 2)   # resumed once more
+        self.assertEqual(len(self.play_indexes(q)), 2)       # resumed once more
         self.assertEqual(q.cur()["queue_item_id"], "t3")
         self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
 ```
 
-Note `test_clip_landing_after_resume_is_caught_by_settle`: the first clip lands normally and is deleted; the
-late one is inserted by `play_index` right after `t3`, so settle sees a reply clip current, identifies it at
-`t3`'s index + 1 (exact match against a played URL), records it, resumes again, and `_queue_finish` deletes it.
+`test_clip_landing_after_resume_is_caught_by_settle`: the first clip lands normally (c1, recorded); the late one
+(c2) is inserted by `play_index` right after `t3`, so the confirm poll never sees `t3` (unconfirmed); settle sees
+c2 current, **not** in the clips known before the resume, identifies it at `t3`'s index + 1 (exact match against a
+played URL), records it, resumes once more, and `_queue_finish` deletes c1 and c2. In the lag test the current
+item stays c1, which *was* known before the resume, so settle does nothing.
+
+`test_exception_before_pause_leaves_the_song_alone`: `_warn_if_double_speak` runs after the capture and before
+the pause (`SAY start` step), so neither `paused_by_us` nor `queue_may_be_replaced` is set.
 
 - [ ] **Step 2: Run to verify they fail** — `python -m unittest tests.test_queue_resume.QueueFailureTest -v`
-  → the late-landing and settle tests FAIL (enqueue exception propagates; one `play_index`). Others may pass
-  already from Task 3 — that is expected, they pin the table.
+  → the enqueue-raised, not-landed and settle tests FAIL (the exception propagates; one `play_index`). Others may
+  pass already from Task 3 — expected; they pin the table.
 
 - [ ] **Step 3: Implement.**
 
-3a. Clip loop in `_say` — wrap the queue-mode call:
+3a. Clip loop in `_say` — replace the Task 3 queue-mode block (`res = self._play_clip_and_wait(... enqueue=...)`
+and the `if qm is not None:` record block) with:
 
 ```python
                 if qm is not None:
@@ -1129,8 +1278,12 @@ late one is inserted by `play_index` right after `t3`, so settle sees a reply cl
                         LOG.warning("SAY req=%s zone=%s clip=%s enqueue raised (%r); checking the queue",
                                     rid, zone, one_clip, e)
                         res = self._queue_after_raised_enqueue(ctx, rid, zone, qm, one_uri, one_key,
-                                                               one_clip, opts, superseded, my_gen)
-                    self._queue_record_clip(ctx, rid, zone, qm, one_uri, one_clip, my_gen)
+                                                               one_clip, opts, superseded)
+                    qm["played"].append(one_uri)
+                    if superseded():
+                        qm["unrecorded"].append(one_uri)
+                    else:
+                        self._queue_record_clip(ctx, rid, zone, qm, one_uri, one_clip, my_gen)
                 else:
                     res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
                                                    opts, superseded)
@@ -1139,11 +1292,12 @@ late one is inserted by `play_index` right after `t3`, so settle sees a reply cl
 3b. New method:
 
 ```python
-    def _queue_after_raised_enqueue(self, ctx, rid, zone, qm, one_uri, one_key, one_clip, opts, superseded,
-                                    my_gen):
-        """Design 4.3-5: an enqueue whose REST call raised may still have landed. If the clip is current,
-        wait it out (so we never cut the answer off); otherwise carry on -- the record step finds it."""
-        out = {"started": False, "issued": True, "clip": one_clip, "ended": False, "gave_up": "enqueue_raised"}
+    def _queue_after_raised_enqueue(self, ctx, rid, zone, qm, one_uri, one_key, one_clip, opts, superseded):
+        """Design 4.3-5: an enqueue whose REST call raised may still have landed. If the clip is current, wait
+        it out (never cut the answer off); otherwise carry on -- the record step or the settle check finds it.
+        gave_up is "unreadable", NOT a denial: the clip may have played, and likely_silent must not claim the
+        room heard nothing (the AN-01 honesty rule at the start poll, ~1227)."""
+        out = {"started": False, "issued": True, "clip": one_clip, "ended": False, "gave_up": "unreadable"}
         ma = None
         cur = None
         try:
@@ -1164,9 +1318,11 @@ late one is inserted by `play_index` right after `t3`, so settle sees a reply cl
 3c. `_queue_settle` body (replace the placeholder):
 
 ```python
-    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs):
-        """Design 4.3-7: one settle re-read after a poll interval. A late-landing enqueue can put a reply
-        clip back in front of the song; if so, record it (exact + anchored) and resume ONCE more."""
+    def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips):
+        """Design 4.3-7: one settle re-read after a poll interval. A late-landing enqueue can put a NEW reply
+        clip in front of the song; if so, record it (exact + anchored) and resume ONCE more. A clip we already
+        knew before the resume just means MA is lagging -- re-resuming would restart the song (peer review
+        finding 1)."""
         self._sleeper(poll_secs)
         t = qm["target"]
         ma = None
@@ -1177,23 +1333,24 @@ late one is inserted by `play_index` right after `t3`, so settle sees a reply cl
                 return
             q = s.get("result") or {}
             ci = q.get("current_item") or {}
-            if not ci or ci.get("queue_item_id") == t["item"]:
+            cid = ci.get("queue_item_id")
+            if not ci or cid == t["item"] or cid in known_clips:
                 return
-            if not self._is_reply_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""):
+            if not is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""):
                 return
             idx = q.get("current_index")
             if idx is not None and idx >= 1:
                 r = ma.queue_items(qm["queue_id"], offset=idx - 1, limit=2)
                 items = (r.get("result") or []) if _ma_ok(r) else []
                 for played in qm["played"]:
-                    cid, _, _ = anchored_clip(items, idx - 1, idx - 1, played)
-                    if cid == ci.get("queue_item_id"):
+                    got, _, _ = anchored_clip(items, idx - 1, idx - 1, played)
+                    if got == cid:
                         if cid not in qm["clips"]:
                             qm["clips"].append(cid)
                         break
             ma.play_index(qm["queue_id"], t["item"], seek_position=seek)
-            LOG.warning("SAY req=%s zone=%s settle: reply clip %s displaced item %s; resumed again",
-                        rid, zone, ci.get("queue_item_id"), t["item"])
+            LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; resumed again",
+                        rid, zone, cid, t["item"])
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s settle check failed (%r)", rid, zone, e)
         finally:
@@ -1206,7 +1363,7 @@ late one is inserted by `play_index` right after `t3`, so settle sees a reply cl
 
 ```bash
 git add docs/homebrain/mass-resolver/interaction.py docs/homebrain/mass-resolver/tests/test_queue_resume.py
-git commit -m "feat(resolver): queue resume decision table, late-landing clips, settle check"
+git commit -m "feat(resolver): queue resume decision table, late-landing clips, settle check, scoped recovery"
 ```
 
 ---
@@ -1237,11 +1394,32 @@ class QueueContinuityTest(unittest.TestCase):
                 state["fired"] = True
                 capability.run(cap, ctx, {"mode": "say", "uri": CLIP2}, "ridB")
         cap = new_cap(hook)
-        say(cap, ctx)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(cap, ctx)
         self.assertTrue(state["fired"])
         self.assertEqual(q.ids(), ["t1", "t2", "t3", "t4", "t5"])           # both clips gone
         self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "t3", 47)])
         self.assertEqual([c for c in q.calls if c[0] == "replace"], [])
+        self.assertFalse(any("UNIDENTIFIED" in m for m in lg.output))     # superseded A does not probe
+
+    def test_superseded_without_successor_capture_leaves_a_pending_resume(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, elapsed=47.0)
+        q.clip_play_reads = 3
+        ctx = ctx_for(q)
+        state = {"fired": False}
+        def hook(n):
+            # An announcement claims the generation and aborts before _say: nobody else captures.
+            if not state["fired"] and q.state == "playing" and q.cur()["queue_item_id"].startswith("c"):
+                state["fired"] = True
+                with cap._lock:
+                    cap._say_gen[ZONE] = cap._say_gen.get(ZONE, 0) + 1
+        cap = new_cap(hook)
+        say(cap, ctx)
+        self.assertFalse(cap._queue_targets[ZONE]["live"])
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(q.cur()["queue_item_id"], "t2")
 
     def test_pause_question_resume(self):
         q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
@@ -1262,10 +1440,22 @@ class QueueContinuityTest(unittest.TestCase):
         ctx = ctx_for(q)
         cap = new_cap()
         say(cap, ctx)
-        say(cap, ctx, uri=CLIP2)
+        say(cap, ctx, uri=CLIP2, rid="rid2")
         capability.run(cap, ctx, {"mode": "resume"}, "rid3")
         self.assertEqual(q.ids(), ["t1", "t2", "t3"])
         self.assertEqual(q.cur()["queue_item_id"], "t2")
+
+    def test_same_fixed_reply_twice_identifies_the_new_clip_not_the_anchor(self):
+        # HA's TTS cache gives the same URL for the same text: after Q1 the current item is c1(CLIP), and Q2's
+        # anchor IS that identical clip. Q2's clip must be found at anchor + 1.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        say(cap, ctx, rid="rid2")
+        capability.run(cap, ctx, {"mode": "resume"}, "rid3")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(sorted(c[1] for c in q.calls if c[0] == "delete"), ["c1", "c2"])
 
     def test_plain_pause_resume_unpauses_in_place(self):
         q = FakeQueue([track(1), track(2)], current=1, state="paused")
@@ -1273,6 +1463,13 @@ class QueueContinuityTest(unittest.TestCase):
         r = capability.run(new_cap(), ctx, {"mode": "resume"}, "rid1")
         self.assertEqual(r["metadata"]["how"], "unpause_queue")
         self.assertIn(("media_player", "media_play", {"entity_id": ZONE}), ctx.ha.calls)
+        self.assertEqual([c for c in q.calls if c[0] in ("replace", "play_index")], [])
+
+    def test_resume_while_already_playing_is_a_no_op(self):
+        q = FakeQueue([track(1), track(2)], current=1, state="playing")
+        ctx = ctx_for(q)
+        r = capability.run(new_cap(), ctx, {"mode": "resume"}, "rid1")
+        self.assertEqual(r["metadata"]["how"], "already_playing")
         self.assertEqual([c for c in q.calls if c[0] in ("replace", "play_index")], [])
 
     def test_paused_reply_clip_is_never_unpaused(self):
@@ -1305,7 +1502,7 @@ class QueueContinuityTest(unittest.TestCase):
 
 - [ ] **Step 2: Run to verify they fail** — `python -m unittest tests.test_queue_resume.QueueContinuityTest -v`
   → FAIL (barge-in resumes a clip / two `play_index`; `resume` metadata lacks `queue_pending`; `media_play` on a
-  paused clip).
+  paused clip; no `already_playing`).
 
 - [ ] **Step 3: Implement.**
 
@@ -1313,21 +1510,20 @@ class QueueContinuityTest(unittest.TestCase):
 
 ```python
     def _queue_adopt_target(self, qm, rid, zone):
-        """Which item this turn resumes (design 4.5-4.6). A record left by a superseded turn (live) or a
+        """Which item this turn resumes (design 4.5-4.6). A record left by a superseded turn (live) or by a
         turn that did not resume (pending) is INHERITED when this turn's current item is one of its clips --
         or, for a live record whose turn recorded none yet, when the current item is a reply clip: that item
         is then recorded as the earlier turn's clip (it sits at that turn's anchor + 1). Capturing a real
         item clears any record."""
         cap = qm["cap"]
-        is_clip = self._is_reply_uri(cap["uri"])
+        is_clip = is_reply_clip_uri(cap["uri"])
         with self._lock:
             rec = self._queue_targets.get(zone)
             rec = dict(rec, clips=list(rec["clips"])) if rec is not None else None
-            if rec is None or not is_clip:
-                if not is_clip:
-                    self._queue_targets.pop(zone, None)
-        if rec is not None and rec.get("target") is not None and (
-                cap["item"] in rec["clips"] or (rec.get("live") and is_clip)):
+            if not is_clip:
+                self._queue_targets.pop(zone, None)
+        if rec is not None and is_clip and rec.get("target") is not None and (
+                cap["item"] in rec["clips"] or rec.get("live")):
             if cap["item"] not in rec["clips"]:
                 rec["clips"].append(cap["item"])
             qm["target"] = rec["target"]
@@ -1343,7 +1539,7 @@ class QueueContinuityTest(unittest.TestCase):
         qm["target"] = cap
 ```
 
-3b. `note_playback` — first line of the method body, before `self.remember_source(zone, uri)`:
+3b. `note_playback` — first statement of the method body, before `self.remember_source(zone, uri)`:
 
 ```python
         with self._lock:
@@ -1354,8 +1550,9 @@ class QueueContinuityTest(unittest.TestCase):
 
 ```python
     def _resume_from_queue(self, ctx, zone, rid):
-        """Design 4.6: continue a pending queue resume, or un-pause a paused real item in place. None ->
-        the existing resume logic runs."""
+        """Design 4.6: continue a pending queue resume, un-pause a paused real item in place, or do nothing
+        when a real item is already playing (a legacy replay would replace the queue). None -> the existing
+        resume logic runs."""
         if not self._queue_on(ctx):
             return None
         queue_id = ctx.settings.queue_id
@@ -1372,6 +1569,7 @@ class QueueContinuityTest(unittest.TestCase):
             ci = q.get("current_item") or {}
             cur_id = ci.get("queue_item_id")
             cur_uri = (ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""
+            cur_is_clip = is_reply_clip_uri(cur_uri)
             if (rec is not None and not rec.get("live") and rec.get("target") is not None
                     and cur_id in rec["clips"]):
                 t = rec["target"]
@@ -1391,7 +1589,12 @@ class QueueContinuityTest(unittest.TestCase):
                 return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
                              metadata={"resumed": True, "uri": t.get("uri"), "how": "queue_pending",
                                        "zone": zone})
-            if q.get("state") == "paused" and cur_id and not self._is_reply_uri(cur_uri):
+            if cur_id and not cur_is_clip and q.get("state") == "playing":
+                LOG.info("RESUME req=%s zone=%s already playing queue item %s; nothing to do", rid, zone, cur_id)
+                return cr.ok(self.name, rid, "Already playing.", spoken_text=None,
+                             metadata={"resumed": False, "uri": cur_uri or None, "how": "already_playing",
+                                       "zone": zone})
+            if cur_id and not cur_is_clip and q.get("state") == "paused":
                 ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
                 self.note_playback(ctx, zone, cur_uri or "unpaused")
                 LOG.info("RESUME req=%s zone=%s un-paused the queue in place", rid, zone)
@@ -1414,10 +1617,10 @@ In `_resume`, first lines of the body:
             return res
 ```
 
-3d. **The one allowed legacy change:** in `_resume`, the existing un-pause branch must not un-pause a spent
-reply clip (spec §7 "a paused reply clip is never un-paused"). Change `if state == "paused":` to
-`if state == "paused" and not self._is_reply_uri(cid):`. Run `tests.test_interaction` — if any existing test
-asserts un-pausing a paused *reply clip*, STOP and report it by name (it would encode the bug).
+3d. **The one allowed legacy change:** in `_resume`'s existing logic, the un-pause branch must not un-pause a
+spent reply clip (spec §7). Change `if state == "paused":` to `if state == "paused" and not self._is_reply_uri(cid):`.
+Run `tests.test_interaction` — if any existing test asserts un-pausing a paused *reply clip*, STOP and report it by
+name (it would encode the bug).
 
 - [ ] **Step 4: Run** — `python -m unittest tests.test_queue_resume tests.test_interaction -v` → all PASS.
 
@@ -1489,21 +1692,27 @@ git commit -m "feat(resolver): log the query on a music miss"
 | # | Mutation (`interaction.py`) | Run | Must fail |
 |---|---|---|---|
 | 1 | clip loop passes `enqueue=None` in queue mode | `tests.test_queue_resume.QueueModeTest` | `test_multi_item_queue_survives_and_resumes_at_position` |
-| 2 | `_queue_resume`: map `unconfirmed` to `fallback_uri` | `…QueueFailureTest` | `test_lag_beyond_budget_is_unconfirmed_and_never_replays` |
-| 3 | `anchored_clip`: search the whole window for the first exact URL instead of `anchor+1` | `…QueueModeTest` | `test_identical_leftover_clip_untouched_and_counted` |
+| 2 | `_queue_resume`: map `unconfirmed` to `fallback_uri` | `…QueueFailureTest` | `test_lag_beyond_budget_is_unconfirmed_and_never_replays_or_restarts` |
+| 3 | `anchored_clip`: return the first exact URL match anywhere in the window instead of `anchor+1` | `tests.test_queue_resume.ClipIdentityTest` | `test_identical_leftover_elsewhere_is_ignored` |
 | 4 | `_queue_finish`: also delete every reply-clip item in a window read | `…QueueModeTest` | `test_identical_leftover_clip_untouched_and_counted` |
 | 5 | `_queue_settle`: `return` immediately | `…QueueFailureTest` | `test_clip_landing_after_resume_is_caught_by_settle` |
-| 6 | `_queue_adopt_target`: ignore the record (always `qm["target"] = cap` unless a clip) | `…QueueContinuityTest` | `test_barge_in_before_first_turn_recorded_its_clip` |
-| 7 | `_resume`: skip `_resume_from_queue` | `…QueueContinuityTest` | `test_pause_question_resume` |
-| 8 | `seek_target`: drop the end-margin check | `tests.test_queue_resume.SeekTargetTest` | `test_gates` |
-| 9 | `parse_queue_capture`: ignore `elapsed_time_last_updated` | `…QueueModeTest` | `test_position_extrapolated_from_last_update` |
-| 10 | `finally`: drop the `qm["resume"] == "none"` condition (re-decide after play_index) | `…QueueFailureTest` | `test_exception_after_play_index_is_not_redecided` |
-| 11 | `_queue_resume`: treat `raised` + all reads failed as `fallback_uri` | `…QueueFailureTest` | `test_play_index_raised_and_reads_fail_is_unknown_no_replay` |
+| 6 | `_queue_settle`: drop the `cid in known_clips` check | `…QueueFailureTest` | `test_lag_beyond_budget_is_unconfirmed_and_never_replays_or_restarts` |
+| 7 | `_queue_adopt_target`: ignore the record (always `qm["target"] = cap` unless a clip) | `…QueueContinuityTest` | `test_barge_in_before_first_turn_recorded_its_clip` |
+| 8 | `_resume`: skip `_resume_from_queue` | `…QueueContinuityTest` | `test_pause_question_resume` |
+| 9 | `seek_target`: drop the end-margin check | `…SeekTargetTest` | `test_gates` |
+| 10 | `parse_queue_capture`: ignore `elapsed_time_last_updated` | `…QueueModeTest` | `test_position_extrapolated_from_last_update` |
+| 11 | `finally`: drop the `qm["resume"] == "none"` condition (re-decide after play_index) | `…QueueFailureTest` | `test_exception_after_play_index_is_not_redecided` |
+| 12 | `finally`: resume by `play_index` whenever `resume == "none"` (drop the `queue_may_be_replaced` / `paused_by_us` split) | `…QueueFailureTest` | `test_exception_after_pause_before_enqueue_unpauses_in_place` |
+| 13 | `finally`: skip `_queue_superseded_exit` | `…QueueContinuityTest` | `test_superseded_without_successor_capture_leaves_a_pending_resume` |
+| 14 | `_queue_resume`: treat `raised` + all reads failed as `fallback_uri` | `…QueueFailureTest` | `test_play_index_raised_and_reads_fail_is_unknown_no_replay` |
+| 15 | `_queue_adopt_target` / capture: use `self._is_reply_uri` instead of `is_reply_clip_uri` | `…QueueModeTest` | `test_radio_station_added_by_url_is_resumed_not_mistaken_for_a_clip` |
+| 16 | `_queue_after_raised_enqueue`: `gave_up="enqueue_raised"` | `…QueueFailureTest` | `test_enqueue_raised_not_landed_is_not_reported_certainly_silent` |
+| 17 | `_queue_record_clip`: do not move the anchor on a miss | `…QueueModeTest` | `test_unidentified_clip_does_not_cascade` |
 
 - [ ] **Step 3: Commit** (tests only if any were tightened; otherwise an empty evidence commit):
 
 ```bash
-git commit --allow-empty -m "test(resolver): MR-08c full suite green; mutation check 11/11 caught"
+git commit --allow-empty -m "test(resolver): MR-08c full suite green; mutation check 17/17 caught"
 ```
 
 - [ ] **Step 4: Whole-branch review** by the controller (not the implementer).
@@ -1518,10 +1727,12 @@ plan's Task 7), with these specifics:
 - **Gate:** claim the §10 row on its own small branch off `origin/main`; PR via the browser URL (`gh` cannot
   create PRs here); wait for the merge.
 - **Backup** with sha256 (`.bak/<ts>/SHA256SUMS`, written via `/tmp`), including `tests/`.
+- **Read-only probe before staging:** list the radio favourites' queue-item URIs (play nothing — read
+  `music/radios/library_items`); if any favourite's URI would match `is_reply_clip_uri`, STOP (finding 8).
 - **Stage** in `~/mr08c-staging/mass-resolver` (the directory must be named `mass-resolver`); copy
   `maconn.py interaction.py music.py config.py` and the changed/new tests `tests/test_maconn.py
   tests/test_queue_resume.py tests/test_config.py tests/test_playlist.py`. `test_queue_resume` imports
-  `tests.test_interaction`, which the host already carries — verify with `ls` in Step 2.
+  `tests.test_interaction`, which the host already carries — verify with `ls` first.
 - **Verify** every copy by sha256 (normalise Windows `*name` vs Linux `  name`).
 - **Host tests:** every module present in the staged `tests/`, by name, on Python 3.5.2 — any failure STOPs
   before promote.
@@ -1529,8 +1740,9 @@ plan's Task 7), with these specifics:
 - **Dry-run:** `/command` music dry-run for an unknown query → `MISS` line in the log, `ANNOUNCE via` count
   unchanged.
 - **Live, operator present** (design §8): (1) playlist + question → same song near its position, queue = 8,
-  no clip, next song follows; (2) radio + question → station back, queue `[station]`; (3) pause → resume;
-  (4) pause → question → resume. Check each with a read-only queue listing and the log lines of design §6.
-  **Stop and roll back** on any failure: restore `.bak/<ts>`, or add `"say_queue_resume": false` to the host
-  `config.json` + restart (kill switch).
+  no clip, next song follows; (2) radio + question → station back, queue `[station]` — **stop point**: the
+  capture log line must name the station item, not "is a reply clip"; (3) pause → resume; (4) pause → question →
+  resume. Check each with a read-only queue listing and the log lines of design §6. **Stop and roll back** on any
+  failure: restore `.bak/<ts>`, or add `"say_queue_resume": false` to the host `config.json` + restart (kill
+  switch).
 - **Docs** in the merge PR: CHANGELOG entry, ONBOARDING note, BACKLOG (`MR-08c`, `MR-08e` done; §10 released).
