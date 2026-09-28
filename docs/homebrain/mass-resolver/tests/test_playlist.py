@@ -260,6 +260,8 @@ class AliasAndPhraseTest(unittest.TestCase):
         ma = FakeMA(self.lib(), {"28": EIGHT})
         r = run(ma, "Costea's-mix", settings=with_aliases({"costeas mix": "my music - costea (local)"}))
         self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
+        self.assertEqual(r["metadata"]["media_type"], "playlist")
 
     def test_shuffle_word_is_tolerated_and_noted(self):
         ma = FakeMA(self.lib(), {"28": EIGHT})
@@ -290,6 +292,8 @@ class AliasAndPhraseTest(unittest.TestCase):
         self.assertTrue(r["ok"])
         self.assertEqual(ma.played, [])
         self.assertIsNone(r["spoken_text"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
+        self.assertEqual(r["metadata"]["media_type"], "playlist")
 
 
 if __name__ == "__main__":
