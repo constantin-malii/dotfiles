@@ -12,6 +12,12 @@ _MODES = ("duck", "restore", "say", "say_text", "resume", "pause", "volume_up", 
 # Consecutive unreadable zone states before a finish poll stops guessing (F1, 2026-09-27).
 UNREADABLE_LIMIT = 3
 
+# Timeout for an HA call made while `_lock` is HELD. Short on purpose: that lock also gates
+# _claim_gen, interaction_in_flight (called on every dispatch result) and the volume-recovery
+# timer, so a hung HA here stalls far more than the caller. This bounds the hold; it does not
+# narrow the critical section, which is a real check-then-act and a larger change.
+LOCK_HELD_CALL_TIMEOUT = 5.0
+
 
 class InteractionCapability(capability.Capability):
     name = "interaction"
@@ -200,7 +206,7 @@ class InteractionCapability(capability.Capability):
                              "too, so there is nothing to duck under)", rid, zone, started)
                     return cr.ok(self.name, rid, "Nothing to duck.", spoken_text=None,
                                  metadata={"ducked": False, "reason": "fresh_playback", "zone": zone})
-            state = ctx.ha.get_entity_state(zone) or {}
+            state = ctx.ha.get_entity_state(zone, timeout=LOCK_HELD_CALL_TIMEOUT) or {}
             player_state = state.get("state")
             vol = (state.get("attributes") or {}).get("volume_level")
             if player_state != "playing" and getattr(ctx.settings, "interaction_ignore_when_idle", True):
@@ -223,7 +229,8 @@ class InteractionCapability(capability.Capability):
                 self._snaps[zone]["target"] = target
             self._arm_timer(ctx, zone)                                 # snapshot + timer BEFORE the write, so a
             ctx.ha.call_service_rest("media_player", "volume_set",     #   lost-ack write is reconciled by the dead-man
-                                     {"entity_id": zone, "volume_level": target})
+                                     {"entity_id": zone, "volume_level": target},
+                                     timeout=LOCK_HELD_CALL_TIMEOUT)
             LOG.info("DUCK req=%s zone=%s %s -> %s", rid, zone, vol, target)
             return cr.ok(self.name, rid, "Ducked.", spoken_text=None,
                          metadata={"ducked": True, "from": vol, "to": target, "zone": zone})
@@ -830,7 +837,7 @@ class InteractionCapability(capability.Capability):
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_snapshot", "zone": zone})
             try:
-                state = ctx.ha.get_entity_state(zone) or {}
+                state = ctx.ha.get_entity_state(zone, timeout=LOCK_HELD_CALL_TIMEOUT) or {}
                 cur = (state.get("attributes") or {}).get("volume_level")
             except Exception as e:
                 LOG.warning("RESTORE req=%s zone=%s read failed (%r); restoring baseline", rid, zone, e)  # KEEP: F5
@@ -847,7 +854,8 @@ class InteractionCapability(capability.Capability):
                 return cr.ok(self.name, rid, "Nothing to restore.", spoken_text=None,
                              metadata={"restored": False, "reason": "no_baseline", "zone": zone})
             ctx.ha.call_service_rest("media_player", "volume_set",
-                                     {"entity_id": zone, "volume_level": target})
+                                     {"entity_id": zone, "volume_level": target},
+                                     timeout=LOCK_HELD_CALL_TIMEOUT)
             self._cancel_timer(snap); self._snaps.pop(zone, None)
             LOG.info("RESTORE req=%s zone=%s -> %s", rid, zone, target)
             return cr.ok(self.name, rid, "Restored.", spoken_text=None,
@@ -1016,7 +1024,7 @@ class InteractionCapability(capability.Capability):
         #    announcement. Resolved every turn and never cached -- the signature expires, and a
         #    cached URL would fail silently two layers from its symptom.
         chime_uri = (getattr(ctx.settings, "announce_chime_uri", "") or "").strip()
-        chime = {"played": False, "reason": None}
+        chime = {"played": False, "end_observed": False, "reason": None}
         chime_resolved = None
         if not chime_uri:
             chime["reason"] = "disabled"
@@ -1100,9 +1108,18 @@ class InteractionCapability(capability.Capability):
             meta = dict(res.get("metadata") or {})
             clips = meta.get("clips") or []
             if chime_resolved and clips:
+                # The chime was the last clip judged by `started` alone. It stays decorative --
+                # design 8.3 is explicit that a bad chime is a DEGRADED announcement, not a silent
+                # one, and it must never fail the turn -- but reporting {played: True, reason: None}
+                # for a chime whose end was never observed is the same overclaim the message path
+                # was fixed for, and this metadata is what gets read when an announcement sounded
+                # wrong. `played` still means "it started": that part was accurate.
                 chime["played"] = bool(clips[0].get("started"))
+                chime["end_observed"] = bool(clips[0].get("ended"))
                 if not chime["played"] and chime["reason"] is None:
                     chime["reason"] = "never_started"
+                elif chime["played"] and not chime["end_observed"] and chime["reason"] is None:
+                    chime["reason"] = "end_unobserved"
             meta["chime"] = chime
             meta["mic"] = {"muted": muted, "confirmed": confirmed}
             meta["prefix_dropped"] = prefix_dropped
