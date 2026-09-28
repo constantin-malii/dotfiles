@@ -147,7 +147,9 @@ The name used is the phrase the user said (alias key or query). `validate` picks
 5. Dry-runs **only after** step 4: alias, curated MA playlist, `.m3u`, unknown — confirm in the log that nothing was
    announced.
 6. **Live test with the operator present:** "Okay Nabu, play Costea mix". Verified by the resolver log (`PLAYING …
-   local=8/8`), the MA queue (8 local items), and by ear.
+   local=8/8`), the MA queue (8 local items), and by ear. Then, mid-playlist, ask Nabu a question and check the MA
+   queue afterwards: still 8 items (clears the §6 concern) or only the current track (confirms it → `MR-08c`
+   stays widened; record the result in the CHANGELOG).
 7. CHANGELOG; update ONBOARDING current state + `assistant-capabilities.md`; release the live gate. Docs and code in
    separate commits.
 
@@ -155,12 +157,21 @@ The name used is the phrase the user said (alias key or query). `validate` picks
 
 ## 6. Known limitation — resume of a curated playlist (operator decision: document)
 
-**Resume of any curated MA playlist replays it by playlist URI, so MA picks the source per track; it can include
-non-local tracks and possibly YTM.** This applies to every resume — the plain "resume" command as well as the
-automatic resume after a satellite reply — because `interaction._resume` (interaction.py ~408) replays the
-remembered `md["uri"]` via HA `music_assistant.play_media`. The first play is local-only (§3.1-4); resume is not.
-Fix tracked as `MR-08c` (give resume a local-only reference: a re-resolvable resolver query or the stored local URI
-list). `.m3u` playlists are unaffected (their URI is the local file playlist).
+The first play is local-only (§3.1-4). The two resume paths behave differently, and neither keeps that guarantee:
+
+- **Plain "resume" issued before any satellite reply** — `interaction._resume` (interaction.py ~408) replays the
+  remembered `md["uri"]` (the **playlist URI**) via HA `music_assistant.play_media`, so MA picks the source per
+  track: non-local tracks and possibly YTM can play.
+- **Automatic resume after a satellite reply** — the reply path (`_say`) captures the player's **live**
+  `media_content_id` (interaction.py:1409), records it with `remember_source` (:1411) and replays it after the
+  reply (:1718). With a queue of local tracks that id is the **current track**, so (inferred from the code, not yet
+  observed live) playback likely continues with **that one track and the rest of the queue is lost**; a later plain
+  "resume" then also replays just that track. This is probably pre-existing for albums too — not an MR-08
+  regression — but it is the first thing a listener would notice ("play Costea mix", ask a question, music stops
+  after one song). The §5 live test checks it.
+
+Fix tracked as `MR-08c` (provisionally widened, pending the §5 check: playlist/album queues survive replies and
+resume, local-only). `.m3u` playlists share the reply-path behaviour but not the source-choice risk.
 
 ## 7. Out of scope → follow-ups
 

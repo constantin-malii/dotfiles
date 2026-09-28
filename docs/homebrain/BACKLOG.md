@@ -119,7 +119,7 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `MR-06` | Semantic / translation match hints | MR | research | repo-code | later | resolver | — | none (spike) | `match.py`+tests | none | `git revert` | tooling §10 |
 | `MR-08` | Play curated playlists by voice (aliases; shuffle → MR-08b) | MR | design | repo-code→host-live | P1 | resolver | — | resolver deploy (single live gate) | `music.py`,`maconn.py`,`favorites.py`,`core.py`,`resolver.py`+tests; `config.json` `playlist_aliases` | host deploy (no HA/exposure change) | restore `.bak/<ts>/` + restart | 2026-09-27-mr-08-playlist-voice-design.md |
 | `MR-08b` | Playlist shuffle via explicit `shuffle` field | MR | later | repo-code→HA-live | P2 | resolver + HA script | MR-08 | HA script/tool change (gated) + resolver deploy | `music.py`+tests; `script.play_music` field | HA script + exposure | restore script backup + `.bak/` | MR-08 design §7 |
-| `MR-08c` | Resume of curated playlists stays local-only | MR | later | repo-code→host-live | P2 | resolver | MR-08 | resolver deploy | `interaction.py`/`music.py`+tests | host deploy | restore `.bak/` | MR-08 design §6 |
+| `MR-08c` | Playlist/album queues survive replies and resume, local-only *(provisional — scope pending the MR-08 §5 live check)* | MR | later | repo-code→host-live | P2 | resolver | MR-08 | resolver deploy | `interaction.py`/`music.py`+tests | host deploy | restore `.bak/` | MR-08 design §6 |
 | `MR-07` | Provider/metadata/Plex cleanup | MR | later | host-live | P2 | resolver | — | host data edit | none (host/MA) | host change | restore prior MA config | local-music; tooling §10 |
 
 ### P — PCL / homebrain-companion
