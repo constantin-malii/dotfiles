@@ -3,6 +3,65 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-27 — AN-01 resolver redeploy is LIVE: honest reporting, safe microphone handover, and the TTS url in the log
+
+> **Announcements remain DISABLED**, so the only live path this touches is the satellite reply
+> (`say`/`say_text`). Rollback: `~/mass-resolver/.bak/20260927-181921/`.
+
+### What was deployed
+
+`interaction.py` and its test module only, from `main` at `7ee00be` (PR #50 plus the tts-url
+commit). `config.py`, `config.json`, `wsutil.py` and `haconn.py` are unchanged by these commits and
+were **not** copied; their checksums are unchanged from the 2026-09-10 record.
+
+- **Backup:** `BACKUP_TS=20260927-181921`, covering both files the copy touches. Pre-change:
+  `interaction.py bd98a05f`, `tests/test_interaction.py d6368321`.
+- **Deployed:** `interaction.py 1b63edeb`, `tests/test_interaction.py 61b14157`, verified by sha256
+  end to end rather than by `scp`'s exit code.
+- **Host parity, Python 3.5.2:** `COMPILE OK`; **487 tests OK** (was 449) — `test_interaction` 406,
+  `test_py35_compat` 7, `test_haconn` 42, `test_config` 23, `test_wsutil` 9.
+- Restart was the operator's at **18:23:37**, after the 18:19:23 file write; fresh
+  `SERVICE: /command HTTP server…` and `connected; subscribed…`, no tracebacks.
+- Post-restart: `key=200`/`nokey=401`, satellite `idle`, microphone `off`,
+  `automation.voice_ceiling_announce` **off**, ceiling untouched.
+
+### What changed in behaviour
+
+**An announcement no longer claims success it cannot support.** `_play_clip_and_wait` returns
+`ended` and `gave_up` instead of discarding them, and the announce path now has three outcomes for
+three states of knowledge: a clip watched failing to start is a certain failure
+("I couldn't play the announcement."), an observed end is "Announced.", and a clip that started but
+whose end was never seen reports "Announced, but I couldn't confirm it finished." The previous
+behaviour reported a flat "Announced." for a clip nobody heard — and an intermediate version
+reported a flat failure for the 2026-09-08 announcement, which was heard in full.
+
+**A read that did not happen is no longer an observation.** Both poll loops count unreadable reads
+and exit as `unreadable`; two consecutive failed reads used to manufacture an observed ending.
+
+**The microphone handover is serialised.** A dedicated `_mic_lock` spans claim's mute-and-publish
+and release's validate-and-unmute. Previously an older turn could unmute a microphone a newer
+announcement had just muted, broadcasting through a live satellite mic.
+
+**The turn deadline covers the `play_media` call cost** it always spent inside itself — 70s of
+window for work that can need 100s. Widening a bound only.
+
+**The resolved TTS url is logged whole and redacted**, extension included. This is the operationally
+important one: see below.
+
+### Why the url line matters
+
+The 2026-09-27 failure was diagnosed a day late, by reading Music Assistant's log. The resolver
+could not show the cause because it logged only `engine=` and `chars=` at resolve time, and the
+finish poll truncates the `media_content_id` at 80 characters — landing just short of the file
+extension, which was the whole answer. A failing url is now visible in `resolver.log` at the moment
+it is resolved, and `curl -I` against it settles 404-or-200 immediately.
+
+### What this does NOT do
+
+**It does not make announcements work.** The defect is that some TTS urls are not fetchable — see
+the correction document's retraction section. This deploy makes failures honest, legible and safe;
+the fix is a separate increment. `automation.voice_ceiling_announce` stays disabled.
+
 ## 2026-09-27 — AN-01 G4b: the sentences are live but DISABLED — step 4 failed and the completion defect reproduced
 
 > **The announcement automation exists and is switched off.** The first phone announcement muted the
