@@ -1,4 +1,9 @@
-# DRAFT upstream issue — Music Assistant (`music-assistant/server`) — FOR REVIEW, NOT SUBMITTED
+# DRAFT upstream issue — Music Assistant — FOR REVIEW, NOT SUBMITTED
+
+> **File at <https://github.com/music-assistant/support/issues/new/choose>, as a Bug report.**
+> `music-assistant/support` is the issue tracker ("Issue tracker to create bug reports, please
+> include detailed info and logfiles"); `music-assistant/server` is the code and is **not** where
+> issues go — every adjacent issue cited below lives in `support`.
 
 > Prepared 2026-06-24. No matching upstream issue exists (searched issues/PRs/discussions/releases). Line numbers are from MA **2.9.3** and are approximate — maintainers should confirm. Submit only after review.
 
