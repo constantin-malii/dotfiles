@@ -145,7 +145,10 @@ captured item is current — MA updates queue state asynchronously.
 | no error | never shows it (other item, or reads failed) | **unconfirmed** — MA accepted it and may be late: **no URI replay**, logged `resume unconfirmed` |
 | `error_code` or raised | reads succeeded and never show it | **failed** → URI replay of `source_id`, logged `resume by queue failed (<why>); URI fallback` |
 | `error_code` | reads all failed | **failed** (MA refused) → URI fallback |
-| raised | reads all failed | **unknown** — it may have landed: **no URI replay**, logged as an error; voice "resume" recovers |
+| raised | reads all failed | **unknown** — it may have landed: **no URI replay**, logged as an error |
+
+For **unconfirmed** and **unknown** the turn also records a `pending_resume` (§4.6), so a later voice "resume"
+takes the queue path when the zone is sitting on a reply clip, not the URI replay.
 
 Phases:
 
@@ -167,13 +170,21 @@ A publishes its resume target (`resume_id`, position, `seekable`, `duration`) an
 the zone's reply marker (`self._replies[zone]`, under `_lock`), updating the clip list as it records them.
 B's capture sees A's clip as the current item: B **inherits** A's target when its captured current item is
 one of A's recorded clip ids (exact), or — if A recorded none — when its URI is a reply clip
-(`_is_reply_uri`). B resumes A's target and deletes A's recorded clips with its own.
+(`_is_reply_uri`). A identifies its clips only in its post-clip phase, so a B that supersedes A mid-clip
+usually finds none recorded: in that case B **records its captured current item itself as A's clip**. That id
+is exact and sits at A's anchor + 1, so it satisfies the same exact + position rule (§4.3-4). B resumes A's
+target and deletes A's clips (recorded by A or by B) with its own.
 
 ### 4.6 Pending resume and voice "resume" (`_resume`)
 
-When a queue-mode turn does not resume but captured a real item, record per zone
-`pending_resume = {resume_id, pos, seekable, duration, clip_ids}`. It is cleared when used, when a later turn
-captures, and by `note_playback` (new media started).
+When a queue-mode turn does not resume but captured a real item — or its resume ended **unconfirmed** or
+**unknown** (§4.4) — record per zone `pending_resume = {resume_id, pos, seekable, duration, clip_ids}`.
+
+- A later turn whose captured current item is one of `pending_resume.clip_ids` **inherits** it (same rule as
+  barge-in: carry the target, add that turn's own clip to `clip_ids`) rather than clearing it — so
+  "pause → question → question → resume" still finds the song.
+- It is **cleared** only when used, when a turn captures a real (non-reply) current item, or by
+  `note_playback` (new media started).
 
 `_resume`, with a fresh MA connection, **before** the current logic:
 1. If the queue's current item is one of `pending_resume.clip_ids` → `play_index(resume_id)` (+ position per
@@ -237,9 +248,12 @@ Required cases, each asserting queue contents and calls, not only flags:
 - **Clip never reaches idle:** finish exits on budget → resume, clip deleted.
 - **Paused queue at enqueue** (per spike 3 outcome).
 - **Barge-in:** B supersedes A mid-clip → queue == original, song resumed once (by B), both turns' clips
-  deleted.
+  deleted; B supersedes A **before A's post-clip phase** (A recorded nothing) → B records A's clip from its
+  own capture and deletes it.
 - **Pause → question → resume:** the reply turn records a pending resume; `_resume` resumes the song and
-  deletes the clip; plain pause → resume un-pauses in place; a paused reply clip is never un-paused.
+  deletes the clip; **pause → two questions → resume** → the second turn inherits the pending resume, queue
+  intact, both clips deleted; plain pause → resume un-pauses in place; a paused reply clip is never
+  un-paused; an **unconfirmed/unknown** resume leaves a pending resume that `_resume` uses.
 - **Guards and kill switch:** superseded A does not resume; stopped turn → pending resume; fresh-playback
   skip unchanged; `say_queue_resume=false` → today's exact call sequence.
 - All existing interaction tests pass unchanged (legacy path). Mutation check on: the enqueue option, the
