@@ -211,7 +211,7 @@ class MusicCapability(capability.Capability):
                         note = "shuffle"
             dry_run = params.get("dry_run") or ctx.settings.dry_run
             return {"ma": ma, "query": q, "hit": hit, "no_local": nl, "alias": alias, "note": note,
-                    "dry_run": dry_run}
+                    "dry_run": dry_run, "rid": rid, "media_type": mt}
         except Exception:
             ma.close()
             raise
@@ -225,6 +225,8 @@ class MusicCapability(capability.Capability):
             msg = name + " has no songs in the local library yet."
             return {"code": "not_found", "reason": "no local tracks", "chat_text": msg, "spoken_text": msg,
                     "metadata": {"query": resolved.get("query")}}
+        LOG.info("req=%s MISS query=%r media_type=%r alias=%r", resolved.get("rid", ""),
+                 resolved.get("query"), resolved.get("media_type") or "", resolved.get("alias"))
         q = resolved.get("alias") or resolved.get("query") or "that"
         return {"code": "not_found", "reason": "no local match",
                 "chat_text": q + " isn't in your local library yet.",
