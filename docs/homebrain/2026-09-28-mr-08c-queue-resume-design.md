@@ -124,7 +124,19 @@ restart = exactly today's behaviour) **and** the capture succeeds.
 | turn superseded | unchanged: the superseding turn owns the zone; no resume, no delete |
 | aborted (exception) before step 6 in queue mode | `finally` resumes by `play_index` (phase-aware), falls back to URI replay only per the rows above; un-pause rules unchanged for legacy mode |
 
-A single `resume_state` (`none` → `attempted` → `confirmed`) replaces the implicit use of
+**Resume decision table** (the confirming `queue_state` read polls up to 3 times, `say_poll_ms` apart, until
+the captured item is current — MA may lag just after `play_index`):
+
+| `play_index` | confirming read | outcome |
+|---|---|---|
+| ok / error / raised | shows the captured item current | **confirmed** — seek if seekable; no URI replay |
+| ok | read failed every time | **assumed** resumed (MA accepted it) — no URI replay, logged |
+| ok, error, or raised | shows a **different** item (after the retries) | **failed** → URI fallback |
+| returned `error_code` | read failed every time | **failed** (MA refused) → URI fallback |
+| raised | read failed every time | **unknown** — no URI replay (it may have landed), logged as an error; voice "resume" recovers |
+
+URI replay happens only when failure is positively known. A single `resume_state` (`none` → `attempted`
+→ `confirmed` / `assumed` / `fallback_uri` / `unknown`) replaces the implicit use of
 `queue_may_be_replaced`/`replay_done` in queue mode, so the `finally` block can decide from one value.
 
 ### 4.5 Voice "resume" (`_resume`)
