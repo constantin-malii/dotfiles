@@ -35,9 +35,14 @@ punctuation and apostrophes ("Costea's mix") behave predictably.
 
 ### 3.1 Flow inside `MusicCapability.resolve`
 
-1. **Normalise the phrase.** Strip a leading `the ` and a trailing ` playlist` (whole word, edges only). If a
-   trailing ` playlist` was present, `playlist` is tried **first** in the type order (like `media_type=playlist`
-   does today). Empty remainder → no match.
+1. **Phrase handling — today's matching is not changed.** The phrase is resolved **unstripped, exactly as today**
+   (so "the beatles" still ranks the artist "The Beatles" exact). A stripped form (leading `the ` and trailing
+   ` playlist` removed, whole word, edges only) is used **only** (a) for the alias lookup and (b) when a trailing
+   ` playlist` is present — then the stripped form is resolved with `playlist` tried **first** (like
+   `media_type=playlist` today). Empty stripped form → no match.
+   - **Shuffle words (no shuffle support yet, see §7):** if the phrase starts with `shuffle ` and resolves to
+     nothing, it is retried once without that word; a hit plays **in order** and `chat_text` adds "(shuffle isn't
+     supported yet)". Trying the unstripped phrase first keeps a real title like "Shuffle" playable.
 2. **Alias lookup.** New provider-neutral `favorites.match_alias(aliases, query)` → `(key, target)` or `None`;
    `resolve_alias` becomes a thin wrapper over it so radio behaviour is unchanged (existing radio tests guard it).
    For playlists the match is **exact** on the normalised phrase or its compacted form (spelled-out letters) — **no
@@ -113,8 +118,10 @@ The name used is the phrase the user said (alias key or query). `validate` picks
 ## 4. Testing
 
 - **TDD** with the existing fake MA. New tests:
-  - normalisation: "the … playlist" stripped; trailing "playlist" moves playlist first; empty remainder;
-    `clean`/`compact` equivalence ("Costea's mix" = "costeas mix");
+  - phrase handling: "the beatles" still ranks the artist "The Beatles" at match_rank 0 (no regression); "the …
+    playlist" stripped only for alias lookup / trailing-"playlist" resolution, which tries playlist first; empty
+    stripped form; `clean`/`compact` equivalence ("Costea's mix" = "costeas mix"); "shuffle Costea mix" plays in
+    order with the "(shuffle isn't supported yet)" note; a title "Shuffle" still resolves unstripped;
   - aliases: exact hit forces playlist-only; beats a same-named artist; alias to a missing or no-local playlist →
     `not_found`, **no** fall-through to an artist; a renamed target does not fuzzy-match another playlist; a short
     alias does not hijack a longer unrelated query; compacted (spelled-out) key matches;
@@ -146,13 +153,14 @@ The name used is the phrase the user said (alias key or query). `validate` picks
 
 **Rollback:** restore `.bak/<ts>/` and restart (≈1 min). Aliases alone: empty `playlist_aliases`.
 
-## 6. Known limitation — resume of a mixed playlist (operator decision: document)
+## 6. Known limitation — resume of a curated playlist (operator decision: document)
 
-After a satellite reply interrupts playback, `interaction._resume` (interaction.py ~408) replays the remembered
-`md["uri"]` via HA `music_assistant.play_media`. For a curated playlist that is the **playlist URI**, so a resume
-plays the whole playlist through MA's own source choice — including any non-local tracks (and possibly a YTM
-source). Curated playlists are all-local in practice, so this is documented rather than fixed here; a follow-up
-gives resume a local-only reference (a re-resolvable resolver query or the stored local URI list).
+**Resume of any curated MA playlist replays it by playlist URI, so MA picks the source per track; it can include
+non-local tracks and possibly YTM.** This applies to every resume — the plain "resume" command as well as the
+automatic resume after a satellite reply — because `interaction._resume` (interaction.py ~408) replays the
+remembered `md["uri"]` via HA `music_assistant.play_media`. The first play is local-only (§3.1-4); resume is not.
+Fix tracked as `MR-08c` (give resume a local-only reference: a re-resolvable resolver query or the stored local URI
+list). `.m3u` playlists are unaffected (their URI is the local file playlist).
 
 ## 7. Out of scope → follow-ups
 
@@ -161,7 +169,8 @@ gives resume a local-only reference (a re-resolvable resolver query or the store
   **explicitly on every music play** (off unless a shuffled playlist was asked for) because it is a persistent MA
   queue setting that would otherwise leak into later album/artist plays; a failed shuffle call is non-fatal and
   reported as "couldn't set shuffle".
-- Resume local-only fix (§6). MA automatic playlists. YTM/streaming playlists. Repeat/queue (Inc4B). Plex/remote.
+  Until then, a leading "shuffle" is tolerated (plays in order + note, §3.1-1).
+- **`MR-08c`** resume local-only fix (§6). MA automatic playlists. YTM/streaming playlists. Repeat/queue (Inc4B). Plex/remote.
 
 ## 8. To confirm during implementation
 
