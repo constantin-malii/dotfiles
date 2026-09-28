@@ -36,5 +36,6 @@
   "sync_event_type": "mass_sync_request",
   "announce_failures": true,
   "tts_service": "tts.speak",
-  "tts_data": {"entity_id": "tts.piper", "media_player_entity_id": "{entity}", "message": "{msg}"}
+  "tts_data": {"entity_id": "tts.piper", "media_player_entity_id": "{entity}", "message": "{msg}"},
+  "playlist_aliases": {"costea mix": "my music - costea (local)", "costea mics": "my music - costea (local)"}
 }
