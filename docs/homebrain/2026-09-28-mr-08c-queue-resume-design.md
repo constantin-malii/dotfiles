@@ -1,7 +1,9 @@
 # MR-08c — The queue survives a spoken reply (and "resume") — Design
 
-**Status:** draft for operator review (2026-09-28). Bundles `MR-08e` (log the query on a music miss) into
-the same deploy; MR-08e's design was approved in chat and is recorded in §9.
+**Status:** v2 draft for operator review (2026-09-28). v1 direction approved by the operator; v2 folds in the
+peer review of v1 (`dotfiles-61`: confirmation lag, late-landing enqueue, barge-in, pause→question→resume,
+position-anchored identity, and six unestablished assumptions). Three open facts need a short live spike
+(§3.2) **before** implementation. Bundles `MR-08e` (§9).
 **Backlog:** `MR-08c` (next), `MR-08e`. **Not in scope:** `MR-08b` (shuffle), `MR-08d` (agent knows playlist
 names), `MR-08f` (STT/wake settings — separately gated).
 
@@ -9,8 +11,8 @@ names), `MR-08f` (STT/wake settings — separately gated).
 
 A question asked while the ceiling plays a playlist, album or `.m3u` must not cost the rest of the queue.
 After Nabu answers, the interrupted song continues **where it was**, and the queue carries on as before.
-Radio keeps working exactly as today from the listener's point of view. "Pause" then "resume" by voice must
-also keep the queue.
+Radio keeps working exactly as today from the listener's point of view. "Pause" then "resume" by voice —
+with or without a question in between — must also keep the queue.
 
 Success, observed live: play "Costea mix", ask "what time is it?", hear the answer, and the same song resumes
 at about the same position; the MA queue still holds all 8 songs and no reply clip; the next song follows.
@@ -29,172 +31,220 @@ Observed: after one question the queue was `[reply clip, current song]`; with re
 stale `.flac` clip and stopped. No test models a multi-item queue (16 replay tests assert "the captured URI
 was replayed once").
 
-## 3. Live spike findings (2026-09-28, throwaway scripts, operator-approved)
+## 3. What the live spikes established
 
-On this player (ceiling Universal Player, MA `player_queues/*` over the resolver's websocket):
+### 3.1 Spikes 1–2 (2026-09-28, throwaway scripts, operator-approved)
+
+On this player (ceiling Universal Player, **`flow_mode=true`** — ONBOARDING §13; MA `player_queues/*` over the
+resolver's websocket), against a **playing** queue:
 
 | Step | Observed |
 |---|---|
 | HA `music_assistant.play_media` with `enqueue: "play"` | clip inserted **after** the current item (idx+1), current song stopped, clip played; **queue kept all 8 songs** |
-| clip ended | queue went **`idle` on the clip** — MA did **not** advance to the next song |
+| clip (`.mp3`) ended | queue went **`idle` on the clip** — MA did **not** advance to the next song |
 | `player_queues/delete_item` on the **current** item | silently did nothing (no error) |
 | `player_queues/play_index(index=<queue_item_id>)` | interrupted song played, from 0 |
 | `player_queues/seek(position=14)` | position restored |
 | `delete_item(<clip queue_item_id>)` once not current | clip removed; queue back to the original 8 |
-| Piper `tts_get_url` | `.mp3` this time (the `.flac` failure mode is AN-01's, still open) |
+| queue item for a TTS clip (seen earlier the same day) | `name` = TTS id; `media_item.uri` = `builtin://radio/http://192.168.122.10:8123/api/tts_proxy/<id>.<ext>` |
 
-So: **enqueue-play keeps the queue; the resolver must resume explicitly; the clip can be deleted only after
-the resume.**
+### 3.2 Not established — spike 3 required before coding (operator-gated, ~40 s of sound)
+
+1. **Enqueue on a PAUSED queue.** Production keeps `say_pause_before_reply`, so the enqueue hits a paused
+   queue. Does `enqueue: "play"` still insert after current and play the clip?
+2. **Position freshness.** MA throttles `elapsed_time` (a healthy stream showed a frozen position for 20 s —
+   code comment ~1278). Is `elapsed_time` fresh right after a `media_pause`? Does the queue expose
+   `elapsed_time_last_updated` to extrapolate from?
+3. **`play_index` with `seek_position`.** If MA's `player_queues/play_index` accepts `seek_position`, one call
+   replaces play-from-0-then-seek and removes the audible restart blip.
+
+The plan's first task runs spike 3 and records the answers; §4 names the behaviour for each outcome.
 
 ## 4. Design
 
 ### 4.1 Invariants (operator-stated, binding)
 
-1. **Capture before enqueue.** The interrupted item's `queue_item_id`, its position (`elapsed_time`) and its
-   seekability are captured **before** any reply clip is enqueued.
-2. **Exact clip identity.** Each enqueued reply clip's own `queue_item_id` is identified by **exact**
-   URI or name equality with exactly one candidate (§4.3 step 4) and recorded; deletion targets **only**
-   those recorded ids. An ambiguous or unmatched clip stays unidentified and is never deleted.
-3. **Resume by queue id; seek only when seekable.** Resume is `play_index(<captured queue_item_id>)`; `seek`
-   runs only for seekable media and only after the resume is confirmed.
-4. **Phase-aware fallback.** Never replay by URI after the queue resume has succeeded (or may have
-   succeeded) — that would duplicate or disrupt playback. The fallback depends on the phase reached (§4.4).
-5. **URI replay is the final safety path.** When queue ids or resume operations fail, log the failure and
-   use the existing replay-by-URI behaviour, unchanged.
+1. **Capture before pause and enqueue.** The interrupted item's `queue_item_id`, its seekability and its
+   duration are captured **before** the pause and before any reply clip is enqueued. (Position: §4.3-1.)
+2. **Exact, position-anchored clip identity.** A reply clip's `queue_item_id` is recorded only when exactly
+   one item sits at the expected position (§4.3-4) **and** matches exactly by URI or name. Deletion targets
+   **only** recorded ids. Ambiguous or unmatched → unidentified, never deleted.
+3. **Resume by queue id; seek only when seekable.** Resume is `play_index(<captured id>)` (with
+   `seek_position` if spike 3 confirms it; otherwise `seek` after confirmation), only for seekable media.
+4. **Phase-aware fallback.** Never replay by URI after the queue resume has succeeded **or may have
+   succeeded** (§4.4).
+5. **URI replay is the final safety path**, used only when failure is positively known; always logged.
 
-### 4.2 New MA queue helpers (`maconn.py`)
+### 4.2 New MA queue helpers (`maconn.py`) and connections
 
 Thin wrappers returning MA's raw reply (callers check `error_code`), unit-tested with a fake socket:
+`queue_state(queue_id)` (`player_queues/get`), `queue_items(queue_id, offset, limit)`,
+`play_index(queue_id, queue_item_id, seek_position=None)`, `seek(queue_id, position)`,
+`delete_item(queue_id, queue_item_id)`.
 
-- `queue_state(queue_id)` → `player_queues/get` result dict (`state`, `current_index`, `elapsed_time`,
-  `current_item{queue_item_id, name, media_item{media_type, uri}, duration}`).
-- `queue_items(queue_id, limit=50)` → `player_queues/items`.
-- `play_index(queue_id, queue_item_id)`, `seek(queue_id, position)`, `delete_item(queue_id, queue_item_id)`.
+**One MA connection per phase, not per turn.** A reply can run up to `say_reply_timeout` with the socket idle,
+and the raw client answers no heartbeat, so a turn-long connection could be dead by the resume. `interaction`
+opens a fresh `ctx.ma_factory()` connection for (a) the capture and (b) the post-clip phase (identify, resume,
+delete), closing each in its own `finally`. `_resume` does the same.
 
-`interaction` reaches MA through `ctx.ma_factory()` (as `music` does), opening one connection per turn and
-closing it in the turn's `finally`.
+### 4.3 The reply turn (`_say`) in queue mode
 
-### 4.3 The reply turn (`_say`) with queue mode
+Queue mode is used when `settings.say_queue_resume` is true (default **true**; kill switch — false + restart
+= exactly today's behaviour), `ctx.ma_factory` and `settings.queue_id` exist, **and** the capture succeeds.
 
-Queue mode is used when `settings.say_queue_resume` is true (default **true**; the kill switch — set false +
-restart = exactly today's behaviour) **and** the capture succeeds.
-
-1. **Capture (new, before step 4):** `queue_state`. Queue mode needs `current_item.queue_item_id`. Record
-   `resume_id`, `resume_pos = elapsed_time`, `seekable = media_type in ("track",) and duration > 0`
-   (radio/streams: not seekable). Capture failure, no current item, or a MA error → **legacy mode** for the
-   whole turn, logged `SAY req=… queue capture unavailable (<why>); legacy replay`.
+1. **Capture** (before the pause): `queue_state`. Needs `current_item.queue_item_id`. Record `resume_id`,
+   `current_index`, `media_type`, `duration`, `seekable = media_type == "track" and duration > 0`, and the
+   position:
+   - if spike 3 shows `elapsed_time` is fresh after a pause: re-read `queue_state` **after** the pause and
+     take `elapsed_time` from that read (same item required, else keep the first);
+   - else, if `elapsed_time_last_updated` exists and the queue was playing: extrapolate
+     `pos = elapsed_time + (now - last_updated)`, capped at `duration`;
+   - else take `elapsed_time` as is (worst case: resume a little early).
+   Also log `stale reply clips near current: N` (items within the read window whose URI is a reply clip) so
+   leftovers are visible. Barge-in inheritance (§4.5) applies if the current item is a reply clip.
+   Capture failure → **legacy mode** for the whole turn, logged `queue capture unavailable (<why>)`.
 2. **Pause + volume raise:** unchanged.
-3. **Play each clip with `enqueue: "play"`** (queue mode only; legacy passes no enqueue as today).
-   `_play_clip_and_wait` gains an `enqueue` argument; start/finish polling is unchanged (the spike showed
-   the clip ending in `idle`, which the existing finish rule already observes).
-4. **Identify each clip's queue id by exact identity** right after its play call. The play call (HA REST
-   `music_assistant.play_media`) returns no queue item or URI, so identity comes from `queue_items`:
-   - **Primary — exact URI:** an item whose `media_item.uri` (or `uri`), after removing only MA's known
-     wrapper prefix `builtin://radio/`, is **equal** to the clip's normalised URI. Equality, never
-     containment or prefix matching.
-   - **Secondary — exact name:** only if no item matched by URI, an item whose `name` is **equal** to the
-     clip's TTS id (the URL's last path segment without its extension — the name MA gave the clip in §3).
-   - **Exactly one candidate** across the rule that matched. Zero, or two or more (including an item that
-     matches by URI and another by name) → record the clip as **unidentified**, log it, and never delete
-     anything for that clip.
-5. **Volume restore:** unchanged.
-6. **Resume (replaces step 9 in queue mode)**, only if `was_playing` and not superseded:
-   - `play_index(resume_id)`. Success = no `error_code` **and** a confirming `queue_state` read shows
-     `current_item.queue_item_id == resume_id`. An exception or unconfirmed result is *ambiguous*: read
-     `queue_state` once; if it shows `resume_id` current → treat as resumed; otherwise → URI fallback (§4.4).
-   - If resumed and `seekable` and `resume_pos` ≥ 2s: `seek(resume_pos)`; failure → log only (the song plays
-     from the start — never a URI replay).
-7. **Delete the recorded clip ids** (after the resume, when they are no longer current). Failure → log only.
-   If the turn did not resume (zone was idle, or the turn stopped/paused playback), the last clip is still
-   the *current* item and MA will not delete it (§3) — the other recorded clips are deleted, the current one
-   is left and logged (`clip left as current item: no resume`). That is no worse than today (today the
-   clip *is* the whole queue); the next play replaces it, and `_resume` already refuses to replay a spent
-   reply clip (`_is_reply_uri`).
-8. Result metadata gains `"resume": "queue" | "legacy" | "fallback_uri" | "none"`, `"seeked"`,
-   `"clips_deleted"`, `"clips_unidentified"`; `replayed` stays (true for queue or URI resume) for callers.
+3. **Play each clip with `enqueue: "play"`** (queue mode only). `_play_clip_and_wait` gains `enqueue`. Finish
+   detection is unchanged; note two exits: an `.mp3` clip ends `idle` (spike), while a
+   `builtin://radio/`-wrapped clip may never reach idle (code comment ~1658) and exit on budget still
+   "playing" — the resume then stops it, which is correct after the full budget.
+4. **Identify each clip (exact + position-anchored).** Read `queue_items(offset=<anchor>, limit=5)` where the
+   anchor is the captured `current_index` for the first clip and the previous clip's index for later clips.
+   The candidate is the item at **anchor + 1**, and it must match exactly:
+   - URI: `media_item.uri` (or `uri`) with only the `builtin://radio/` prefix removed **equals** the clip's
+     played (normalised) URI — for announce clips this is the already-resolved chime/message URL `_say`
+     played, so equality holds without a name rule;
+   - or, if the URI is absent, `name` **equals** the clip's TTS id.
+   Anything else (no item there, item there but not an exact match) → unidentified, logged, not deleted.
+   Anchoring by position makes earlier identical leftovers (HA's TTS cache reuses URLs; the chime URL never
+   changes) irrelevant, and reading around the anchor works at any queue length.
+5. **Enqueue that raised** (REST timeout — MA "regularly outruns" it and may still start the clip): before
+   resuming, read the queue at the anchor. If the clip landed and is current → run the finish-wait for it;
+   if it landed and is not current → record it for deletion; if absent → continue.
+6. **Volume restore:** unchanged.
+7. **Resume** (replaces step 9 in queue mode), only if `was_playing` and not superseded — per the decision
+   table in §4.4. After a confirmed/unconfirmed resume, **settle check** once after one poll interval: if the
+   current item is now a reply clip (a late-landing enqueue displaced the song), `play_index` again **once**.
+   Seek (when not done via `seek_position`): only if seekable, `pos ≥ 2 s` and `pos ≤ duration − 5 s` (seeking
+   to the end would skip the song).
+8. **Delete recorded clip ids** that are not current. When the turn resumed, all are non-current. When it did
+   not resume (zone was idle, turn stopped/paused playback), the last clip is current and cannot be deleted
+   (§3.1): it stays, logged, and a **pending resume** is recorded (§4.6).
+9. Result metadata gains `"resume": "queue" | "unconfirmed" | "legacy" | "fallback_uri" | "unknown" |
+   "none"`, `"seeked"`, `"clips_deleted"`, `"clips_unidentified"`; `replayed` stays for callers (true for
+   queue, unconfirmed or URI resume).
 
-### 4.4 Phase-aware fallback (the `finally` path included)
+### 4.4 Resume decision table and phase-aware fallback
+
+After `play_index`, poll `queue_state` for confirmation for up to **4 s** (`say_poll_ms` apart) until the
+captured item is current — MA updates queue state asynchronously.
+
+| `play_index` | bounded poll | outcome |
+|---|---|---|
+| any result | shows the captured item current | **confirmed** — seek if needed; no URI replay |
+| no error | never shows it (other item, or reads failed) | **unconfirmed** — MA accepted it and may be late: **no URI replay**, logged `resume unconfirmed` |
+| `error_code` or raised | reads succeeded and never show it | **failed** → URI replay of `source_id`, logged `resume by queue failed (<why>); URI fallback` |
+| `error_code` | reads all failed | **failed** (MA refused) → URI fallback |
+| raised | reads all failed | **unknown** — it may have landed: **no URI replay**, logged as an error; voice "resume" recovers |
+
+Phases:
 
 | Phase reached when something fails | Action |
 |---|---|
-| capture failed | legacy mode for the whole turn (today's code path, unchanged) |
-| clip enqueue raised / clip never started | queue is intact (enqueue-play never replaces) → still resume by `play_index`; delete any recorded clip |
-| `play_index` raised or returned an error, and the confirming read does **not** show `resume_id` current | **URI replay** of `source_id` (final safety), logged `resume by queue failed (<why>); URI fallback` |
-| `play_index` confirmed (or read shows `resume_id` current) | **no URI replay anywhere**, including `finally`; seek/delete failures are logged only |
-| turn superseded | unchanged: the superseding turn owns the zone; no resume, no delete |
-| aborted (exception) before step 6 in queue mode | `finally` resumes by `play_index` (phase-aware), falls back to URI replay only per the rows above; un-pause rules unchanged for legacy mode |
+| capture failed | legacy mode for the whole turn (today's code, unchanged) |
+| enqueue raised | §4.3-5, then resume per the table |
+| clip never started | queue intact → resume per the table |
+| after `play_index` was issued (any outcome) | the table decides; the `finally` path never re-decides |
+| exception before `play_index` was issued | `finally` resumes per the table (fresh MA connection) |
+| superseded | no resume by this turn; its target and recorded clips pass to the superseding turn (§4.5) |
 
-**Resume decision table** (the confirming `queue_state` read polls up to 3 times, `say_poll_ms` apart, until
-the captured item is current — MA may lag just after `play_index`):
+One `resume_state` per turn (`none` → `attempted` → one of the outcomes) replaces the implicit use of
+`queue_may_be_replaced`/`replay_done` in queue mode; the legacy path keeps them unchanged.
 
-| `play_index` | confirming read | outcome |
-|---|---|---|
-| ok / error / raised | shows the captured item current | **confirmed** — seek if seekable; no URI replay |
-| ok | read failed every time | **assumed** resumed (MA accepted it) — no URI replay, logged |
-| ok, error, or raised | shows a **different** item (after the retries) | **failed** → URI fallback |
-| returned `error_code` | read failed every time | **failed** (MA refused) → URI fallback |
-| raised | read failed every time | **unknown** — no URI replay (it may have landed), logged as an error; voice "resume" recovers |
+### 4.5 Barge-in (turn B supersedes turn A mid-reply)
 
-URI replay happens only when failure is positively known. A single `resume_state` (`none` → `attempted`
-→ `confirmed` / `assumed` / `fallback_uri` / `unknown`) replaces the implicit use of
-`queue_may_be_replaced`/`replay_done` in queue mode, so the `finally` block can decide from one value.
+A publishes its resume target (`resume_id`, position, `seekable`, `duration`) and its recorded clip ids in
+the zone's reply marker (`self._replies[zone]`, under `_lock`), updating the clip list as it records them.
+B's capture sees A's clip as the current item: B **inherits** A's target when its captured current item is
+one of A's recorded clip ids (exact), or — if A recorded none — when its URI is a reply clip
+(`_is_reply_uri`). B resumes A's target and deletes A's recorded clips with its own.
 
-### 4.5 Voice "resume" (`_resume`)
+### 4.6 Pending resume and voice "resume" (`_resume`)
 
-Before replaying `_last_source` by URI: if the MA queue for the zone is `paused` with a current item, un-pause
-in place (`media_player.media_play`) — the queue is intact after a voice "pause". Otherwise the current logic
-is unchanged (replay remembered source, un-pause a paused HA state, replay loaded source, or "nothing to
-resume"). A MA read failure → current logic.
+When a queue-mode turn does not resume but captured a real item, record per zone
+`pending_resume = {resume_id, pos, seekable, duration, clip_ids}`. It is cleared when used, when a later turn
+captures, and by `note_playback` (new media started).
 
-### 4.6 What does not change
+`_resume`, with a fresh MA connection, **before** the current logic:
+1. If the queue's current item is one of `pending_resume.clip_ids` → `play_index(resume_id)` (+ position per
+   §4.3-7), delete the clips, clear it.
+2. Else if the queue is `paused` with a current item that is **not** a reply clip → un-pause in place
+   (`media_player.media_play`).
+3. Else, or on any MA failure → the current logic unchanged.
+
+### 4.7 What does not change
 
 Duck/restore, volume ownership, mic/announce gating (AN-01, still disabled), barge-in generations, the
-fresh-playback skip, the stopped-turn guard, music/radio initial play (`maconn.play`, replace).
+fresh-playback skip, the stopped-turn guard, music/radio initial play (`maconn.play`, replace), and the entire
+legacy path.
 
 ## 5. Radio and live streams
 
 Same path: the radio queue is `[station]`; the clip is inserted after it; resume is `play_index(<station
-item>)`; `seekable` is false, so no seek. Listener-visible result equals today's (the station comes back),
-with the clip removed from the queue afterwards.
+item>)`; not seekable, so no seek. Listener-visible result equals today's, with the clip removed afterwards.
 
 ## 6. Logging
 
-- `SAY req=… queue capture: item=<id> pos=<s> seekable=<bool>` / `queue capture unavailable (<why>)`.
-- `SAY req=… clip=<clip> queue_item=<id>` / `clip=<clip> queue_item UNIDENTIFIED (<n> matches)`.
-- `SAY req=… resumed by queue item=<id> seek=<s|skipped> clips_deleted=<n>`.
-- `SAY req=… resume by queue failed (<why>); URI fallback` / `seek failed (<why>)` / `delete failed (<why>)`.
-- The existing final `reply_started=… replayed=…` line gains `resume=<mode>`.
+- `SAY req=… queue capture: item=<id> idx=<n> pos=<s> seekable=<bool> stale_reply_clips=<n>` /
+  `queue capture unavailable (<why>)` / `inherited resume target from req=<rid>`.
+- `SAY req=… clip=<clip> queue_item=<id>` / `clip=<clip> queue_item UNIDENTIFIED (<why>)`.
+- `SAY req=… resumed by queue item=<id> outcome=<confirmed|unconfirmed> seek=<s|skipped> clips_deleted=<n>`.
+- `resume by queue failed (<why>); URI fallback` / `resume unknown (<why>); not replaying` /
+  `settle: reply clip displaced item <id>; resumed again` / `pending resume recorded` / `seek failed` /
+  `delete failed`.
+- The final `reply_started=… replayed=…` line gains `resume=<outcome>`.
 
-## 7. Testing (TDD; `tests/test_interaction.py` + `tests/test_maconn.py`)
+## 7. Testing (TDD; new `tests/test_queue_resume.py`, plus `tests/test_maconn.py`)
 
-A `FakeQueue` models MA's queue as observed in §3 (enqueue-play inserts after current and stops it; clip end
-→ idle on the clip; delete of the current item is a no-op; play_index/seek/delete by id). The fake HA's
-`music_assistant.play_media` and the fake MA helpers act on the same `FakeQueue`.
+A `FakeQueue` models MA as observed in §3 and is configurable: enqueue-play inserts after current and plays it
+(also on a paused queue — or not, per spike 3); clip end → idle on the clip, or never idle; delete of the
+current item is a no-op; play_index/seek/delete by id; **confirmation lag** (N reads before the new current
+item shows); **late landing** (a raised enqueue whose clip appears after K reads); failure injection per call.
+The fake HA's `music_assistant.play_media` and the fake MA act on the same `FakeQueue`. Existing tests stay
+untouched: their context has no `ma_factory`, so they run the legacy path.
 
-Required cases (operator-stated), each asserting queue contents and calls, not only flags:
+Required cases, each asserting queue contents and calls, not only flags:
 
-- **Multi-item queue:** 8-song queue, question mid-song 3 → afterwards queue == original 8, current == song
-  3, no clip left, **no** URI replay, one `play_index`.
-- **Seek restoration:** track at 47s → `seek(47)` after the confirmed resume; `resume_pos` < 2s → no seek.
-- **Radio/live stream:** `[station]`, media_type radio → `play_index(station)`, **no** seek, clip deleted.
-- **Clip deletion:** exactly the recorded clip id deleted. Exact identity: an item whose URI merely
-  *contains* the clip URL (e.g. a longer URL, or the clip URL with a query suffix) is **not** a match; a
-  wrapped `builtin://radio/<clip url>` **is**; name fallback matches only an identical name. Ambiguous
-  cases stay unidentified and delete nothing: two URI matches; a URI match plus a different name match; two
-  name matches; no match. Each is logged.
-- **Multi-clip turn** (chime + message): both clip ids recorded and deleted; one resume.
-- **Failure at each step:** capture fails → legacy (today's calls exactly); enqueue raises → still
-  `play_index`; clip never starts → still resume; `play_index` error with confirming read ≠ resume_id →
-  URI replay once; `play_index` raises but read shows resume_id current → **no** URI replay; seek fails →
-  no URI replay, logged; delete fails → logged, result still ok; exception after `play_index` confirmed →
-  `finally` does **not** replay by URI.
-- **Unchanged guards:** superseded turn → no resume/delete; stopped turn → no resume, the current clip
-  left in place and logged, any earlier clips deleted;
-  fresh-playback skip unchanged; kill switch `say_queue_resume=false` → today's exact call sequence.
-- **`_resume`:** paused MA queue → `media_play`, no URI replay; MA read fails → current logic.
-- All 16 existing replay tests keep passing in legacy mode; queue-mode equivalents replace "replayed the URI
-  once" with "resumed the queue item once". Mutation check on: the enqueue option, the confirming read, the
-  seekable gate, the delete-only-recorded rule, and the `finally` no-replay-after-confirmed rule.
+- **Multi-item queue:** 8 songs, question mid-song 3 → queue == original 8, current == song 3, no clip,
+  **no** URI replay, one resume.
+- **Long queue:** 60 items, current index 55 → clip identified at 56 and deleted.
+- **Repeated identical clip URIs:** a stale leftover clip with the same URL earlier in the queue → the new
+  clip is still identified by position; the leftover is untouched and counted in the log.
+- **Seek restoration:** track at 47 s → resumed at 47 s (seek_position or seek); `pos < 2 s` → no seek;
+  `pos > duration − 5 s` → no seek.
+- **Radio/live stream:** `[station]`, media_type radio → resume station, **no** seek, clip deleted.
+- **Clip deletion / identity:** only the anchored exact match is deleted; a containment-only URI at the
+  anchor → unidentified; nothing at the anchor → unidentified; each logged.
+- **Multi-clip turn** (chime + message): both identified by chained anchors and deleted; one resume.
+- **Confirmation lag:** play_index ok, current shows after 3 reads → confirmed, no URI replay; lag beyond
+  4 s → unconfirmed, **no** URI replay.
+- **Failures:** capture fails → legacy (today's calls exactly); play_index error + reads show another item →
+  one URI replay; play_index error + reads fail → one URI replay; play_index raises + reads fail → **no**
+  replay (unknown); seek fails → no URI replay; delete fails → logged, result ok; exception after play_index
+  issued → `finally` does not re-decide.
+- **Late landing:** enqueue raises, clip lands current → finish-wait then resume; clip lands after the
+  resume → settle check resumes once more and the clip is deleted.
+- **Clip never reaches idle:** finish exits on budget → resume, clip deleted.
+- **Paused queue at enqueue** (per spike 3 outcome).
+- **Barge-in:** B supersedes A mid-clip → queue == original, song resumed once (by B), both turns' clips
+  deleted.
+- **Pause → question → resume:** the reply turn records a pending resume; `_resume` resumes the song and
+  deletes the clip; plain pause → resume un-pauses in place; a paused reply clip is never un-paused.
+- **Guards and kill switch:** superseded A does not resume; stopped turn → pending resume; fresh-playback
+  skip unchanged; `say_queue_resume=false` → today's exact call sequence.
+- All existing interaction tests pass unchanged (legacy path). Mutation check on: the enqueue option, the
+  bounded confirmation (URI replay on unconfirmed), the position anchor, the delete-only-recorded rule, the
+  settle check, barge-in inheritance, the pending resume, and the seek gates.
 
 ## 8. Deploy and verification (operator-gated, as MR-08)
 
@@ -205,20 +255,18 @@ sha256-verified promote; operator restart; then live, with the operator present:
    clip; next song follows (let it roll over once).
 2. Play a radio favourite, ask a question → station returns; queue `[station]`, no clip.
 3. "Pause", then "resume" → same song continues; queue intact.
+4. "Pause", ask a question, then "resume" → same song continues; queue intact, no clip.
 Stop-and-rollback on any failure: restore `.bak/<ts>` or set `say_queue_resume=false` + restart (kill switch).
 
 ## 9. Bundled: MR-08e — log the query on a music miss
 
-`MusicCapability.resolve` keeps `rid` and the searched type list in its result; `validate`, on not-found,
-logs `req=… MISS query=<q> types=[…] alias=<key|None>` (no-local-tracks/not-curated keep their own lines).
-Test: `assertLogs` sees the query on a miss and no `MISS` line on a hit. No sensitive data (the query is
-what was spoken).
+`MusicCapability.resolve` keeps `rid` and the requested media type in its result; `validate`, on not-found
+(no match), logs `req=… MISS query=<q> media_type=<t> alias=<key|None>` (no-local-tracks and not-curated
+keep their own lines). Test: `assertLogs` sees the query on a miss and no `MISS` line on a hit. No sensitive
+data (the query is what was spoken).
 
-## 10. Open points to confirm during implementation
+## 10. Open points
 
-- `current_item.media_item.media_type` for a radio queue item is `"radio"` (expected; assert in the probe of
-  the plan's first task, read-only).
-- The exact form in which `queue_items` exposes the clip's URL (`media_item.uri` / `uri`, and whether it
-  is wrapped as `builtin://radio/<url>`) — confirm read-only before coding the exact-URI rule; the spike
-  showed the clip's *name* is its TTS id, which is the exact-name fallback. If MA's form differs from the
-  single known wrapper, the plan records it and the rule stays equality after removing only that form.
+- Spike 3 (§3.2) — answers recorded in the plan's first task and reflected in §4.3-1, §4.3-3, §4.3-7.
+- The announce chime's MA queue form: covered by exact equality against the URL `_say` actually played
+  (resolved before `_say`); confirm when AN-01 is re-enabled (announcements are disabled today).
