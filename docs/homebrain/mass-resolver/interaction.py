@@ -1672,9 +1672,65 @@ class InteractionCapability(capability.Capability):
                 LOG.warning("SAY req=%s zone=%s URI fallback failed (%r); source NOT resumed", rid, zone, e)
         return False
 
+    def _queue_after_raised_enqueue(self, ctx, rid, zone, qm, one_uri, one_key, one_clip, opts, superseded):
+        """Design 4.3-5: an enqueue whose REST call raised may still have landed. If the clip is current, wait
+        it out (never cut the answer off); otherwise carry on -- the record step or the settle check finds it.
+        gave_up is "unreadable", NOT a denial: the clip may have played, and likely_silent must not claim the
+        room heard nothing (the AN-01 honesty rule at the start poll, ~1227)."""
+        out = {"started": False, "issued": True, "clip": one_clip, "ended": False, "gave_up": "unreadable"}
+        ma = None
+        cur = None
+        try:
+            ma = self._ma_open(ctx)
+            s = ma.queue_state(qm["queue_id"])
+            if _ma_ok(s):
+                cur = (s.get("result") or {}).get("current_item") or {}
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s after raised enqueue: read failed (%r)", rid, zone, e)
+        finally:
+            self._ma_close(ma)
+        if cur and clip_uri_of(cur) == one_uri:
+            return self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip, opts, superseded,
+                                            enqueue="play", issue=False)
+        return out
+
     def _queue_settle(self, ctx, rid, zone, qm, seek, poll_secs, known_clips):
-        """Task 3: no-op placeholder with the final signature; Task 4 fills it (design 4.3-7)."""
-        return None
+        """Design 4.3-7: one settle re-read after a poll interval. A late-landing enqueue can put a NEW reply
+        clip in front of the song; if so, record it (exact + anchored) and resume ONCE more. A clip we already
+        knew before the resume just means MA is lagging -- re-resuming would restart the song (peer review
+        finding 1)."""
+        self._sleeper(poll_secs)
+        t = qm["target"]
+        ma = None
+        try:
+            ma = self._ma_open(ctx)
+            s = ma.queue_state(qm["queue_id"])
+            if not _ma_ok(s):
+                return
+            q = s.get("result") or {}
+            ci = q.get("current_item") or {}
+            cid = ci.get("queue_item_id")
+            if not ci or cid == t["item"] or cid in known_clips:
+                return
+            if not is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""):
+                return
+            idx = q.get("current_index")
+            if idx is not None and idx >= 1:
+                r = ma.queue_items(qm["queue_id"], offset=idx - 1, limit=2)
+                items = (r.get("result") or []) if _ma_ok(r) else []
+                for played in qm["played"]:
+                    got, _, _ = anchored_clip(items, idx - 1, idx - 1, played)
+                    if got == cid:
+                        if cid not in qm["clips"]:
+                            qm["clips"].append(cid)
+                        break
+            ma.play_index(qm["queue_id"], t["item"], seek_position=seek)
+            LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; resumed again",
+                        rid, zone, cid, t["item"])
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s settle check failed (%r)", rid, zone, e)
+        finally:
+            self._ma_close(ma)
 
     def _queue_finish(self, ctx, rid, zone, qm, my_gen):
         """Design 4.3-8: delete recorded clips that are not current; keep the zone record per outcome."""
@@ -2020,8 +2076,14 @@ class InteractionCapability(capability.Capability):
                 opts["finish_timeout"] = finish_timeouts[i]
                 queue_may_be_replaced[0] = True
                 if qm is not None:
-                    res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
-                                                   opts, superseded, enqueue="play")
+                    try:
+                        res = self._play_clip_and_wait(ctx, rid, zone, one_uri, one_key, one_clip,
+                                                       opts, superseded, enqueue="play")
+                    except Exception as e:
+                        LOG.warning("SAY req=%s zone=%s clip=%s enqueue raised (%r); checking the queue",
+                                    rid, zone, one_clip, e)
+                        res = self._queue_after_raised_enqueue(ctx, rid, zone, qm, one_uri, one_key,
+                                                               one_clip, opts, superseded)
                     qm["played"].append(one_uri)
                     if superseded():
                         qm["unrecorded"].append(one_uri)   # a successor may own the queue now

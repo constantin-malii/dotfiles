@@ -441,5 +441,130 @@ class QueueModeTest(unittest.TestCase):
         self.assertEqual(len(cap._queue_targets[ZONE]["clips"]), 1)
 
 
+class QueueFailureTest(unittest.TestCase):
+    def q8(self):
+        return FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+
+    def replaces(self, q):
+        return [c for c in q.calls if c[0] == "replace"]
+
+    def play_indexes(self, q):
+        return [c for c in q.calls if c[0] == "play_index"]
+
+    def test_confirmation_lag_within_budget_is_confirmed(self):
+        q = self.q8(); q.lag = 3
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(self.replaces(q), [])
+        self.assertEqual(len(self.play_indexes(q)), 1)
+
+    def test_lag_beyond_budget_is_unconfirmed_and_never_replays_or_restarts(self):
+        q = self.q8(); q.lag = 50
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "unconfirmed")
+        self.assertEqual(self.replaces(q), [])
+        self.assertEqual(len(self.play_indexes(q)), 1)     # settle must not re-resume a merely lagging MA
+
+    def test_play_index_error_and_reads_show_other_item_falls_back_once(self):
+        q = self.q8(); q.fail["play_index"] = ["error"]
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "fallback_uri")
+        self.assertEqual(self.replaces(q), [("replace", "library://track/3")])
+
+    def test_play_index_error_and_reads_fail_falls_back_once(self):
+        q = self.q8(); q.fail["play_index"] = ["error"]
+        q.fail["queue_state"] = [None, None] + [OSError("read")] * 30   # capture + record ok, then all fail
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "fallback_uri")
+        self.assertEqual(len(self.replaces(q)), 1)
+
+    def test_play_index_raised_and_reads_fail_is_unknown_no_replay(self):
+        q = self.q8(); q.fail["play_index"] = [OSError("timeout")]
+        q.fail["queue_state"] = [None, None] + [OSError("read")] * 30
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "unknown")
+        self.assertEqual(self.replaces(q), [])
+
+    def test_delete_failure_is_logged_not_fatal(self):
+        q = self.q8(); q.fail["delete_item"] = ["error"]
+        r = say(new_cap(), ctx_for(q))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(r["metadata"]["clips_deleted"], 0)
+
+    def test_exception_after_play_index_is_not_redecided(self):
+        q = self.q8()
+        cap = new_cap()
+        def boom(*a, **k):
+            raise RuntimeError("after resume")
+        cap._queue_finish = boom
+        try:
+            say(cap, ctx_for(q))
+        except Exception:
+            pass
+        self.assertEqual(len(self.play_indexes(q)), 1)
+        self.assertEqual(self.replaces(q), [])
+
+    def test_exception_after_enqueue_resumes_in_recovery(self):
+        q = self.q8()
+        cap = new_cap()
+        def boom(*a, **k):
+            raise RuntimeError("record failed")
+        cap._queue_record_clip = boom
+        try:
+            say(cap, ctx_for(q))
+        except Exception:
+            pass
+        self.assertEqual(self.play_indexes(q), [("play_index", "t3", 47)])
+        self.assertEqual(self.replaces(q), [])
+
+    def test_exception_after_pause_before_enqueue_unpauses_in_place(self):
+        q = self.q8()
+        ctx = ctx_for(q); ctx.ha.volume_boom = True           # the reply-volume write fails after the pause
+        try:
+            say(new_cap(), ctx)
+        except Exception:
+            pass
+        self.assertEqual(self.play_indexes(q), [])
+        self.assertEqual([c for c in q.calls if c[0] == "enqueue"], [])
+        self.assertIn(("media_player", "media_play", {"entity_id": ZONE}), ctx.ha.calls)
+
+    def test_exception_before_pause_leaves_the_song_alone(self):
+        q = self.q8()
+        ctx = ctx_for(q)
+        cap = new_cap()
+        def boom(*a, **k):
+            raise RuntimeError("before the pause")
+        cap._warn_if_double_speak = boom
+        try:
+            say(cap, ctx)
+        except Exception:
+            pass
+        self.assertEqual(self.play_indexes(q), [])
+        self.assertEqual([c for c in ctx.ha.calls if c[1] in ("media_play", "media_pause")], [])
+
+    def test_enqueue_raised_but_landed_waits_then_resumes_and_deletes(self):
+        q = self.q8(); q.enqueue_raises_after_landing = True
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+        self.assertEqual(q.cur()["queue_item_id"], "t3")
+        self.assertEqual(self.replaces(q), [])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+
+    def test_enqueue_raised_not_landed_is_not_reported_certainly_silent(self):
+        q = self.q8(); q.enqueue_raises_without_landing = True
+        r = say(new_cap(), ctx_for(q))
+        self.assertFalse(r["metadata"]["likely_silent"])     # AN-01 honesty rule: unknown, not a denial
+        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+
+    def test_clip_landing_after_resume_is_caught_by_settle(self):
+        q = self.q8(); q.clip_lands_after_play_index = CLIP
+        say(new_cap(), ctx_for(q))
+        self.assertEqual(len(self.play_indexes(q)), 2)       # resumed once more
+        self.assertEqual(q.cur()["queue_item_id"], "t3")
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+
+
 if __name__ == "__main__":
     unittest.main()
