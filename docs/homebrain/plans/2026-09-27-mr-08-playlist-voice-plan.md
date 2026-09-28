@@ -1052,54 +1052,73 @@ any deploy; fix findings with the same TDD loop.
 ### Task 7: Deploy (operator-gated — stop and ask before Step 1)
 
 Every step from Step 2 touches the live host. Ask the operator for explicit approval to start; the operator performs
-the restart. `main` is protected (BACKLOG §8): every change below lands through a PR. `gh pr create` fails on this
-machine (gh uses the personal token) — push the branch and open the PR from the browser URL git prints.
-Replace `<ts>` with the timestamp printed in Step 2.
+the restart. `main` is protected (BACKLOG §8): every change lands through a PR. `gh pr create` fails on this machine
+(gh uses the personal token) — push the branch and open the PR from the browser URL git prints.
+**Code is tested in a staging copy on the host and only then copied into the live directory**, so no CLI run or
+systemd auto-restart can load untested code. Replace `<ts>` with the timestamp printed in Step 2.
 
-- [ ] **Step 1: Claim the live gate in the §10 register** — per BACKLOG §10 ("record the track ID + branch here in
-the claiming PR"). Edit the `host-live / HA-live / exposure` row of `docs/homebrain/BACKLOG.md` §10: Holder
-`MR-08 (homebrain/mr-playlist-voice)`, Status `CLAIMED <date> for the MR-08 resolver deploy`. BACKLOG is CRLF — match
-its line endings and check `git diff --numstat` shows only the lines you meant. Commit
-(`docs(homebrain): claim the live gate for MR-08`), push, open the PR, and **wait until it is merged** before Step 2.
-If the row is not FREE, stop — another track holds the gate. Do **not** touch `CHANGELOG.md` here (§9: one writer,
-entry added at merge).
+- [ ] **Step 1: Claim the live gate in the §10 register — on its own tiny branch**
 
-- [ ] **Step 2: Back up the host files, including the tests**
+The claim PR must **not** come from `homebrain/mr-playlist-voice` (merging it would ship the whole feature to `main`
+before deploy and live verification). From the main checkout:
 
 ```bash
-ssh costea@192.168.1.68 'cd ~/mass-resolver && ts=$(date +%Y%m%d-%H%M%S) && mkdir -p .bak/$ts && cp music.py maconn.py favorites.py config.py core.py resolver.py config.json .bak/$ts/ && cp -r tests .bak/$ts/tests && echo $ts'
+git fetch origin
+git worktree add .claude/worktrees/mr-08-gate-claim -b homebrain/mr-08-gate-claim origin/main
 ```
 
-Also record the current announce count for Step 6: `ssh costea@192.168.1.68 'grep -c "ANNOUNCE via" ~/mass-resolver/resolver.log'`.
+In that worktree edit only the `host-live / HA-live / exposure` row of `docs/homebrain/BACKLOG.md` §10: Holder
+`MR-08 (homebrain/mr-playlist-voice)`, Status `CLAIMED <date> for the MR-08 resolver deploy`. If the row is not FREE,
+stop — another track holds the gate. BACKLOG is CRLF — match its line endings; `git diff --numstat` must show only
+that row. Commit (`docs(homebrain): claim the live gate for MR-08`), push, open the PR, and **wait until it is merged**
+before Step 2; then remove that worktree. Do **not** touch `CHANGELOG.md` (§9: one writer, entry added at merge).
 
-- [ ] **Step 3: Copy code and tests; run the suite on the host's Python 3.5.2 before the restart**
+- [ ] **Step 2: Back up the live files with checksums; record baselines**
 
 ```bash
+ssh costea@192.168.1.68 'cd ~/mass-resolver && ts=$(date +%Y%m%d-%H%M%S) && mkdir -p .bak/$ts && cp -p music.py maconn.py favorites.py config.py core.py resolver.py config.json .bak/$ts/ && cp -rp tests .bak/$ts/tests && (cd .bak/$ts && find . -type f | sort | xargs sha256sum > /tmp/mr08.bak.sha && mv /tmp/mr08.bak.sha SHA256SUMS) && echo $ts && ls tests && grep -c "ANNOUNCE via" resolver.log'
+```
+
+Record: `<ts>`, the list of test modules **present on the host** (the host carries a subset; last deploy: 493 tests
+OK across `test_interaction`, `test_py35_compat`, `test_haconn`, `test_config`, `test_wsutil` — CHANGELOG line 12),
+and the `ANNOUNCE via` count for Step 6.
+
+- [ ] **Step 3: Stage, verify by sha256, merge the alias config, test on Python 3.5.2**
+
+Staging lives at `~/mr08-staging/mass-resolver` — the directory must be named `mass-resolver`, because
+`ShippedAnnounceConfigTest` loads `../mass-resolver/config.json` relative to the code and would otherwise read the
+live file.
+
+```bash
+ssh costea@192.168.1.68 'rm -rf ~/mr08-staging && mkdir -p ~/mr08-staging && cp -rp ~/mass-resolver ~/mr08-staging/mass-resolver && rm -rf ~/mr08-staging/mass-resolver/.bak'
 cd docs/homebrain/mass-resolver
-scp music.py maconn.py favorites.py config.py core.py resolver.py costea@192.168.1.68:mass-resolver/
-scp -r tests costea@192.168.1.68:mass-resolver/
-ssh costea@192.168.1.68 'cd ~/mass-resolver && python3 --version && python3 -m unittest discover -s tests -t . 2>&1 | tail -3'
+scp music.py maconn.py favorites.py config.py core.py resolver.py costea@192.168.1.68:mr08-staging/mass-resolver/
+scp tests/test_playlist.py tests/test_music.py tests/test_core.py tests/test_favorites.py tests/test_maconn.py tests/test_config.py tests/test_resolver.py costea@192.168.1.68:mr08-staging/mass-resolver/tests/
 ```
 
-Expected: `Python 3.5.2`, then `OK` (compare the count with the last deploy's 487 host tests plus the new ones; host
-skips may differ from Windows). `test_py35_compat` only parses syntax — this run is the real 3.5 check. **Any failure:
-STOP**, restore from `.bak/<ts>` (rollback below) — the service is still running the old code, so nothing is live yet.
-
-- [ ] **Step 4: Merge the alias config by value, not by key**
-
-Compare the host `config.json` with the repo's by **value** (the repo mirror must not drift):
+Add `tests/test_radio.py tests/test_radio_config.py` to the second `scp` **only if** Step 2 listed them on the host.
+Verify end to end by sha256, not by `scp`'s exit code (it has reported `exit=1` on good copies — CHANGELOG line 462):
 
 ```bash
-scp costea@192.168.1.68:mass-resolver/config.json "$SCRATCH/host_config.json"   # $SCRATCH = this session's scratchpad
+F="music.py maconn.py favorites.py config.py core.py resolver.py tests/test_playlist.py tests/test_music.py tests/test_core.py tests/test_favorites.py tests/test_maconn.py tests/test_config.py tests/test_resolver.py"
+sha256sum $F > "$SCRATCH/local.sha"                                   # $SCRATCH = this session's scratchpad
+ssh costea@192.168.1.68 "cd ~/mr08-staging/mass-resolver && sha256sum $F" > "$SCRATCH/staged.sha"
+diff "$SCRATCH/local.sha" "$SCRATCH/staged.sha" && echo SHA-MATCH
+```
+
+Expected `SHA-MATCH`. Then the alias config, compared **by value** first (the repo mirror must not drift):
+
+```bash
+scp costea@192.168.1.68:mass-resolver/config.json "$SCRATCH/host_config.json"
 python -c "import json,sys; h=json.load(open(sys.argv[1])); r=json.load(open('config.json')); print('differ:', sorted(k for k in set(h)|set(r) if h.get(k)!=r.get(k)))" "$SCRATCH/host_config.json"
 ```
 
-Expected: `differ: []` (or only keys you can explain). An unexplained difference: STOP and ask the operator which
-side is right. (`config.json` holds no secrets — tokens live in dot-files — but print key names only, as above.)
-Then add **only** the alias key on the host, ASCII-safe (non-interactive ssh on 16.04 may run in an ASCII locale):
+Expected `differ: []` (or only keys you can explain); an unexplained difference: STOP and ask the operator which
+side is right. Key names only are printed; `config.json` holds no secrets (tokens live in dot-files). Add **only**
+the alias key to the **staged** config, ASCII-safe (non-interactive ssh on 16.04 may run in an ASCII locale):
 
 ```bash
-ssh costea@192.168.1.68 'cd ~/mass-resolver && python3 - <<EOF
+ssh costea@192.168.1.68 'cd ~/mr08-staging/mass-resolver && python3 - <<EOF
 import json
 c = json.load(open("config.json"))
 c["playlist_aliases"] = {"costea mix": "my music - costea (local)", "costea mics": "my music - costea (local)"}
@@ -1108,9 +1127,30 @@ print("aliases:", c["playlist_aliases"])
 EOF'
 ```
 
-Mirror the same key into the repo `config.json` and run `python -m unittest tests.test_config -v`
-(`ShippedAnnounceConfigTest` asserts against the repo file and must stay green), then commit separately
+Run the precedent modules plus every copied one, **by name** (not `discover` — local-only modules such as
+`test_ha_export` need files the host does not carry):
+
+```bash
+ssh costea@192.168.1.68 'cd ~/mr08-staging/mass-resolver && python3 --version && python3 -m py_compile *.py && echo COMPILE OK && python3 -m unittest tests.test_interaction tests.test_py35_compat tests.test_haconn tests.test_config tests.test_wsutil tests.test_playlist tests.test_music tests.test_core tests.test_favorites tests.test_maconn tests.test_resolver 2>&1 | tail -3'
+```
+
+Expected: `Python 3.5.2`, `COMPILE OK`, `OK`. Record the count (baseline 493 plus the added modules). If a copied
+module fails only because it imports something the host has never carried, record it, drop it from the list, and
+say so in the CHANGELOG — that is not a regression. **Any other failure: STOP.** Nothing live has changed; delete
+`~/mr08-staging` and fix locally.
+
+Mirror the alias key into the repo `config.json`, run `python -m unittest tests.test_config -v` locally
+(`ShippedAnnounceConfigTest` asserts against the repo file), and commit separately
 (`chore(resolver): MR-08 playlist alias config`).
+
+- [ ] **Step 4: Promote staging to live, verified by sha256**
+
+```bash
+ssh costea@192.168.1.68 'S=~/mr08-staging/mass-resolver; cd ~/mass-resolver && for f in music.py maconn.py favorites.py config.py core.py resolver.py config.json tests/test_playlist.py tests/test_music.py tests/test_core.py tests/test_favorites.py tests/test_maconn.py tests/test_config.py tests/test_resolver.py; do cp -p $S/$f $f; done && (cd $S && sha256sum music.py maconn.py favorites.py config.py core.py resolver.py config.json tests/test_*.py | sort) > /tmp/mr08.staged && (sha256sum music.py maconn.py favorites.py config.py core.py resolver.py config.json $(cd $S && ls tests/test_*.py) | sort) > /tmp/mr08.live && diff /tmp/mr08.staged /tmp/mr08.live && echo PROMOTED-SHA-MATCH'
+```
+
+(Include `tests/test_radio*.py` in the loop if they were staged.) Expected `PROMOTED-SHA-MATCH`. The running service
+still has the old code in memory until Step 5.
 
 - [ ] **Step 5: Operator restarts the service** — ask them to run:
 `! ssh -t costea@192.168.1.68 'sudo systemctl restart mass-resolver'`
@@ -1148,13 +1188,23 @@ Expected: a CommandResult with `"ok": false`, `not_found`; the log shows `ANNOUN
 2. Mid-playlist, operator asks Nabu any question → afterwards check the MA queue: **still 8 items** (clears spec
    §6's concern) or **only the current track** (confirms it; MR-08c stays widened). Record which.
 
-- [ ] **Step 8: Docs, release the gate, merge** — in the track's merge PR: the `CHANGELOG.md` entry (§9: added at
-merge — what shipped, the dry-run fix, host and local test counts, the Step 7.2 result); `ONBOARDING.md` current
-state; `assistant-capabilities.md` (playlists by name/alias; shuffle not yet); BACKLOG `MR-08` → done and, per Step
-7.2, confirm or narrow `MR-08c`; and the §10 register row released (Holder *(none)*, Status `FREE — released
-<date>` with the host test count and the rollback path `.bak/<ts>`). Docs in a commit separate from code. Push, open
-the PR from the browser URL; after merge, remove the worktree.
+- [ ] **Step 8: Docs, release the gate, merge** — in the track's merge PR from `homebrain/mr-playlist-voice`: the
+`CHANGELOG.md` entry (§9: added at merge — what shipped, the dry-run fix, host and local test counts, sha256
+verification, the Step 7.2 result); `ONBOARDING.md` current state; `assistant-capabilities.md` (playlists by
+name/alias; shuffle not yet); BACKLOG `MR-08` → done and, per Step 7.2, confirm or narrow `MR-08c`; and the §10
+register row released (Holder *(none)*, Status `FREE — released <date>` with the host test count and the rollback
+path `.bak/<ts>`). Merge `origin/main` into the track branch first (it now contains the Step 1 claim) and resolve the
+§10 row to the released state. Docs in a commit separate from code. Push, open the PR from the browser URL; after
+merge, delete `~/mr08-staging` on the host and remove the worktree.
 
-**Rollback (any step after 3):** `ssh costea@192.168.1.68 'cd ~/mass-resolver && cp .bak/<ts>/*.py .bak/<ts>/config.json . && rm -rf tests && cp -r .bak/<ts>/tests tests'`
-then the operator restarts again (skip the restart if Step 5 has not happened yet). Aliases only: set
-`"playlist_aliases": {}` in the host `config.json` and restart. Release the §10 row as `FREE — rolled back` via PR.
+**Rollback (after Step 4):**
+
+```bash
+ssh costea@192.168.1.68 'cd ~/mass-resolver && B=.bak/<ts> && cp -p $B/*.py $B/config.json . && rm -rf tests && cp -rp $B/tests tests && sha256sum -c --quiet $B/SHA256SUMS && echo ROLLBACK-SHA-MATCH'
+```
+
+(`SHA256SUMS` holds `./`-relative paths, so checking it from `~/mass-resolver` verifies the restored live files.)
+Then the operator restarts again (skip it if Step 5 has not happened). Aliases only: set `"playlist_aliases": {}` in
+the host `config.json` and restart. Release the §10 row as `FREE — rolled back <date>` via a PR from its own tiny
+branch off `origin/main` (as in Step 1), never from the track branch. Before Step 4, rollback is just
+`rm -rf ~/mr08-staging`.
