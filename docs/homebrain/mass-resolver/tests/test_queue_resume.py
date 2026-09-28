@@ -26,7 +26,7 @@ def clip_item(qid, uri, wrapper="builtin://radio/"):
 class ReplyClipUriTest(unittest.TestCase):
     def test_narrow_predicate(self):
         self.assertTrue(interaction.is_reply_clip_uri("builtin://radio/" + CLIP))
-        self.assertTrue(interaction.is_reply_clip_uri("http://x/y.wav?authSig=abc"))
+        self.assertTrue(interaction.is_reply_clip_uri("http://x/y.wav?authSig=PLACEHOLDER"))
         self.assertTrue(interaction.is_reply_clip_uri("builtin://track/http://h/media/local/timer_chime.wav"))
         self.assertFalse(interaction.is_reply_clip_uri(STREAM))          # a station, not a clip
         self.assertFalse(interaction.is_reply_clip_uri("library://track/3"))
@@ -133,7 +133,9 @@ class FakeQueue(object):
     """MA's queue as measured (design 3): enqueue=play inserts after current and plays it (also when paused);
     a clip plays for `clip_play_reads` HA reads then goes idle (or never, with clip_never_idle); deleting the
     current item is a no-op; play_index by id at a position. `lag` = confirming reads before a play_index shows.
-    `fail[name]` = list consumed per call: None (normal), "error", or an Exception to raise."""
+    `fail[name]` = list consumed per call: None (normal), "error", "none" (MA sent no reply: the call
+    returns None), or an Exception to raise."""
+    NO_REPLY = object()
     def __init__(self, items, current=0, state="playing", elapsed=47.0, last_upd=None):
         self.items = list(items); self.current = current; self.state = state
         self.elapsed = elapsed; self.last_upd = last_upd
@@ -153,6 +155,8 @@ class FakeQueue(object):
             raise f
         if f == "error":
             return {"error_code": 999, "details": "boom"}
+        if f == "none":
+            return self.NO_REPLY
         return None
 
     def _insert_clip(self, uri):
@@ -213,6 +217,8 @@ class FakeQueue(object):
     def play_index(self, item_id, seek_position):
         self.calls.append(("play_index", item_id, seek_position))
         r = self._f("play_index")
+        if r is self.NO_REPLY:
+            return None
         if r is not None:
             return r
         idx = [i for i, x in enumerate(self.items) if x["queue_item_id"] == item_id][0]
@@ -245,8 +251,9 @@ class FakeQueue(object):
 
 class FakeQueueMA(object):
     def __init__(self, q):
-        self.q = q; self.s = None
-    def connect(self): self.s = object()
+        self.q = q; self.s = None; self.connect_args = None
+    def connect(self, connect_timeout=None, call_timeout=None):
+        self.connect_args = (connect_timeout, call_timeout); self.s = object()
     def close(self): self.s = None
     def queue_state(self, queue_id): return self.q.queue_state()
     def queue_items(self, queue_id, offset=0, limit=50): return self.q.queue_items(offset, limit)
@@ -259,8 +266,13 @@ class QueueHA(FakeHA):
     def __init__(self, q, volume=0.3):
         FakeHA.__init__(self)
         self.q = q; self.volume = volume; self.volume_boom = False
+        self.play_boom = False                       # media_play (un-pause) raises
+        self.first_state = None                      # one-shot (state, media_content_id) for the first read
     def get_entity_state(self, entity_id, timeout=None):
         self.state_timeouts.append(timeout)
+        if self.first_state is not None:
+            (st, mid), self.first_state = self.first_state, None
+            return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
         st, mid = self.q.ha_state()
         return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
     def call_service_rest(self, domain, service, data, timeout=5):
@@ -270,6 +282,8 @@ class QueueHA(FakeHA):
         elif service == "media_pause":
             self.q.state = "paused"
         elif service == "media_play":
+            if self.play_boom:
+                raise OSError("media_play failed")
             self.q.state = "playing"
         elif service == "volume_set":
             if self.volume_boom and abs(data["volume_level"] - 0.40) < 0.001:
@@ -738,6 +752,215 @@ class QueueContinuityTest(unittest.TestCase):
         self.assertIn(ZONE, cap._queue_targets)
         cap.note_playback(ctx, ZONE, "library://track/99")
         self.assertNotIn(ZONE, cap._queue_targets)
+
+
+def qm_for(clips, target=None):
+    return {"queue_id": "q1", "cap": None, "target": target, "clips": list(clips), "played": [],
+            "unrecorded": [], "anchor": 0, "unidentified": 0, "resume": "none", "seeked": False,
+            "deleted": 0, "inherited_from": None}
+
+
+class FinalReviewFixTest(unittest.TestCase):
+    """MR-08c final-review fix wave (I1-I3, D1-D2, M1, M2, M5, M6, M8, M9)."""
+
+    def play_indexes(self, q):
+        return [c for c in q.calls if c[0] == "play_index"]
+
+    # I1 -----------------------------------------------------------------------------------------
+    def test_superseded_after_play_index_leaves_no_orphan_clip(self):
+        # B supersedes A after A recorded its clip and issued play_index; B captures the SONG (a real
+        # item), which pops A's record. A's clip must not be left in the queue to play after the song.
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        ctx = ctx_for(q)
+        state = {"fired": False}
+        def hook(n):
+            if not state["fired"] and any(c[0] == "play_index" and c[1] == "t3" for c in q.calls):
+                state["fired"] = True
+                capability.run(cap, ctx, {"mode": "say", "uri": CLIP2}, "ridB")
+        cap = new_cap(hook)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(cap, ctx)
+        self.assertTrue(state["fired"])
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])      # original 8, no clip left
+        self.assertEqual(q.cur()["queue_item_id"], "t3")
+        self.assertTrue(any("carried 1 clip(s) from req=rid1" in m for m in lg.output))
+
+    def test_capturing_a_real_item_carries_the_popped_records_clips(self):
+        # The carry on its own (the test above also passes through the superseded exit): a record left
+        # by a superseded turn is popped when this turn captures a real item, and its spent clips become
+        # this turn's to delete -- even if the superseded turn never gets to clean up.
+        q = FakeQueue([track(1), track(2), track(3), clip_item("cA", CLIP), track(4)], current=2, elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        cap._queue_targets[ZONE] = {"gen": 1, "rid": "ridA", "target": {"item": "t3"}, "clips": ["cA"],
+                                    "live": True}
+        with cap._lock:
+            cap._say_gen[ZONE] = 1
+        r = say(cap, ctx, uri=CLIP2, rid="ridB")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3", "t4"])
+        self.assertEqual(q.cur()["queue_item_id"], "t3")
+        self.assertEqual(r["metadata"]["clips_deleted"], 2)
+
+    def test_superseded_exit_deletes_own_recorded_clips_when_record_not_its_own(self):
+        q = FakeQueue([track(1), track(2), clip_item("c1", CLIP), clip_item("c2", CLIP2), track(3)], current=3)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        succ = {"gen": 9, "rid": "ridB", "target": None, "clips": [], "live": True}
+        cap._queue_targets[ZONE] = succ
+        cap._queue_superseded_exit(ctx, "ridA", ZONE, qm_for(["c1", "c2"]), 3)
+        self.assertEqual(q.ids(), ["t1", "t2", "c2", "t3"])       # c1 deleted; c2 is current: kept
+        self.assertEqual([c for c in q.calls if c[0] == "delete"], [("delete", "c1")])
+        self.assertIs(cap._queue_targets[ZONE], succ)             # the successor's record is untouched
+        self.assertTrue(ctx.mas and all(m.s is None for m in ctx.mas))
+
+    # I2 -----------------------------------------------------------------------------------------
+    def test_ha_idle_but_ma_playing_still_resumes(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        ctx = ctx_for(q)
+        ctx.ha.first_state = ("idle", "builtin://radio/" + CLIP)   # HA lags: still shows the spent clip
+        r = say(new_cap(), ctx)
+        self.assertEqual(self.play_indexes(q), [("play_index", "t3", 47)])
+        self.assertEqual(q.ids(), ["t%d" % i for i in range(1, 9)])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+
+    # I3 -----------------------------------------------------------------------------------------
+    def test_ma_open_passes_default_timeouts(self):
+        q = FakeQueue([track(1)], current=0)
+        ctx = ctx_for(q)
+        m = new_cap()._ma_open(ctx)
+        self.assertEqual(m.connect_args, (3.0, 5.0))
+
+    def test_ma_open_passes_configured_timeouts(self):
+        q = FakeQueue([track(1)], current=0)
+        ctx = ctx_for(q)
+        ctx.settings.say_ma_connect_timeout_ms = 1500
+        ctx.settings.say_ma_call_timeout_ms = 2500
+        m = new_cap()._ma_open(ctx)
+        self.assertEqual(m.connect_args, (1.5, 2.5))
+
+    # M6 -----------------------------------------------------------------------------------------
+    def test_ma_open_closes_a_half_open_socket_when_connect_fails(self):
+        q = FakeQueue([track(1)], current=0)
+        ctx = ctx_for(q)
+        class HalfOpen(FakeQueueMA):
+            def connect(self, connect_timeout=None, call_timeout=None):
+                self.s = object()
+                raise OSError("auth handshake failed")
+        m = HalfOpen(q)
+        ctx.ma_factory = lambda: m
+        with self.assertRaises(OSError):
+            new_cap()._ma_open(ctx)
+        self.assertIsNone(m.s)
+
+    # D1 -----------------------------------------------------------------------------------------
+    def test_recovery_unpause_failure_still_finishes(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        ctx = ctx_for(q)
+        ctx.ha.volume_boom = True                    # the reply-volume write fails after the pause
+        ctx.ha.play_boom = True                      # and the recovery's un-pause raises too
+        cap = new_cap()
+        try:
+            say(cap, ctx)
+        except Exception:
+            pass
+        rec = cap._queue_targets.get(ZONE)
+        self.assertFalse(rec is not None and rec.get("live"))
+
+    # D2 -----------------------------------------------------------------------------------------
+    def test_raised_enqueue_not_landed_when_current_item_has_no_id(self):
+        q = FakeQueue([track(1), {"name": "x", "media_item": {"uri": "library://track/9"}}], current=1)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        waited = []
+        cap._play_clip_and_wait = lambda *a, **k: waited.append(a)
+        out = cap._queue_after_raised_enqueue(ctx, "r1", ZONE, qm_for([]), CLIP, CLIP, "clip", {},
+                                              lambda: False)
+        self.assertEqual(waited, [])
+        self.assertFalse(out["started"])
+
+    # M1 -----------------------------------------------------------------------------------------
+    def test_play_index_no_reply_is_ambiguous_not_refused(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        q.fail["play_index"] = ["none"]
+        q.fail["queue_state"] = [None, None] + [OSError("read")] * 30   # capture + record ok, then all fail
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["resume"], "unknown")
+        self.assertEqual([c for c in q.calls if c[0] == "replace"], [])
+
+    def test_pending_resume_no_reply_does_not_fall_back_or_delete(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        q.items.insert(0, clip_item("c9", CLIP2))    # an older recorded clip that is NOT current
+        q.current += 1
+        cap._queue_targets[ZONE]["clips"].insert(0, "c9")
+        q.fail["play_index"] = ["none"]              # no reply, and it never lands
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertEqual([c for c in q.calls if c[0] in ("replace", "delete")], [])
+        self.assertEqual(q.ids(), ["c9", "t1", "t2", "c1", "t3"])
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c9", "c1"])
+
+    # M2 -----------------------------------------------------------------------------------------
+    def test_settle_second_play_index_refused_leaves_pending_with_late_clip(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        q.clip_lands_after_play_index = CLIP
+        q.fail["play_index"] = [None, "error"]      # the resume lands; settle's re-resume is refused
+        cap = new_cap()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q))
+        self.assertEqual(len(self.play_indexes(q)), 2)
+        self.assertEqual(r["metadata"]["resume"], "unconfirmed")
+        rec = cap._queue_targets[ZONE]
+        self.assertFalse(rec["live"])
+        self.assertIn(q.cur()["queue_item_id"], rec["clips"])      # the late clip, still current
+        self.assertFalse(any("resumed again" in m for m in lg.output))
+
+    # M5 -----------------------------------------------------------------------------------------
+    def test_non_ceiling_zone_uses_legacy(self):
+        q = FakeQueue([track(1), track(2)], current=0)
+        ctx = ctx_for(q)
+        r = capability.run(new_cap(), ctx, {"mode": "say", "uri": CLIP, "zone": "media_player.kitchen"}, "rid1")
+        self.assertEqual(q.calls, [("replace", CLIP), ("replace", "library://track/1")])
+        self.assertEqual(ctx.mas, [])
+        self.assertEqual(r["metadata"]["resume"], "legacy")
+
+    def test_non_ceiling_zone_resume_uses_legacy(self):
+        q = FakeQueue([track(1), track(2)], current=1, state="playing")
+        ctx = ctx_for(q)
+        capability.run(new_cap(), ctx, {"mode": "resume", "zone": "media_player.kitchen"}, "rid1")
+        self.assertEqual(ctx.mas, [])
+
+    # M8 -----------------------------------------------------------------------------------------
+    def test_capture_unavailable_is_a_warning(self):
+        q = FakeQueue([track(1), track(2)], current=0)
+        q.fail["queue_state"] = [OSError("ws down")]
+        with self.assertLogs("resolver", "WARNING") as lg:
+            say(new_cap(), ctx_for(q))
+        self.assertTrue(any("queue capture unavailable" in m for m in lg.output))
+
+    def test_final_line_counts_clips_and_still_current_wording(self):
+        q = FakeQueue([track(1), track(2)], current=0, state="idle")
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx_for(q))
+        self.assertTrue(any("(still current)" in m for m in lg.output))
+        self.assertTrue(any("resume=none clips_deleted=0 clips_unidentified=0" in m for m in lg.output))
+
+    # M9 -----------------------------------------------------------------------------------------
+    def test_stopped_turn_in_queue_mode_leaves_clip_current_and_pending_record(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        capability.run(cap, ctx, {"mode": "duck"}, "rid0")          # the turn opens
+        cap.note_stopped(ZONE)                                     # HA-side pause not yet visible
+        r = say(cap, ctx)
+        self.assertEqual(self.play_indexes(q), [])
+        self.assertEqual(r["metadata"]["resume"], "none")
+        self.assertEqual(q.cur()["media_item"]["uri"], "builtin://radio/" + CLIP)
+        rec = cap._queue_targets[ZONE]
+        self.assertFalse(rec["live"])
+        self.assertEqual(rec["target"]["item"], "t3")
 
 
 if __name__ == "__main__":

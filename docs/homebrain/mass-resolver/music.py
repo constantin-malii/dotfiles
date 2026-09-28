@@ -260,7 +260,7 @@ class MusicCapability(capability.Capability):
             LOG.info("req=%s PLAYING %s (provider=%s)", rid, hit["uri"], hit["provider"])
             text = "Playing " + display
             if "uris" in hit and hit["local"] < hit["total"]:
-                text += " \u2014 %d of %d tracks; %d aren't in your local library yet" % (
+                text += " - %d of %d tracks; %d aren't in your local library yet" % (
                     hit["local"], hit["total"], hit["total"] - hit["local"])
             if resolved.get("note") == "shuffle":
                 text += " (shuffle isn't supported yet)"

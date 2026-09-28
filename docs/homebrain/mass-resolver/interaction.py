@@ -513,7 +513,7 @@ class InteractionCapability(capability.Capability):
         """Design 4.6: continue a pending queue resume, un-pause a paused real item in place, or do nothing
         when a real item is already playing (a legacy replay would replace the queue). None -> the existing
         resume logic runs."""
-        if not self._queue_on(ctx):
+        if not self._queue_on(ctx, zone):
             return None
         queue_id = ctx.settings.queue_id
         with self._lock:
@@ -534,9 +534,15 @@ class InteractionCapability(capability.Capability):
                     and cur_id in rec["clips"]):
                 t = rec["target"]
                 r = ma.play_index(queue_id, t["item"], seek_position=seek_target(t))
-                if not _ma_ok(r):
+                no_reply = r is None
+                if no_reply:
+                    # Not a refusal: the command was sent and may have landed. Falling back to the
+                    # legacy replay would replace the queue under a resume that may be playing.
+                    LOG.warning("RESUME req=%s zone=%s pending queue resume got no reply; checking the queue",
+                                rid, zone)
+                elif not _ma_ok(r):
                     LOG.warning("RESUME req=%s zone=%s pending queue resume refused (%s); current logic",
-                                rid, zone, r.get("error_code") if isinstance(r, dict) else "no reply")
+                                rid, zone, r.get("error_code") if isinstance(r, dict) else "bad reply")
                     return None
                 # Deleting the current item is a no-op MA reports as success (design 3): confirm the
                 # song actually became current before deleting, or a lagging queue_state can make us
@@ -545,6 +551,11 @@ class InteractionCapability(capability.Capability):
                 seen, _ = self._queue_confirm(ma, queue_id, t["item"], poll_secs)
                 kept = []
                 for cid in rec["clips"]:
+                    if no_reply and not seen:
+                        # Unanswered and unconfirmed: whether the song or a clip is current is not
+                        # known, so nothing is deleted; the record stays pending for the next resume.
+                        kept.append(cid)
+                        continue
                     if not seen and cid == cur_id:
                         kept.append(cid)
                         LOG.info("RESUME req=%s zone=%s clip %s kept: was still current, unconfirmed resume",
@@ -1565,16 +1576,24 @@ class InteractionCapability(capability.Capability):
         return out
 
     # --- MR-08c queue mode -------------------------------------------------------------------------------
-    def _queue_on(self, ctx):
+    def _queue_on(self, ctx, zone=None):
+        # queue_id names the CEILING player's queue: any other zone keeps the legacy replay.
         return (bool(getattr(ctx.settings, "say_queue_resume", True))
                 and getattr(ctx, "ma_factory", None) is not None
-                and bool(getattr(ctx.settings, "queue_id", None)))
+                and bool(getattr(ctx.settings, "queue_id", None))
+                and (zone is None or zone == getattr(ctx.settings, "ceiling_entity", zone)))
 
     def _ma_open(self, ctx):
-        """A fresh MA connection for ONE phase (design 4.2): a reply can idle the socket for minutes."""
+        """A fresh MA connection for ONE phase (design 4.2): a reply can idle the socket for minutes.
+        Short timeouts: an unresponsive MA must cost the reply seconds, not a 60 s call timeout."""
         ma = ctx.ma_factory()
         if getattr(ma, "s", None) is None:
-            ma.connect()
+            try:
+                ma.connect(connect_timeout=int(getattr(ctx.settings, "say_ma_connect_timeout_ms", 3000)) / 1000.0,
+                           call_timeout=int(getattr(ctx.settings, "say_ma_call_timeout_ms", 5000)) / 1000.0)
+            except Exception:
+                self._ma_close(ma)          # a failed auth leaves the socket open
+                raise
         return ma
 
     def _ma_close(self, ma):
@@ -1586,7 +1605,7 @@ class InteractionCapability(capability.Capability):
 
     def _queue_capture(self, ctx, rid, zone, my_gen):
         """Design 4.3-1: capture the interrupted item BEFORE the pause. None -> legacy mode for the turn."""
-        if not self._queue_on(ctx):
+        if not self._queue_on(ctx, zone):
             return None
         queue_id = ctx.settings.queue_id
         ma = None
@@ -1595,7 +1614,7 @@ class InteractionCapability(capability.Capability):
             ma = self._ma_open(ctx)
             cap, why = parse_queue_capture(ma.queue_state(queue_id), self._clock())
             if cap is None:
-                LOG.info("SAY req=%s zone=%s queue capture unavailable (%s); legacy replay", rid, zone, why)
+                LOG.warning("SAY req=%s zone=%s queue capture unavailable (%s); legacy replay", rid, zone, why)
                 return None
             try:
                 r = ma.queue_items(queue_id, offset=max(0, (cap["index"] or 0) - 10), limit=25)
@@ -1605,7 +1624,7 @@ class InteractionCapability(capability.Capability):
             except Exception:
                 pass
         except Exception as e:
-            LOG.info("SAY req=%s zone=%s queue capture unavailable (%r); legacy replay", rid, zone, e)
+            LOG.warning("SAY req=%s zone=%s queue capture unavailable (%r); legacy replay", rid, zone, e)
             return None
         finally:
             self._ma_close(ma)
@@ -1648,6 +1667,15 @@ class InteractionCapability(capability.Capability):
             LOG.info("SAY req=%s zone=%s current queue item %s is a reply clip; no resume target",
                      rid, zone, cap["item"])
             return
+        if rec is not None and rec["clips"]:
+            # The popped record's clips are spent reply clips still sitting in the queue (e.g. a turn
+            # superseded after its play_index, whose own finish never runs). This turn's finish
+            # deletes them by exact id; it never deletes the current item.
+            for cid in rec["clips"]:
+                if cid not in qm["clips"]:
+                    qm["clips"].append(cid)
+            LOG.info("SAY req=%s zone=%s carried %d clip(s) from req=%s", rid, zone, len(rec["clips"]),
+                     rec.get("rid"))
         qm["target"] = cap
 
     def _queue_publish_clips(self, zone, my_gen, qm):
@@ -1738,9 +1766,12 @@ class InteractionCapability(capability.Capability):
             if ma is not None:
                 try:
                     r = ma.play_index(qid, t["item"], seek_position=seek)
-                    if not _ma_ok(r):
+                    if r is None:
+                        # No reply is not a refusal: the command was sent and may have landed.
+                        called, why = "raised", "play_index got no reply"
+                    elif not _ma_ok(r):
                         called = "error"
-                        why = "ma error %s" % ((r or {}).get("error_code") if isinstance(r, dict) else "no reply")
+                        why = "ma error %s" % (r.get("error_code") if isinstance(r, dict) else "bad reply")
                 except Exception as e:
                     called, why = "raised", "play_index raised (%r)" % (e,)
                 # A KNOWN error_code means the outcome is already decided -- one read is enough to
@@ -1786,7 +1817,8 @@ class InteractionCapability(capability.Capability):
         """Design 4.3-5: an enqueue whose REST call raised may still have landed. If the clip is current, wait
         it out (never cut the answer off); otherwise carry on -- the record step or the settle check finds it.
         gave_up is "unreadable", NOT a denial: the clip may have played, and likely_silent must not claim the
-        room heard nothing (the AN-01 honesty rule at the start poll, ~1227)."""
+        room heard nothing (the AN-01 honesty rule: the start poll's "unreadable" outcome in
+        _play_clip_and_wait, and the likely_silent computation in _say)."""
         out = {"started": False, "issued": True, "clip": one_clip, "ended": False, "gave_up": "unreadable"}
         ma = None
         cur = None
@@ -1810,7 +1842,7 @@ class InteractionCapability(capability.Capability):
         if cur:
             if cur_index is not None:
                 qid, _, _ = anchored_clip([cur], cur_index, cur_index - 1, one_uri)
-                landed = qid == cur.get("queue_item_id")
+                landed = qid is not None and qid == cur.get("queue_item_id")
             else:
                 landed = clip_uri_of(cur) == one_uri
         if landed:
@@ -1859,9 +1891,24 @@ class InteractionCapability(capability.Capability):
             if not identified:
                 qm["unidentified"] += 1
                 LOG.warning("SAY req=%s zone=%s settle: late clip %s UNIDENTIFIED; not recorded", rid, zone, cid)
-            ma.play_index(qm["queue_id"], t["item"], seek_position=seek)
-            LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; resumed again",
-                        rid, zone, cid, t["item"])
+            why = None
+            try:
+                r = ma.play_index(qm["queue_id"], t["item"], seek_position=seek)
+                if r is not None and not _ma_ok(r):
+                    why = "ma error %s" % (r.get("error_code") if isinstance(r, dict) else "bad reply")
+            except Exception as e:
+                r, why = None, "play_index raised (%r)" % (e,)      # may still have landed: confirm
+            seen, _ = self._queue_confirm(ma, qm["queue_id"], t["item"], poll_secs,
+                                          tries=1 if (r is not None and why) else None)
+            if seen:
+                LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; resumed again",
+                            rid, zone, cid, t["item"])
+            else:
+                # The late clip may still be current: an unconfirmed outcome keeps a pending record
+                # (with the clip) so a later "resume" can finish the job (design 4.6).
+                qm["resume"] = "unconfirmed"
+                LOG.warning("SAY req=%s zone=%s settle: new reply clip %s displaced item %s; re-resume "
+                            "UNCONFIRMED (%s)", rid, zone, cid, t["item"], why or "not seen")
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s settle check failed (%r)", rid, zone, e)
         finally:
@@ -1888,7 +1935,7 @@ class InteractionCapability(capability.Capability):
                                     else None)
                 for cid in list(qm["clips"]):
                     if cid == cur:
-                        LOG.info("SAY req=%s zone=%s clip left as current item %s (no resume)", rid, zone, cid)
+                        LOG.info("SAY req=%s zone=%s clip left as current item %s (still current)", rid, zone, cid)
                         continue
                     if cid == unknown_cur_skip:
                         LOG.info("SAY req=%s zone=%s clip %s kept: current item unknown", rid, zone, cid)
@@ -1923,6 +1970,50 @@ class InteractionCapability(capability.Capability):
             LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
                      rid, zone, qm["target"]["item"], qm["clips"])
 
+    def _queue_delete_own_clips(self, ctx, rid, zone, qm):
+        """A superseded turn whose record a successor took (design 4.5): the resume is no longer ours,
+        but the clips we RECORDED are still ours to remove. Deleting by exact id is safe whoever owns
+        the zone; the current item is skipped (it may be playing, and deleting it is a no-op anyway).
+        A successor that captured a real item may already have carried and deleted them -- a failed
+        delete here is logged, never fatal."""
+        if not qm["clips"]:
+            return
+        ma = None
+        try:
+            ma = self._ma_open(ctx)
+            cur = None
+            try:
+                s = ma.queue_state(qm["queue_id"])
+                if _ma_ok(s):
+                    cur = ((s.get("result") or {}).get("current_item") or {}).get("queue_item_id")
+            except Exception:
+                pass
+            if cur is None:
+                # Current item unknown: a delete could hit whatever is playing as a no-op and lose
+                # track of it. Leave them; the successor's finish owns what it carried.
+                LOG.warning("SAY req=%s zone=%s superseded: current item unknown; own clips left %s",
+                            rid, zone, qm["clips"])
+                return
+            for cid in list(qm["clips"]):
+                if cid == cur:
+                    continue
+                try:
+                    r = ma.delete_item(qm["queue_id"], cid)
+                    if _ma_ok(r):
+                        qm["deleted"] += 1
+                        qm["clips"].remove(cid)
+                    else:
+                        LOG.warning("SAY req=%s zone=%s superseded: delete failed for %s (%s)", rid, zone, cid,
+                                    r.get("error_code") if isinstance(r, dict) else "no reply")
+                except Exception as e:
+                    LOG.warning("SAY req=%s zone=%s superseded: delete failed for %s (%r)", rid, zone, cid, e)
+        except Exception as e:
+            LOG.warning("SAY req=%s zone=%s superseded: own clip cleanup failed (%r)", rid, zone, e)
+        finally:
+            self._ma_close(ma)
+        LOG.info("SAY req=%s zone=%s superseded; successor owns the resume (own clips deleted=%d left=%s)",
+                 rid, zone, qm["deleted"], qm["clips"])
+
     def _queue_superseded_exit(self, ctx, rid, zone, qm, my_gen):
         """Design 4.5: a successor that CAPTURED owns the resume. If none did -- e.g. an announcement claimed
         the generation and aborted before reaching _say -- this turn's record would stay live forever and
@@ -1931,6 +2022,7 @@ class InteractionCapability(capability.Capability):
             rec = self._queue_targets.get(zone)
             mine = rec is not None and rec.get("gen") == my_gen
         if not mine:
+            self._queue_delete_own_clips(ctx, rid, zone, qm)
             return
         for uri in list(qm["unrecorded"]):
             self._queue_record_clip(ctx, rid, zone, qm, uri, self._clip_id(uri), my_gen)
@@ -2119,6 +2211,16 @@ class InteractionCapability(capability.Capability):
         try:
             # MR-08c: capture the interrupted queue item BEFORE the pause and any enqueue (design 4.3-1).
             qm = self._queue_capture(ctx, rid, zone, my_gen)
+            # HA and MA can disagree just after a play_index: HA still reports the spent (idle) clip
+            # while MA already plays the song. MA's queue is the authority in queue mode -- trusting
+            # HA here would skip the pause and the resume and leave the zone idle on our new clip.
+            # The stopped-turn guard above still wins: a turn that paused must not be resumed.
+            if (qm is not None and not was_playing and qm["cap"]["state"] == "playing"
+                    and not (bool(getattr(ctx.settings, "say_skip_replay_on_stop", True))
+                             and self._turn_stopped(zone))):
+                LOG.info("SAY req=%s zone=%s HA reported %s but the MA queue is playing; treating as playing",
+                         rid, zone, before.get("state"))
+                was_playing = True
 
             # 3. normalise the reply URI to the MA-reachable internal base
             norm_uri = self._normalise_uri(uri, getattr(ctx.settings, "say_internal_base", ""))
@@ -2328,8 +2430,10 @@ class InteractionCapability(capability.Capability):
             resume_mode = ({"confirmed": "queue"}.get(qm["resume"], qm["resume"]) if qm is not None
                            else "legacy")
 
-            LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s likely_silent=%s replayed=%s resume=%s",
-                     rid, zone, clip, reply_started, likely_silent, replayed, resume_mode)
+            LOG.info("SAY req=%s zone=%s clip=%s reply_started=%s likely_silent=%s replayed=%s resume=%s "
+                     "clips_deleted=%d clips_unidentified=%d",
+                     rid, zone, clip, reply_started, likely_silent, replayed, resume_mode,
+                     qm["deleted"] if qm else 0, qm["unidentified"] if qm else 0)
             return cr.ok(self.name, rid, "Said.", spoken_text=None,
                          metadata={"said": True, "reply_started": reply_started, "likely_silent": likely_silent,
                                     "end_observed": end_observed,
@@ -2397,14 +2501,18 @@ class InteractionCapability(capability.Capability):
                         #  - a clip may sit in front of the song -> resume the captured item (table 4.4);
                         #  - we only paused -> the queue is exactly as it was: un-pause in place;
                         #  - neither -> the song was never interrupted: do nothing.
-                        if was_playing and qm["target"] is not None and qm["resume"] == "none":
-                            if queue_may_be_replaced[0]:
-                                self._queue_resume(ctx, rid, zone, qm, source_id,
-                                                   int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0,
-                                                   superseded=superseded)
-                            elif paused_by_us[0]:
-                                self._say_call(ctx, rid, zone, "media_player", "media_play", {"entity_id": zone})
-                        self._queue_finish(ctx, rid, zone, qm, my_gen)
+                        # The finish runs even when the resume/un-pause raises: skipping it would leave
+                        # this turn's record live, and a live record is only ever retired by a successor.
+                        try:
+                            if was_playing and qm["target"] is not None and qm["resume"] == "none":
+                                if queue_may_be_replaced[0]:
+                                    self._queue_resume(ctx, rid, zone, qm, source_id,
+                                                       int(getattr(ctx.settings, "say_call_timeout_ms", 20000)) / 1000.0,
+                                                       superseded=superseded)
+                                elif paused_by_us[0]:
+                                    self._say_call(ctx, rid, zone, "media_player", "media_play", {"entity_id": zone})
+                        finally:
+                            self._queue_finish(ctx, rid, zone, qm, my_gen)
                 except Exception as e:
                     LOG.error("SAY req=%s zone=%s queue recovery failed (%r)", rid, zone, e)
             release_reply()
