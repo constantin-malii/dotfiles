@@ -54,10 +54,18 @@ punctuation and apostrophes ("Costea's mix") behave predictably.
    front; `[playlist]` only after an alias hit). Each type's library is fetched **once per resolve** (cached) so
    nothing is re-scanned. For `playlist`, a candidate is acceptable when either:
    - it has an available `filesystem_smb` mapping — `.m3u`, **today's behaviour, unchanged**; or
-   - it is a **curated MA playlist**: a `builtin` mapping whose `item_id` is **all digits**. MA's automatic lists
-     use named ids (`random_tracks`, `infinite_mix`, …) and are excluded without a config list, including any a
-     future MA version adds. Tracks are fetched **only for the top-ranked** curated candidate, capped at **500**,
-     keeping those with an available `filesystem_smb` mapping (playlist order).
+   - it is a **curated MA playlist**: it has a `builtin` mapping **and** the playlist's `is_editable` is `true`
+     **and** its `is_dynamic` is not `true`. A missing field **fails closed** (not curated, logged
+     `reason=not-curated`). The builtin mapping's `item_id` is ignored — for a user playlist it is the playlist's
+     *name* (probe 2026-09-27), not a number. **Stated assumption:** MA's automatic lists are non-editable (8/8
+     observed on the running MA: `random_tracks`, `all_favorite_tracks`, `infinite_mix`, `infinite_mix_favorites`,
+     `random_album`, `random_artist`, `recently_added_tracks`, `recently_played`); `is_dynamic` is a second guard for
+     the `infinite_mix` family. A future MA that marks an automatic list editable and non-dynamic would be treated
+     as curated — a scope slip, not a safety one: only that list's **local** tracks would play. Tracks are fetched
+     by the playlist's **library** `item_id` (provider `library`), **only for the top-ranked** curated candidate,
+     keeping those with an available `filesystem_smb` mapping (playlist order), and the play is capped at **500**
+     tracks. The cap bounds the play, not the fetch: `playlist_tracks` takes no limit (and ignored `page`), so MA
+     sends the whole list before it is truncated.
      - **≥1 local track** → accepted; it will play **only those local tracks** (see 3.1-4).
      - **0 local tracks** → `resolve` returns a `rejected_no_local` marker. Because tracks are fetched only for the
        top curated candidate and `playlist` is searched last, "another candidate matches" means in practice only an
@@ -125,7 +133,9 @@ The name used is the phrase the user said (alias key or query). `validate` picks
   - aliases: exact hit forces playlist-only; beats a same-named artist; alias to a missing or no-local playlist →
     `not_found`, **no** fall-through to an artist; a renamed target does not fuzzy-match another playlist; a short
     alias does not hijack a longer unrelated query; compacted (spelled-out) key matches;
-  - curated MA playlist (numeric id) accepted; each automatic list (named id) rejected;
+  - curated MA playlist (builtin, editable, not dynamic, name-like mapping id) accepted; builtin + not editable
+    rejected; builtin + editable + dynamic rejected; missing `is_editable` rejected (fail closed); fetch uses the
+    library id even when the mapping id differs;
   - curated playlist always plays the local-track list (all-local and mixed), `md["uri"]` a string, `md["uris"]`
     the list, mixed → note in `chat_text`; none-local → `not_found` with the "no songs" line; tracks fetched only for
     the top candidate and capped; library fetched once per resolve;
@@ -134,7 +144,7 @@ The name used is the phrase the user said (alias key or query). `validate` picks
     dry-run silent;
   - existing fakes without `playlist_aliases` pass; radio alias behaviour unchanged.
 - **Whole existing suite green** (radio, news, interaction, status, config, core).
-- **Mutation check:** break in turn the numeric-id rule, the local-track filter, the alias playlist-only restriction,
+- **Mutation check:** break in turn the `is_editable` check, the `is_dynamic` check, the local-track filter, the alias playlist-only restriction,
   the exact-target rule and the dry-run guard; a test must fail for each.
 
 ## 5. Deploy and verification (operator-gated)
@@ -187,7 +197,12 @@ resume, local-only). `.m3u` playlists share the reply-path behaviour but not the
 
 - MA API shapes on the running version: `music/playlists/playlist_tracks` (paging — note it ignored a `page` arg in a
   2026-09-27 probe), `player_queues/play_media` accepting a URI list.
-- Curated playlist mapping = `builtin` + numeric `item_id` — confirm on `my music - costea (local)` (item_id 28).
+- ~~Curated playlist mapping = `builtin` + numeric `item_id`~~ — **disproved** by the read-only probe of
+  2026-09-27 (branch commit `4504607`): playlist 28's builtin mapping id is its name; library id `28` ≠ mapping id;
+  `playlist_tracks(item_id="28", provider "library")` returns a plain list, `partial=False`, 8 local tracks.
+  `is_editable`/`is_dynamic` are present in the same `music/playlists/library_items` listing that `music.py` uses,
+  so the replacement rule (3.1) is read from data the resolver already fetches. `play_media` with a URI list is
+  still unconfirmed (not probeable read-only) — first live play.
 
 **Reviews:** an independent agent review and a peer-session review (both 2026-09-27) found the `/command` dry-run
 speaking, the list-URI risk to `note_playback`, alias fall-through and fuzzy targets, shuffle leakage and the

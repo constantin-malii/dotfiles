@@ -37,14 +37,20 @@ reviewed by an independent agent and by peer session `dotfiles-61`). Read it bef
    (phrase resolved unstripped). Test in Task 4.
 2. **An alias must never play something else** — a missing/renamed target or a no-local playlist returns
    `not_found`, never an artist and never a different playlist. Tests in Task 4.
-3. **MA's automatic playlists must never be treated as curated** (named ids like `random_tracks`), including
-   ones a future MA adds. Test in Task 3.
+3. **MA's automatic playlists must never be treated as curated** — curated = builtin mapping + `is_editable` true
+   + `is_dynamic` not true; a missing field fails closed. Assumption (spec 3.1): automatic lists are non-editable
+   (8/8 observed); if a future MA broke that, only that list's local tracks would play. Tests in Task 3.
 4. **A curated playlist must play only local tracks** even when all are local (no playlist-URI play). Test in Task 3.
 5. **A dry-run must never speak or play**, on `/command` (params or settings flag) and on the CLI. Tests in Task 5.
 
 ---
 
 ### Task 1: Live read-only probe of the MA shapes (no code)
+
+> **DONE 2026-09-27 (branch commit `4504607`).** The numeric-id assumption was **disproved** (the builtin mapping
+> id is the playlist name); the curated rule is now builtin + `is_editable` + not `is_dynamic` (spec 3.1, Task 3),
+> read from the same `ma.library("playlist")` listing `music.py` uses. Library id `28` ≠ mapping id; tracks come as
+> a plain list, `partial=False`, 8 local. The steps below are kept as the record of what was run.
 
 Confirms spec §8 assumptions before code depends on them. **Read-only; runs a script on the host over SSH using
 the documented on-host token method.** CLAUDE.md allows SSH only on a specific ask: **before Step 2, ask the operator
@@ -356,12 +362,16 @@ def ytm_track(name, item_id):
 
 
 def curated(name, item_id):
-    return {"name": name, "item_id": item_id, "uri": "library://playlist/" + item_id, "provider_mappings": [
-        {"provider_domain": "builtin", "provider_instance": "builtin", "available": True, "item_id": item_id}]}
+    # Shape observed live (probe 2026-09-27): builtin mapping id = the playlist NAME, library id numeric.
+    return {"name": name, "item_id": item_id, "uri": "library://playlist/" + item_id,
+            "is_editable": True, "is_dynamic": False, "provider_mappings": [
+        {"provider_domain": "builtin", "provider_instance": "builtin", "available": True, "item_id": name}]}
 
 
-def auto(name, named_id):
-    return {"name": name, "item_id": "9", "uri": "library://playlist/9", "provider_mappings": [
+def auto(name, named_id, dynamic=False):
+    # MA's automatic lists: builtin, non-editable (infinite_mix* are also dynamic).
+    return {"name": name, "item_id": "9", "uri": "library://playlist/9",
+            "is_editable": False, "is_dynamic": dynamic, "provider_mappings": [
         {"provider_domain": "builtin", "provider_instance": "builtin", "available": True, "item_id": named_id}]}
 
 
@@ -406,12 +416,30 @@ class CuratedPlaylistTest(unittest.TestCase):
         self.assertIn("has no songs in the local library yet", r["spoken_text"])
         self.assertEqual(ma.played, [])
 
-    def test_automatic_named_id_playlists_are_never_curated(self):
-        for named in ("random_tracks", "infinite_mix", "some_future_auto_list"):
+    def test_automatic_non_editable_playlists_are_never_curated(self):
+        # Includes a name-like id, so the rule cannot be "mapping id looks like a name".
+        for named in ("random_tracks", "recently_played", "Some Future Auto List"):
             ma = FakeMA({"playlist": [auto("Random Artist", named)]}, {"9": EIGHT})
             r = run(ma, "Random Artist", "playlist")
             self.assertFalse(r["ok"], named)
             self.assertEqual(ma.track_calls, [], named)
+
+    def test_editable_but_dynamic_playlist_is_never_curated(self):
+        pl = auto("Infinite Mix (library)", "infinite_mix", dynamic=True)
+        pl["is_editable"] = True                      # a future MA marking a dynamic list editable
+        ma = FakeMA({"playlist": [pl]}, {"9": EIGHT})
+        r = run(ma, "Infinite Mix (library)", "playlist")
+        self.assertFalse(r["ok"])
+        self.assertEqual(ma.track_calls, [])
+
+    def test_missing_is_editable_fails_closed(self):
+        pl = curated("mix", "5")
+        del pl["is_editable"]                         # e.g. a future MA renames the field
+        ma = FakeMA({"playlist": [pl]}, {"5": EIGHT})
+        r = run(ma, "mix", "playlist")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "not_found")
+        self.assertEqual(ma.track_calls, [])
 
     def test_m3u_playlist_unchanged(self):
         ma = FakeMA({"playlist": [smb("costea-playlist", "costea-playlist.m3u")]})
@@ -476,8 +504,8 @@ from maconn import WS_CMD
 
 LOG = logging.getLogger("resolver")
 
-# A curated playlist is played as its local-track list; cap it so a huge playlist cannot stall
-# the synchronous tool path (one play_media call, one playlist_tracks fetch).
+# A curated playlist is played as its local-track list, capped. The cap bounds the PLAY (one
+# play_media call), not the fetch: playlist_tracks takes no limit, so MA sends the whole list first.
 PLAYLIST_TRACK_CAP = 500
 
 
@@ -488,14 +516,20 @@ def _local_mapping(it, settings):
     return None
 
 
-def _curated_mapping(it):
-    """A playlist the operator made in Music Assistant: a `builtin` mapping with a NUMERIC id.
-    MA's automatic lists (random_tracks, infinite_mix, ...) use named ids, so they -- and any a
-    future MA version adds -- are never treated as curated."""
+def _has_builtin(it):
     for m in it.get("provider_mappings") or []:
-        if m.get("provider_domain") == "builtin" and str(m.get("item_id") or "").isdigit():
-            return m
-    return None
+        if m.get("provider_domain") == "builtin":
+            return True
+    return False
+
+
+def _is_curated(it):
+    """A playlist the operator made in Music Assistant: a `builtin` mapping, editable, not dynamic.
+    MA's automatic lists (random_tracks, infinite_mix, ...) are non-editable (8/8 observed,
+    2026-09-27) and the infinite_mix family is also dynamic. A missing field fails closed.
+    The builtin mapping's item_id is NOT used: for a user playlist it is the playlist's name."""
+    return (_has_builtin(it) and it.get("is_editable") is True
+            and it.get("is_dynamic") is not True)
 
 
 def _library(ma, media_type, lib):
@@ -540,7 +574,14 @@ def _resolve_type(ma, query, media_type, settings, rid, lib, exact=False):
                      rid, query, media_type, name, local.get("provider_domain"), uri)
             return {"uri": uri, "provider": local.get("provider_domain"), "candidate": name,
                     "media_type": media_type}, None
-        if media_type == "playlist" and not curated_tried and _curated_mapping(it):
+        if media_type == "playlist" and _has_builtin(it) and not _is_curated(it):
+            # Distinct reason, so a future MA field rename shows in the log instead of a playlist
+            # silently vanishing.
+            LOG.info("req=%s query=%r media_type=playlist candidate=%r is_editable=%r is_dynamic=%r "
+                     "decision=REJECTED reason=not-curated", rid, query, name,
+                     it.get("is_editable"), it.get("is_dynamic"))
+            continue
+        if media_type == "playlist" and not curated_tried and _is_curated(it):
             curated_tried = True                # tracks are fetched for the top curated candidate only
             uris, total = _curated_tracks(ma, it, settings)
             if uris:
@@ -1040,7 +1081,8 @@ revert with `git checkout -- <file>`:
 
 | Mutation (in `music.py` unless noted) | Run | Must fail |
 |---|---|---|
-| `_curated_mapping`: drop `and str(...).isdigit()` | `tests.test_playlist` | `test_automatic_named_id_playlists_are_never_curated` |
+| `_is_curated`: drop `it.get("is_editable") is True` | `tests.test_playlist` | `test_automatic_non_editable_playlists_are_never_curated` |
+| `_is_curated`: drop `it.get("is_dynamic") is not True` | `tests.test_playlist` | `test_editable_but_dynamic_playlist_is_never_curated` |
 | `_curated_tracks`: append every track's uri, local or not | `tests.test_playlist` | `test_mixed_plays_only_local_tracks_with_note` |
 | `_lookup` alias branch: call `_resolve_all(ma, target, _types(settings, "playlist"), ...)` instead of `_resolve_type(... exact=True)` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` (artist named like the target) |
 | `_lookup` alias branch: on a miss, fall through to resolving the phrase instead of `return hit, nl, key` | `tests.test_playlist` | `test_alias_to_missing_target_is_not_found_and_never_an_artist` ("Costea Mix" artist) |
@@ -1185,7 +1227,10 @@ ssh costea@192.168.1.68 'cd ~/mass-resolver && for q in "costea mix" "my music -
 ```
 
 Expected JSON: the first two `"ok": true` with `"local": 8, "total": 8` and `"played": false`; the third
-`"ok": true` with the `.m3u` URI; the last `"ok": false`.
+`"ok": true` with the `.m3u` URI; the last `"ok": false`. The curated `"local": 8` is also the live proof that
+`is_editable`/`is_dynamic` arrive in the listing the resolver reads — the unit tests set those fields by hand and
+cannot catch their absence. If the curated queries return `not_found` and the log shows `reason=not-curated`:
+STOP and roll back — the rule is failing closed on live data.
 
 `/command` (the path that spoke on 2026-09-27; secret read on the host, never printed):
 
