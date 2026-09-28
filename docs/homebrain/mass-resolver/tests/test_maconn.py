@@ -43,5 +43,28 @@ class MaConnTest(unittest.TestCase):
         self.assertEqual(args["option"], "replace")
 
 
+class PlaylistTracksTest(unittest.TestCase):
+    def _ma(self, reply):
+        m = MA("h", 1, "t")                 # test_maconn imports `from maconn import MA, WS_CMD`
+        m.calls = []
+        def cmd(command, **a):
+            m.calls.append((command, a)); return reply
+        m.cmd = cmd
+        return m
+
+    def test_list_result(self):
+        m = self._ma({"result": [{"name": "a"}, {"name": "b"}]})
+        self.assertEqual([t["name"] for t in m.playlist_tracks(28)], ["a", "b"])
+        self.assertEqual(m.calls[0], ("music/playlists/playlist_tracks",
+                                      {"item_id": "28", "provider_instance_id_or_domain": "library"}))
+
+    def test_items_dict_result_and_cap(self):
+        m = self._ma({"result": {"items": [{"name": str(i)} for i in range(10)]}})
+        self.assertEqual(len(m.playlist_tracks("28", limit=3)), 3)
+
+    def test_no_reply_is_empty(self):
+        self.assertEqual(self._ma(None).playlist_tracks(28), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

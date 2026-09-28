@@ -48,6 +48,13 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(config.country_code(radio, "RUSSIA"), "ru")
         self.assertIsNone(config.country_code(radio, "Atlantis"))
 
+    def test_playlist_aliases_default_empty(self):
+        self.assertEqual(config.Settings({}).playlist_aliases, {})
+
+    def test_playlist_aliases_loaded(self):
+        s = config.Settings({"playlist_aliases": {"costea mix": "my music - costea (local)"}})
+        self.assertEqual(s.playlist_aliases, {"costea mix": "my music - costea (local)"})
+
 
 class InteractionTunablesTest(unittest.TestCase):
     def test_defaults(self):

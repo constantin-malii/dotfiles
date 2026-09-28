@@ -176,5 +176,25 @@ class AliasTieBreakTest(unittest.TestCase):
             self.assertEqual(favorites.resolve_alias(cfg, "play russian radio now"), "A")
 
 
+class MatchAliasTest(unittest.TestCase):
+    A = {"Costea Mix": "my music - costea (local)", "costea mics": "my music - costea (local)"}
+
+    def test_exact_hit_returns_original_key_and_target(self):
+        self.assertEqual(favorites.match_alias(self.A, "costea mix"), ("Costea Mix", "my music - costea (local)"))
+
+    def test_compacted_exact_hit(self):
+        self.assertEqual(favorites.match_alias(self.A, "Costea-Mix")[0], "Costea Mix")
+
+    def test_no_substring_by_default(self):
+        self.assertIsNone(favorites.match_alias(self.A, "play costea mix loud"))
+
+    def test_substring_mode_finds_key_inside_query(self):
+        self.assertEqual(favorites.match_alias(self.A, "play costea mix loud", substring=True)[0], "Costea Mix")
+
+    def test_empty_inputs(self):
+        self.assertIsNone(favorites.match_alias({}, "costea mix"))
+        self.assertIsNone(favorites.match_alias(self.A, ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
