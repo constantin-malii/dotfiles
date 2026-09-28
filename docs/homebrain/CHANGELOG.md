@@ -467,6 +467,68 @@ implemented.
 - `test_py35_compat.py` was deployed alongside the four planned test modules; running the
   compatibility guard on the real 3.5.2 target is worth more than running it on the dev machine's 3.12.
 
+## 2026-09-07 — AN-01 Checkpoint A: the announcement spikes measured, and a two-day chime blocker diagnosed
+
+> **Written 2026-09-27, dated to the day the measurements were taken.** This entry was owed and
+> never written: the Checkpoint A discoveries went into the AN-01 implementation plan's own table
+> and **nowhere into this log**, which had no AN-01 entry of any kind. A build plan stops being read
+> once the work ships; this file does not. Nothing above or below this entry has been altered.
+
+Three attended spikes ran on 2026-09-07 — **AN-1** (can Music Assistant fetch an HA-signed media
+URL), **AN-2** (does muting the satellite microphone actually stop the wake word), and
+**SPIKE-AN-3** (what distinguishes a phone request from a satellite one).
+
+### What was settled
+
+- **The microphone mute is real, not advisory (D2).** With `switch.respeaker_living_room_microphone_mute`
+  on, the operator said the wake word twice and a full sentence: **zero** new pipeline runs. That is
+  the fail-safe requirement 7 depends on — an unmuted satellite hears the announcement come out of
+  the ceiling and wakes on its own audio.
+- **The mute entity (D1):** `switch.respeaker_living_room_microphone_mute`, `off` at baseline.
+- **Muting makes no sound (D6).** Two runs with the output path verified; no audible feedback tone.
+- **HA reports an unreachable device honestly (D14).** Tested by reversible per-device isolation —
+  USB power unplugged, no host or router change. HA marked it unavailable rather than optimistically
+  `on`, so the read-back in design §9.3 is proof of muting rather than of a request being accepted.
+- **The source discriminator is `trigger.satellite_id` (D12)**, not a pinned Companion `device_id`.
+  One probe sentence from three sources settled it. A pinned device id would also have broken
+  silently on app re-registration.
+- **`params` payload shape (D8):** `intent` and `params` are top-level `data:` keys, `params` a
+  structured mapping, **no `payload:` wrapper**. An earlier draft of the plan had it wrong.
+- **MA preserves the query string in the echoed `media_content_id` (D5)**, which refuted design
+  §8.2's assumption that it is stripped — the plan's per-clip match keys were changed accordingly.
+
+### Still unresolved, recorded as unresolved
+
+- **D7, wildcard-slot normalisation.** HA **preserves** capitalisation and punctuation in
+  `trigger.sentence` — STT delivered `Run the source probe.` while typed input gave
+  `run the source probe`. Only `sentence` was observed; whether a wildcard **slot** normalises the
+  same way was left open. (Settled later: see the 2026-09-27 G4b entry — `trigger.slots.message`
+  arrives **lower-cased with the trailing stop stripped**, i.e. the opposite of `sentence`.)
+- **D13b, the live `rest_command` body template**, passed **by inference** from nine working callers
+  rather than by being read. (Settled later at G4a on 2026-09-27, by reading it:
+  `{{ params | default({}) | tojson }}` — proper JSON.)
+
+### ⚠️ Correction to the 2026-09-05 entry: the chime 401 was a path bug, not an auth requirement
+
+The 2026-09-05 timer-chime entry (*"Voice timers are now audible AND repeat until dismissed"*)
+concluded that **"MA … cannot fetch HA's media files, which need auth (`/media/local/... -> 401`)"**,
+and recorded the asset with a `./` in its path
+(`media-source://media_source/local/./timer_chime.wav`).
+
+**AN-1 showed that diagnosis was wrong.** The 401 was **a path-normalisation bug in the signed URL**,
+not an authentication requirement. HA signs the **un-normalised** path containing `./` but then
+returns the **normalised** URL, so the signature no longer matches what is requested — hence 401. A
+correctly-formed signed URL (no `./`) fetches **unauthenticated** and returns `audio/vnd.wave`. MA
+fetched it and played it.
+
+That is the whole reason a chime was possible at all, and it is why `announce_chime_uri` in
+`config.json` carries **no `./`** and why the AN-01 tests assert its absence. The original entry is
+left exactly as written — it is an accurate record of what was known on 2026-09-05; this is the
+correction, appended.
+
+*(MA's rejection of raw `media-source://` URIs, also recorded on 2026-09-05, stands. Resolving them
+to a signed URL first is what the resolver does.)*
+
 ## 2026-09-07 — normalise the legacy `platform:` trigger key across the remaining six automations
 
 > Eight `"platform"` → `"trigger"` renames in six managed automations. **No behaviour change of any
