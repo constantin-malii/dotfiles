@@ -776,6 +776,67 @@ says 404 or 200 immediately.
 Until that is in place, the honest statement is: **an announcement fails when its TTS URL is not
 fetchable, the extension is the only known correlate, and why the extension varies is unknown.**
 
+### The mechanism, narrowed: queue-flow needs a `.flac` that Home Assistant will not serve
+
+Appended 2026-09-27, later still. This refines the retraction above rather than replacing it — the
+`.flac` 404 stands; what follows is **why** a `.flac` is asked for at all.
+
+**Home Assistant is not the variable.** `tts_get_url` was probed eight times: the exact text that
+failed, the three texts that passed today, two never-spoken sentences, and the failing text repeated.
+**All eight returned `.mp3`.** The extension is not text-dependent, not cache-dependent, and not
+something the resolver influences.
+
+**Music Assistant asks for the `.flac` itself.** It receives the `.mp3` url, and then in one of two
+modes:
+
+| After `Start Queue Flow stream` | count | what happens |
+|---|---|---|
+| `Live media item … breaking out to single item stream` | **7** | plays the url as given — works |
+| no break-out | **1** | needs the item in the flow's own format, requests `<id>.flac` from HA's tts_proxy, gets **404**, logs `Failed to stream audio` → `Skipping unplayable item` |
+
+Eight for eight across the announce era. Every `Start Queue Flow stream` that broke out played; the
+one that did not is the 2026-09-27 failure.
+
+Corroboration from the other direction: **36 log lines mention `.flac`, and 23 are a 404, an
+"unplayable", or an "Error opening input".** The remaining 13 are unrelated library music files. In
+ten weeks there is **not one example of a `.flac` tts_proxy url being played successfully** — MA
+appears to mint that url only on the path that is about to fail.
+
+So the chain is: MA stays in queue-flow → wants flac → HA's tts_proxy only has the mp3 it minted
+→ 404 → item skipped → silence, while the player still reports `playing`.
+
+**What decides break-out is the remaining unknown**, and it is now a much narrower question than
+"why does this fail".
+
+### ⚠️ This is evidence AGAINST the `tts.speak` migration being the escape
+
+The obvious inference — "use MA's player-level announcement API, which does not create a queue item"
+— is undercut by the log. The three older `.flac` 404s (2026-08-01, 2026-08-02, 2026-09-05) sit
+directly beside lines reading:
+
+```
+INFO [music_assistant.players] Playback announcement to player Ceiling Speakers
+                               (with pre-announce: True): http://…/api/tts_proxy/<id>.mp3
+```
+
+That **is** the announcement path — `tts.speak` via `script.ceiling_announce`. It received an mp3 and
+still ended up failing on a `.flac`. So the announcement API is not demonstrably immune to this, and
+migrating to it should be treated as an untested hypothesis rather than the fix.
+
+### What would actually settle it
+
+Not another spike on our side. The decisive facts live in MA's own behaviour:
+
+1. **What makes MA break out to a single-item stream?** Seven of eight turns did. If that is a
+   property of the item's classification, forcing it is the fix and it costs nothing.
+2. **Why does HA 404 the `.flac` variant?** If HA's tts_proxy can serve an alternative format on
+   request, the 404 is a configuration or version detail rather than a design one.
+
+Both are upstream questions with upstream answers, and this is where the investigation should be
+handed to the MA issue tracker rather than pursued by measurement here. The evidence above — 8/8
+break-out correlation, 23/36 `.flac` lines being failures, zero successful `.flac` plays — is a
+better bug report than anything filed in the adjacent issues cited earlier.
+
 ---
 
 > **Rollback:** `git revert` the commit adding this file. It records a measurement and blocks a gate;
