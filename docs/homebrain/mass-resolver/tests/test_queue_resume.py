@@ -813,6 +813,52 @@ class FinalReviewFixTest(unittest.TestCase):
         self.assertIs(cap._queue_targets[ZONE], succ)             # the successor's record is untouched
         self.assertTrue(ctx.mas and all(m.s is None for m in ctx.mas))
 
+    def test_superseded_exit_before_successor_records_leaves_inherited_clip(self):
+        # Race: A records c1 while c1 is still playing; B barges in, captures c1 and INHERITS it
+        # (anchor = c1's index). B's c2 lands after c1 and is current. A's superseded exit then runs
+        # BEFORE B records c2. A must not delete c1 -- B owns it now -- or c2 shifts left under B's
+        # anchored record step, which then misses it and orphans c2 after the resumed song.
+        q = FakeQueue([track(i) for i in range(1, 6)], current=2, elapsed=47.0)
+        q.clip_never_idle = True                      # c1 is still PLAYING when A records it
+        ctx = ctx_for(q)
+        cap = new_cap()
+        real_record = cap._queue_record_clip
+        real_exit = cap._queue_superseded_exit
+        st = {"a": None, "b_fired": False, "a_exit_early": False, "b_record_saw": None}
+
+        def record(ctx_, rid, zone, qm, played_uri, clip, my_gen):
+            if rid == "ridB" and not st["a_exit_early"]:
+                # B's c2 has landed and is current; A's pending superseded exit runs first.
+                st["a_exit_early"] = True
+                st["b_record_saw"] = (q.ids(), q.cur()["queue_item_id"])
+                a_ctx, a_qm, a_gen = st["a"]
+                real_exit(a_ctx, "rid1", zone, a_qm, a_gen)
+            real_record(ctx_, rid, zone, qm, played_uri, clip, my_gen)
+            if rid == "rid1" and not st["b_fired"]:
+                # A has recorded c1 (current, playing): B barges in now.
+                st["b_fired"] = True
+                st["a"] = (ctx_, qm, my_gen)
+                capability.run(cap, ctx, {"mode": "say", "uri": CLIP2}, "ridB")
+
+        def superseded_exit(ctx_, rid, zone, qm, my_gen):
+            if rid == "rid1" and st["a_exit_early"]:
+                return                                # A's exit already ran, at the forced point
+            real_exit(ctx_, rid, zone, qm, my_gen)
+
+        cap._queue_record_clip = record
+        cap._queue_superseded_exit = superseded_exit
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(cap, ctx)
+        self.assertTrue(st["b_fired"])
+        self.assertTrue(st["a_exit_early"])
+        self.assertEqual(st["b_record_saw"], (["t1", "t2", "t3", "c1", "c2", "t4", "t5"], "c2"))
+        self.assertEqual(q.ids(), ["t1", "t2", "t3", "t4", "t5"])            # original playlist, no clips
+        self.assertEqual(q.cur()["queue_item_id"], "t3")                    # the interrupted song
+        self.assertEqual(self.play_indexes(q), [("play_index", "t3", 47)])  # exactly one resume
+        self.assertEqual([c for c in q.calls if c[0] == "replace"], [])     # no URI replay
+        self.assertFalse(any("UNIDENTIFIED" in m for m in lg.output))
+        self.assertTrue(any("clip c1 owned by successor req=ridB; not deleting" in m for m in lg.output))
+
     # I2 -----------------------------------------------------------------------------------------
     def test_ha_idle_but_ma_playing_still_resumes(self):
         q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)

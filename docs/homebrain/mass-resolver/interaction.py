@@ -1631,52 +1631,66 @@ class InteractionCapability(capability.Capability):
         qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [], "unrecorded": [],
               "anchor": cap["index"] or 0, "unidentified": 0, "resume": "none", "seeked": False,
               "deleted": 0, "inherited_from": None}
-        self._queue_adopt_target(qm, rid, zone)
-        with self._lock:
-            self._queue_targets[zone] = {"gen": my_gen, "rid": rid, "target": qm["target"],
-                                         "clips": list(qm["clips"]), "live": True}
+        # Adopt and publish in ONE _lock hold, before any enqueue: a superseded turn's cleanup re-reads
+        # this record's clips before each delete, so an inherited clip must be visible as ours the moment
+        # the predecessor's record stops being its own (design 4.5).
+        self._queue_adopt_target(qm, rid, zone, my_gen)
         LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f (extrapolated %.1fs) seekable=%s "
                  "stale_reply_clips=%d", rid, zone, cap["item"], cap["index"], cap["pos"], cap["extrapolated"],
                  cap["seekable"], stale)
         return qm
 
-    def _queue_adopt_target(self, qm, rid, zone):
+    def _queue_adopt_target(self, qm, rid, zone, my_gen=None):
         """Which item this turn resumes (design 4.5-4.6). A record left by a superseded turn (live) or by a
         turn that did not resume (pending) is INHERITED when this turn's current item is one of its clips --
         or, for a live record whose turn recorded none yet, when the current item is a reply clip: that item
         is then recorded as the earlier turn's clip (it sits at that turn's anchor + 1). Capturing a real
-        item clears any record."""
+        item clears any record.
+
+        With `my_gen`, this turn's own record (target + every inherited or carried clip id) replaces the old
+        one in the SAME _lock hold that read it. No gap exists in which the predecessor could see its
+        record as still its own after we took it, nor in which our inherited clips are unpublished while
+        the predecessor's superseded cleanup decides what to delete (_queue_delete_own_clips)."""
         cap = qm["cap"]
         is_clip = is_reply_clip_uri(cap["uri"])
-        with self._lock:
+        how = None
+        with self._lock:                             # pure bookkeeping only: no MA/HA call in here
             rec = self._queue_targets.get(zone)
             rec = dict(rec, clips=list(rec["clips"])) if rec is not None else None
             if not is_clip:
                 self._queue_targets.pop(zone, None)
-        if rec is not None and is_clip and rec.get("target") is not None and (
-                cap["item"] in rec["clips"] or rec.get("live")):
-            if cap["item"] not in rec["clips"]:
-                rec["clips"].append(cap["item"])
-            qm["target"] = rec["target"]
-            qm["clips"] = rec["clips"]
-            qm["inherited_from"] = rec.get("rid")
+            if rec is not None and is_clip and rec.get("target") is not None and (
+                    cap["item"] in rec["clips"] or rec.get("live")):
+                if cap["item"] not in rec["clips"]:
+                    rec["clips"].append(cap["item"])
+                qm["target"] = rec["target"]
+                qm["clips"] = rec["clips"]
+                qm["inherited_from"] = rec.get("rid")
+                how = "inherited"
+            elif is_clip:
+                how = "clip"
+            else:
+                if rec is not None and rec["clips"]:
+                    # The popped record's clips are spent reply clips still sitting in the queue (e.g. a
+                    # turn superseded after its play_index, whose own finish never runs). This turn's
+                    # finish deletes them by exact id; it never deletes the current item.
+                    for cid in rec["clips"]:
+                        if cid not in qm["clips"]:
+                            qm["clips"].append(cid)
+                    how = "carried"
+                qm["target"] = cap
+            if my_gen is not None:
+                self._queue_targets[zone] = {"gen": my_gen, "rid": rid, "target": qm["target"],
+                                             "clips": list(qm["clips"]), "live": True}
+        if how == "inherited":
             LOG.info("SAY req=%s zone=%s inherited resume target item=%s from req=%s (clips=%s)",
                      rid, zone, rec["target"]["item"], rec.get("rid"), rec["clips"])
-            return
-        if is_clip:
+        elif how == "clip":
             LOG.info("SAY req=%s zone=%s current queue item %s is a reply clip; no resume target",
                      rid, zone, cap["item"])
-            return
-        if rec is not None and rec["clips"]:
-            # The popped record's clips are spent reply clips still sitting in the queue (e.g. a turn
-            # superseded after its play_index, whose own finish never runs). This turn's finish
-            # deletes them by exact id; it never deletes the current item.
-            for cid in rec["clips"]:
-                if cid not in qm["clips"]:
-                    qm["clips"].append(cid)
+        elif how == "carried":
             LOG.info("SAY req=%s zone=%s carried %d clip(s) from req=%s", rid, zone, len(rec["clips"]),
                      rec.get("rid"))
-        qm["target"] = cap
 
     def _queue_publish_clips(self, zone, my_gen, qm):
         with self._lock:
@@ -1970,12 +1984,26 @@ class InteractionCapability(capability.Capability):
             LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
                      rid, zone, qm["target"]["item"], qm["clips"])
 
-    def _queue_delete_own_clips(self, ctx, rid, zone, qm):
+    def _queue_successor_clips(self, zone, my_gen):
+        """-> (rid, frozenset of clip ids) owned by the zone's CURRENT record when it is not ours, else
+        (None, empty). Read under _lock and returned as a copy: the caller releases the lock before any
+        MA call."""
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            if rec is None or rec.get("gen") == my_gen:
+                return None, frozenset()
+            return rec.get("rid"), frozenset(rec.get("clips") or ())
+
+    def _queue_delete_own_clips(self, ctx, rid, zone, qm, my_gen=None):
         """A superseded turn whose record a successor took (design 4.5): the resume is no longer ours,
-        but the clips we RECORDED are still ours to remove. Deleting by exact id is safe whoever owns
-        the zone; the current item is skipped (it may be playing, and deleting it is a no-op anyway).
-        A successor that captured a real item may already have carried and deleted them -- a failed
-        delete here is logged, never fatal."""
+        but the clips we RECORDED are still ours to remove -- unless the successor now owns one. A
+        successor that captured our clip as its current item INHERITED it (and anchors its own clips on
+        its position), and one that captured a real item CARRIED it; either way it identifies, resumes
+        and deletes that clip through its own finish. Deleting it here would shift the successor's clips
+        under its anchored record step and orphan them. So the successor's clip set is re-read under
+        _lock immediately before EACH delete, and a clip in it is left alone. The current item is
+        skipped too (it may be playing, and deleting it is a no-op anyway). A failed delete here is
+        logged, never fatal."""
         if not qm["clips"]:
             return
         ma = None
@@ -1996,6 +2024,11 @@ class InteractionCapability(capability.Capability):
                 return
             for cid in list(qm["clips"]):
                 if cid == cur:
+                    continue
+                owner, owned = self._queue_successor_clips(zone, my_gen)   # lock released before MA
+                if cid in owned:
+                    LOG.info("SAY req=%s zone=%s clip %s owned by successor req=%s; not deleting",
+                             rid, zone, cid, owner)
                     continue
                 try:
                     r = ma.delete_item(qm["queue_id"], cid)
@@ -2022,7 +2055,7 @@ class InteractionCapability(capability.Capability):
             rec = self._queue_targets.get(zone)
             mine = rec is not None and rec.get("gen") == my_gen
         if not mine:
-            self._queue_delete_own_clips(ctx, rid, zone, qm)
+            self._queue_delete_own_clips(ctx, rid, zone, qm, my_gen)
             return
         for uri in list(qm["unrecorded"]):
             self._queue_record_clip(ctx, rid, zone, qm, uri, self._clip_id(uri), my_gen)
