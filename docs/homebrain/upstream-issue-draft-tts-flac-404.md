@@ -1,4 +1,9 @@
-# DRAFT upstream issue — Music Assistant (`music-assistant/server`) — FOR REVIEW, NOT SUBMITTED
+# DRAFT upstream issue — Music Assistant — FOR REVIEW, NOT SUBMITTED
+
+> **File at <https://github.com/music-assistant/support/issues/new/choose>, as a Bug report.**
+> `music-assistant/support` is the issue tracker ("Issue tracker to create bug reports, please
+> include detailed info and logfiles"); `music-assistant/server` is the code and is **not** where
+> issues go — every adjacent issue cited below lives in `support`.
 
 > Prepared 2026-09-27. No matching upstream issue found (searched `music-assistant/server`,
 > `music-assistant/support`, `home-assistant/core`, the HA community forum and Reddit). Adjacent
