@@ -52,8 +52,9 @@ the resume.**
 
 1. **Capture before enqueue.** The interrupted item's `queue_item_id`, its position (`elapsed_time`) and its
    seekability are captured **before** any reply clip is enqueued.
-2. **Exact clip identity.** Each enqueued reply clip's own `queue_item_id` is identified and recorded;
-   deletion targets **only** those recorded ids. An unidentified clip is never deleted by guess.
+2. **Exact clip identity.** Each enqueued reply clip's own `queue_item_id` is identified by **exact**
+   URI or name equality with exactly one candidate (§4.3 step 4) and recorded; deletion targets **only**
+   those recorded ids. An ambiguous or unmatched clip stays unidentified and is never deleted.
 3. **Resume by queue id; seek only when seekable.** Resume is `play_index(<captured queue_item_id>)`; `seek`
    runs only for seekable media and only after the resume is confirmed.
 4. **Phase-aware fallback.** Never replay by URI after the queue resume has succeeded (or may have
@@ -86,9 +87,16 @@ restart = exactly today's behaviour) **and** the capture succeeds.
 3. **Play each clip with `enqueue: "play"`** (queue mode only; legacy passes no enqueue as today).
    `_play_clip_and_wait` gains an `enqueue` argument; start/finish polling is unchanged (the spike showed
    the clip ending in `idle`, which the existing finish rule already observes).
-4. **Identify each clip's queue id** right after its play call: `queue_items`, pick the item whose
-   `media_item.uri` (or `uri`) contains the clip's normalised match key; exactly one match required.
-   Zero or several matches → record "unidentified" (logged), never guess.
+4. **Identify each clip's queue id by exact identity** right after its play call. The play call (HA REST
+   `music_assistant.play_media`) returns no queue item or URI, so identity comes from `queue_items`:
+   - **Primary — exact URI:** an item whose `media_item.uri` (or `uri`), after removing only MA's known
+     wrapper prefix `builtin://radio/`, is **equal** to the clip's normalised URI. Equality, never
+     containment or prefix matching.
+   - **Secondary — exact name:** only if no item matched by URI, an item whose `name` is **equal** to the
+     clip's TTS id (the URL's last path segment without its extension — the name MA gave the clip in §3).
+   - **Exactly one candidate** across the rule that matched. Zero, or two or more (including an item that
+     matches by URI and another by name) → record the clip as **unidentified**, log it, and never delete
+     anything for that clip.
 5. **Volume restore:** unchanged.
 6. **Resume (replaces step 9 in queue mode)**, only if `was_playing` and not superseded:
    - `play_index(resume_id)`. Success = no `error_code` **and** a confirming `queue_state` read shows
@@ -157,8 +165,11 @@ Required cases (operator-stated), each asserting queue contents and calls, not o
   3, no clip left, **no** URI replay, one `play_index`.
 - **Seek restoration:** track at 47s → `seek(47)` after the confirmed resume; `resume_pos` < 2s → no seek.
 - **Radio/live stream:** `[station]`, media_type radio → `play_index(station)`, **no** seek, clip deleted.
-- **Clip deletion:** exactly the recorded clip id deleted; a same-named unrelated item survives; an
-  unidentified clip (0 or 2 matches) → nothing deleted, logged.
+- **Clip deletion:** exactly the recorded clip id deleted. Exact identity: an item whose URI merely
+  *contains* the clip URL (e.g. a longer URL, or the clip URL with a query suffix) is **not** a match; a
+  wrapped `builtin://radio/<clip url>` **is**; name fallback matches only an identical name. Ambiguous
+  cases stay unidentified and delete nothing: two URI matches; a URI match plus a different name match; two
+  name matches; no match. Each is logged.
 - **Multi-clip turn** (chime + message): both clip ids recorded and deleted; one resume.
 - **Failure at each step:** capture fails → legacy (today's calls exactly); enqueue raises → still
   `play_index`; clip never starts → still resume; `play_index` error with confirming read ≠ resume_id →
@@ -195,5 +206,7 @@ what was spoken).
 
 - `current_item.media_item.media_type` for a radio queue item is `"radio"` (expected; assert in the probe of
   the plan's first task, read-only).
-- `queue_items` exposes the clip's URL in `media_item.uri` (spike showed the clip's *name* is the TTS id;
-  matching on the normalised URL is preferred, name is the fallback key).
+- The exact form in which `queue_items` exposes the clip's URL (`media_item.uri` / `uri`, and whether it
+  is wrapped as `builtin://radio/<url>`) — confirm read-only before coding the exact-URI rule; the spike
+  showed the clip's *name* is its TTS id, which is the exact-name fallback. If MA's form differs from the
+  single known wrapper, the plan records it and the rule stays equality after removing only that form.
