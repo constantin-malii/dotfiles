@@ -1,5 +1,15 @@
 # AN-01 — Phone Assist → Ceiling-Speaker Announcement (design)
 
+> ⛔ **STATUS 2026-09-27 — BUILT, DEPLOYED, DISABLED. Read this before the design below.**
+> G1, G1b, Checkpoint A, G2, G3 and **G4a** are complete. **G4b halted at step 4** and
+> `automation.voice_ceiling_announce` is **switched off**: roughly **1 announcement in 15** produces
+> no audio, because its TTS url is not fetchable — a fault outside the resolver. The resolver now
+> reports that honestly instead of claiming success, and logs the url so the next failure
+> identifies itself. **G5 is partial**: the steps that describe announcements as working are
+> deliberately unwritten. Current state and the fault: `ONBOARDING.md`, and
+> [`2026-09-08-an-01-post-g3-clip-completion-correction.md`](./2026-09-08-an-01-post-g3-clip-completion-correction.md)
+> — **read its later sections; three root causes in it are retracted and say so.**
+
 > **Design / documentation only. No implementation, no live change, no spike executed.**
 > ⚠ **AMENDED 2026-09-07 by [`2026-09-07-an-01-post-g1-design-corrections.md`](./2026-09-07-an-01-post-g1-design-corrections.md)** — G1's spikes contradicted **§8.2**'s match-key rule
 > and exposed two security/classification gaps (§6.1's no-logging rule is incompletely applied, and
@@ -344,6 +354,12 @@ two-clip reply.
 3. **`automation.voice_ceiling_speakers`** matches the `conversation` trigger sentence
    `announce {message}` and binds `message = "dinner is ready"`.
    - The trailing wildcard is greedy: it captures the remainder of the sentence.
+   - ✅ **D7 SETTLED 2026-09-27, and this line is CORRECT — for the slot.** Measured at G4b:
+     `trigger.slots.message` arrives **lower-cased with the trailing full stop stripped** (spoken
+     *"Announce dinner is ready."* → `chars=15`, i.e. `dinner is ready`). The nuance SPIKE-AN-3
+     found is real but applies to **`trigger.sentence`**, which **preserves** capitalisation and
+     punctuation. The two normalise differently, and this design uses the slot — so the assumption
+     below held. Piper reads the stripped form without audible flatness.
    - HA normalises trigger text (lower-casing, punctuation stripping), so the resolver receives
      `dinner is ready`, not `Dinner is ready.` See D7.
 4. The automation calls the announcement rest_command — **preferably a dedicated
