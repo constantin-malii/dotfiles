@@ -14,6 +14,16 @@ All endpoints are relative to the app base in SKILL.md (`/api/v3` Radarr/Sonarr,
 - Why something was grabbed: `GET history/series?seriesId=` → `data.seriesMatchType` (`Id` vs `Title`),
   `data.tvdbId` (indexer's, often wrong), `sourceTitle`.
 - Queue row reasons: `statusMessages[].messages`, `errorMessage`, `trackedDownloadState`.
+- "Stale" missing movies: sweep `release?movieId=` for each monitored/available/no-file movie, then bucket by
+  rejection. The big systemic one was the profile **language = English**: every foreign film's correct release
+  was "English is wanted, but found X". Fixed by setting it to `Original` (id -2); dubs still get rejected.
+- **Pace bulk searches.** NZBgeek resets connections under bursts (~100 back-to-back searches): Radarr then
+  backs the indexer off and later searches log "0 active indexers" and silently grab nothing. Check the log
+  for that line after any bulk `MoviesSearch`; `POST indexer/testall` clears the backoff. Search one movie
+  at a time with ~20 s gaps.
+- Calling `arr.py` from Git Bash: args starting with `/` get rewritten to `C:/Program Files/Git/...`
+  (`MSYS_NO_PATHCONV=1`, or call it from a Python `subprocess`), and files written by Windows Python have CRLF
+  — `for i in $(cat ids.txt)` then yields `12\r`.
 
 ## Queue actions
 - Untrack only (files untouched): `DELETE queue/{id}?removeFromClient=false&blocklist=<bool>&skipRedownload=true`.
@@ -52,7 +62,10 @@ All endpoints are relative to the app base in SKILL.md (`/api/v3` Radarr/Sonarr,
 
 ## Profiles in use
 - Radarr "HD 1080p" / Sonarr "HD 1080p": WEB 720p, Bluray-720p, HDTV-1080p, WEB 1080p, Bluray-1080p; cutoff WEB 1080p;
-  upgrades off. New series/movies should use it.
+  upgrades off. New series/movies should use it. Radarr's has language **Original** (was English, which blocked
+  every foreign film). Sonarr v4 has no profile language (only custom formats; none defined) — any language passes.
+- Radarr size limits: Bluray-1080p max raised 55 → 100 MB/min (pref 95) to match the other 720p/1080p qualities;
+  55 rejected normal 6–9 GB encodes. Sonarr's are 125–155 MB/min, fine.
 - Lidarr "default": Lossless + High Quality Lossy + Unknown (Unknown `minSize`=180). Metadata "Standard" (albums) or
   "Playlist" (albums, EPs, singles, soundtracks). Only wanted albums monitored; `monitorNewItems:none`.
 - Recycle bins: `/volume1/media/{radarr,sonarr,lidarr}-recycle` (30 days). `/volume1/media/#recycle` is Synology's
@@ -63,8 +76,25 @@ All endpoints are relative to the app base in SKILL.md (`/api/v3` Radarr/Sonarr,
 - `set_config`: `mode=set_config&section=misc&keyword=K&value=V` (lists comma-separated). Categories via
   `section=categories`. Backup: `mode=config&name=create_backup` → `backup_dir`.
 - Applied: abort password-protected and unwanted extensions (`exe,com,bat,cmd,scr,pif,lnk,vbs,js,msi`),
-  `ignore_samples=1`, `direct_unpack=1`. Sorting off (the *arrs rename).
+  `ignore_samples=1`. Sorting off (the *arrs rename).
+- Tuned for the 2-HDD DS224+ (2 GB RAM): server connections 50 → 25 (`section=servers&keyword=<server name>
+  &connections=25`), `direct_unpack=0`, `pause_on_post_processing=1`. Slow downloads were disk-seek bound, not
+  CPU or line: DSM showed CPU 4%, load ~30, ~35 MB/s scattered reads (SAB par2 repair plus Drive, Office,
+  Photos, Plex, the *arrs, swap). With downloads and repairs taking turns: 2–5 MB/s → ~21 MB/s.
+- `mode=fullstatus` gives `loadavg` and per-server warnings — the first check when downloads are slow.
+- Provider is Newsgroup Ninja (Highwinds). "Aborted, cannot be completed" and heavy repairs are missing articles
+  there; a backup block account on a different backbone (server priority 1) is the fix, not another indexer.
 - Individual jobs can be paused while the queue isn't ("Idle" with jobs) — check slot `status`.
+
+## Indexers
+- NZBgeek only (priority 25, RSS on). Tried NZBFinder: free accounts get **no API** (error 102, "premium
+  member"), so it can't be added to the *arrs; Basic is $15/yr. Web-searching 8 missing Russian/Soviet titles:
+  NZBgeek 0, NZBFinder 1 (Petrov's Flu) — Usenet barely carries them, so another indexer helps only a little.
+- A one-off find on an indexer's website works without API: download the .nzb, add it to SAB with the `movies`
+  category, then manual-import it (Radarr won't auto-import a download it didn't grab).
+- A backup indexer should get priority ~40 and `enableRss:false` so a small daily quota survives. Adding one via
+  API: take the `Newznab` schema's preset (e.g. `NZBFinder.ws`), set `apiKey`, POST `indexer`. The POST tests
+  the key and returns 400 on failure, so nothing half-added is left behind.
 
 ## HomeBrain links (don't break)
 - Lidarr "On Import" → HA webhook `lidarr_import` → resolver `music/sync` → Music Assistant rescans
