@@ -55,6 +55,9 @@ class ConfigTest(unittest.TestCase):
         s = config.Settings({"playlist_aliases": {"costea mix": "my music - costea (local)"}})
         self.assertEqual(s.playlist_aliases, {"costea mix": "my music - costea (local)"})
 
+    def test_malformed_playlist_aliases_falls_back_to_empty_dict(self):
+        self.assertEqual(config.Settings({"playlist_aliases": ["x"]}).playlist_aliases, {})
+
 
 class InteractionTunablesTest(unittest.TestCase):
     def test_defaults(self):

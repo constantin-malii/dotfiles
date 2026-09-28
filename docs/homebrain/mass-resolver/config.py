@@ -35,7 +35,12 @@ class Settings(object):
         self.radio_event_type = cfg.get("radio_event_type", "mass_radio_request")
         self.dry_run = bool(cfg.get("dry_run", False))
         # MR-08: spoken playlist nicknames -> exact playlist name (exact-match only; see music.py).
-        self.playlist_aliases = cfg.get("playlist_aliases", {}) or {}
+        pa = cfg.get("playlist_aliases", {}) or {}
+        if not isinstance(pa, dict):
+            logging.getLogger("resolver").warning(
+                "playlist_aliases is not a dict (got %r); ignoring and using {}", type(pa).__name__)
+            pa = {}
+        self.playlist_aliases = pa
         self.announce_failures = bool(cfg.get("announce_failures", True))
         self.http_host = cfg.get("http_host", "192.168.122.1")
         self.http_port = int(cfg.get("http_port", 8770))

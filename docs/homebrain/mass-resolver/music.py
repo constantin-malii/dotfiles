@@ -4,7 +4,7 @@ import logging
 import capability
 import command_result as cr
 import favorites
-from match import match_rank, clean
+from match import match_rank, clean, compact
 from maconn import WS_CMD
 
 LOG = logging.getLogger("resolver")
@@ -50,24 +50,37 @@ def _curated_tracks(ma, it, settings):
     preferred-provider mapping; the list is always used, even when every track is local, so MA
     never picks a non-local source for a library track (spec 3.1-4).
     Fetched by the LIBRARY item_id with provider "library" -- not the builtin mapping's id, which
-    MA need not keep equal to it; the mapping only decides whether the playlist is curated."""
-    tracks = ma.playlist_tracks(it.get("item_id"), limit=PLAYLIST_TRACK_CAP)
+    MA need not keep equal to it; the mapping only decides whether the playlist is curated.
+    Fetched uncapped: MA's playlist_tracks command takes no limit of its own, so the whole list
+    arrives regardless -- "total" must reflect that full count, not the played slice. The cap
+    below bounds only the PLAY (one play_media call), not the fetch."""
+    all_tracks = ma.playlist_tracks(it.get("item_id"), limit=None)
+    total = len(all_tracks)
     uris = []
-    for t in tracks:
+    for t in all_tracks[:PLAYLIST_TRACK_CAP]:
         m = _local_mapping(t, settings)
         if m:
             uris.append("%s://track/%s" % (m.get("provider_instance"), m.get("item_id")))
-    return uris, len(tracks)
+    return uris, total
 
 
 def _resolve_type(ma, query, media_type, settings, rid, lib, exact=False):
     """-> (hit or None, name of a curated playlist rejected for having no local tracks, or None).
-    exact=True accepts only match_rank 0 (alias targets must never fuzzy-match)."""
+    exact=True accepts only an exact clean()/compact() match (alias targets must never
+    fuzzy-match; match_rank itself is not used here, since it treats "<title> by <artist>"
+    specially and can rank an exact target string below 0)."""
     ranked = []
-    for it in _library(ma, media_type, lib):
-        r = match_rank(query, it.get("name"))
-        if r is not None and (r == 0 or not exact):
-            ranked.append((r, it))
+    if exact:
+        cq, qc = clean(query), compact(query)
+        for it in _library(ma, media_type, lib):
+            name = it.get("name")
+            if name and (clean(name) == cq or compact(name) == qc):
+                ranked.append((0, it))
+    else:
+        for it in _library(ma, media_type, lib):
+            r = match_rank(query, it.get("name"))
+            if r is not None:
+                ranked.append((r, it))
     ranked.sort(key=lambda t: t[0])
     curated_tried = False
     no_local = None
@@ -136,15 +149,31 @@ def _strip_edges(phrase):
     return c, had
 
 
+_PLAYLIST_STOPWORDS = ("the", "my", "a", "our")
+
+
 def _lookup(ma, phrase, media_type, settings, rid, lib):
     """One attempt for a phrase -> (hit, no_local_name, alias_key or None).
     1) exact alias -> playlist only, exact target; 2) trailing 'playlist' -> stripped form, playlist
     first; 3) otherwise today's resolution of the unstripped phrase."""
     stripped, had_playlist = _strip_edges(phrase)
-    aliases = getattr(settings, "playlist_aliases", None) or {}
-    a = favorites.match_alias(aliases, stripped) if (aliases and stripped) else None
+    aliases = getattr(settings, "playlist_aliases", None)
+    if not isinstance(aliases, dict):
+        aliases = {}
+    # Alias keys are matched on their OWN stripped form ("the costea mix" / "costea mix playlist"
+    # must match a spoken "costea mix"), but the ORIGINAL key is kept for the reported alias name
+    # (the chat text says "Playing <original key>").
+    norm = {}
+    orig_of = {}
+    for k, v in aliases.items():
+        sk, _ = _strip_edges(k)
+        if sk:
+            norm[sk] = v
+            orig_of[sk] = k
+    a = favorites.match_alias(norm, stripped) if (norm and stripped) else None
     if a:
-        key, target = a
+        skey, target = a
+        key = orig_of.get(skey, skey)
         hit, nl = _resolve_type(ma, target, "playlist", settings, rid, lib, exact=True)
         if hit or nl:
             LOG.info("req=%s alias=%r -> %r", rid, key, target)
@@ -152,7 +181,7 @@ def _lookup(ma, phrase, media_type, settings, rid, lib):
             LOG.info("req=%s alias=%r target=%r decision=REJECTED reason=alias-target-missing", rid, key, target)
         return hit, nl, key
     if had_playlist:
-        if not stripped:
+        if not stripped or stripped in _PLAYLIST_STOPWORDS:
             return None, None, None
         hit, nl = _resolve_all(ma, stripped, _types(settings, "playlist"), settings, rid, lib)
         return hit, nl, None
@@ -192,7 +221,7 @@ class MusicCapability(capability.Capability):
             return None
         resolved["ma"].close()
         if resolved.get("no_local"):
-            name = resolved.get("alias") or resolved["no_local"]
+            name = resolved.get("alias") or resolved.get("query") or resolved["no_local"]
             msg = name + " has no songs in the local library yet."
             return {"code": "not_found", "reason": "no local tracks", "chat_text": msg, "spoken_text": msg,
                     "metadata": {"query": resolved.get("query")}}

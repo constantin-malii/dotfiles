@@ -115,6 +115,13 @@ class CuratedPlaylistTest(unittest.TestCase):
         self.assertIn("has no songs in the local library yet", r["spoken_text"])
         self.assertEqual(ma.played, [])
 
+    def test_no_songs_line_uses_the_phrase_the_user_said(self):
+        # Spec 3.3: the name used is the phrase the user said (query), not the playlist's real name.
+        ma = FakeMA({"playlist": [curated("yt only", "6")]}, {"6": [ytm_track("y", "a")]})
+        r = run(ma, "YT Only", "playlist")
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["spoken_text"].startswith("YT Only has no songs"), r["spoken_text"])
+
     def test_automatic_non_editable_playlists_are_never_curated(self):
         # Includes a name-like id, so the rule cannot be "mapping id looks like a name".
         for named in ("random_tracks", "recently_played", "Some Future Auto List"):
@@ -165,9 +172,18 @@ class CuratedPlaylistTest(unittest.TestCase):
     def test_track_list_capped(self):
         many = [smb("t%d" % i, "p/%d" % i) for i in range(music.PLAYLIST_TRACK_CAP + 50)]
         ma = FakeMA({"playlist": [curated("big", "3")]}, {"3": many})
-        run(ma, "big", "playlist")
-        self.assertEqual(ma.track_limits, [music.PLAYLIST_TRACK_CAP])
+        r = run(ma, "big", "playlist")
+        self.assertEqual(ma.track_limits, [None])
         self.assertEqual(len(ma.played[0]), music.PLAYLIST_TRACK_CAP)
+        self.assertEqual(r["metadata"]["total"], music.PLAYLIST_TRACK_CAP + 50)
+
+    def test_track_list_total_past_the_cap_in_chat_text(self):
+        many = [smb("t%d" % i, "p/%d" % i) for i in range(550)]
+        ma = FakeMA({"playlist": [curated("huge", "3")]}, {"3": many})
+        r = run(ma, "huge", "playlist")
+        self.assertTrue(r["ok"])
+        self.assertEqual(len(ma.played[0]), music.PLAYLIST_TRACK_CAP)
+        self.assertIn("of 550 tracks", r["chat_text"])
 
     def test_curated_mapping_id_differing_from_library_id_fetches_by_library_id(self):
         # MA need not keep the builtin mapping id equal to the library id; the fetch uses provider
@@ -232,6 +248,34 @@ class AliasAndPhraseTest(unittest.TestCase):
         self.assertFalse(r["ok"])
         self.assertEqual(ma.track_calls, [])
 
+    def test_alias_target_containing_by_can_still_match_exactly(self):
+        # match_rank('Songs by Costea', 'Songs by Costea') == 1, not 0 -- exact mode must not use
+        # match_rank at all, or a target containing " by " can never be accepted.
+        ma = FakeMA({"playlist": [curated("Chill by Costea", "9")]}, {"9": EIGHT})
+        r = run(ma, "chill mix", settings=with_aliases({"chill mix": "Chill by Costea"}))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/9")
+
+    def test_alias_key_with_leading_the_matches(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "costea mix", settings=with_aliases({"the costea mix": "my music - costea (local)"}))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
+        self.assertEqual(r["chat_text"], "Playing the costea mix.")
+
+    def test_alias_key_with_trailing_playlist_matches(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "costea mix", settings=with_aliases({"costea mix playlist": "my music - costea (local)"}))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
+
+    def test_malformed_playlist_aliases_does_not_break_an_artist_query(self):
+        s = FakeSettings(); s.playlist_aliases = "oops"
+        ma = FakeMA({"artist": [smb("Rammstein", "42")]})
+        r = run(ma, "Rammstein", "artist", settings=s)
+        self.assertTrue(r["ok"])
+        self.assertEqual(ma.played, ["filesystem_smb--kd66vco4://artist/42"])
+
     def test_short_alias_does_not_hijack_longer_query(self):
         ma = FakeMA({"album": [smb("Chill Out", "al1")], "playlist": [curated("chill set", "4")]}, {"4": EIGHT})
         r = run(ma, "chill out", settings=with_aliases(ALIASES))
@@ -256,6 +300,14 @@ class AliasAndPhraseTest(unittest.TestCase):
         r = run(ma, "playlist")
         self.assertFalse(r["ok"])
         self.assertEqual(ma.played, [])
+
+    def test_the_playlist_and_my_playlist_are_no_match(self):
+        for phrase in ("the playlist", "my playlist"):
+            ma = FakeMA(self.lib(), {"28": EIGHT})
+            r = run(ma, phrase)
+            self.assertFalse(r["ok"], phrase)
+            self.assertEqual(ma.played, [], phrase)
+            self.assertEqual(ma.track_calls, [], phrase)
 
     def test_apostrophes_and_punctuation_match_alias(self):
         ma = FakeMA(self.lib(), {"28": EIGHT})
