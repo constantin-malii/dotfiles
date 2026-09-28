@@ -40,6 +40,21 @@ class MA(object):
         items = res.get("items") if isinstance(res, dict) else (res or [])
         return list(items)[:limit]
 
+    # MR-08c queue helpers (design 4.2). Raw replies: callers check "error_code".
+    def queue_state(self, queue_id):
+        return self.cmd("player_queues/get", queue_id=queue_id)
+
+    def queue_items(self, queue_id, offset=0, limit=50):
+        return self.cmd("player_queues/items", queue_id=queue_id, offset=offset, limit=limit)
+
+    def play_index(self, queue_id, queue_item_id, seek_position=0):
+        # One call resumes at a position (spike 3, design 3.2-3): no play-from-0-then-seek blip.
+        return self.cmd("player_queues/play_index", queue_id=queue_id, index=queue_item_id,
+                        seek_position=int(seek_position))
+
+    def delete_item(self, queue_id, queue_item_id):
+        return self.cmd("player_queues/delete_item", queue_id=queue_id, item_id_or_index=queue_item_id)
+
     def play(self, queue_id, uri, option="replace"):
         # "replace" => fresh queue each time (immune to stale/contaminated queue state)
         return self.cmd("player_queues/play_media", queue_id=queue_id, media=uri, option=option)

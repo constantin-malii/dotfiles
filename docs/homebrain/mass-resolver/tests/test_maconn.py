@@ -66,5 +66,41 @@ class PlaylistTracksTest(unittest.TestCase):
         self.assertEqual(self._ma(None).playlist_tracks(28), [])
 
 
+class QueueHelpersTest(unittest.TestCase):
+    def _ma(self, reply=None):
+        m = MA("h", 1, "t")
+        m.calls = []
+        def cmd(command, **a):
+            m.calls.append((command, a)); return reply
+        m.cmd = cmd
+        return m
+
+    def test_queue_state(self):
+        m = self._ma({"result": {"state": "playing"}})
+        self.assertEqual(m.queue_state("q1"), {"result": {"state": "playing"}})
+        self.assertEqual(m.calls, [("player_queues/get", {"queue_id": "q1"})])
+
+    def test_queue_items_window(self):
+        m = self._ma({"result": []})
+        m.queue_items("q1", offset=55, limit=5)
+        self.assertEqual(m.calls, [("player_queues/items", {"queue_id": "q1", "offset": 55, "limit": 5})])
+
+    def test_play_index_with_seek_position(self):
+        m = self._ma({"result": None})
+        m.play_index("q1", "abc", seek_position=47)
+        self.assertEqual(m.calls, [("player_queues/play_index",
+                                    {"queue_id": "q1", "index": "abc", "seek_position": 47})])
+
+    def test_play_index_default_from_start(self):
+        m = self._ma({"result": None})
+        m.play_index("q1", "abc")
+        self.assertEqual(m.calls[0][1]["seek_position"], 0)
+
+    def test_delete_item(self):
+        m = self._ma({"result": None})
+        m.delete_item("q1", "c9")
+        self.assertEqual(m.calls, [("player_queues/delete_item", {"queue_id": "q1", "item_id_or_index": "c9"})])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
