@@ -111,6 +111,38 @@ line `SERVICE: /command HTTP server on 192.168.122.1:8770`.
 | `good_key ≠ 200` / `no_key ≠ 401` | endpoint / auth mismatch | check `~/mass-resolver/.http_secret` vs the HA `rest_command.resolver_command` header; restart resolver |
 | log shows a play but there's no sound | host Squeezelite | check `squeezelite-ceiling.service` on the host |
 
+### 3c. After a failed or crashed announcement
+
+Two recoveries that are not obvious, and neither needs a resolver restart.
+
+**The satellite has gone deaf.** An announcement mutes
+`switch.respeaker_living_room_microphone_mute` for its own audio and unmutes on every exit path,
+including exceptions. But the dead-man that would fix a missed unmute is an **in-memory timer** — it
+dies with the process, so a resolver that is killed or restarted mid-announcement strands the
+microphone muted with nothing scheduled to release it.
+
+```bash
+# is it stuck on?
+curl -s -H "Authorization: Bearer $TOK" \
+  http://192.168.122.10:8123/api/states/switch.respeaker_living_room_microphone_mute
+```
+
+Recovery: **toggle the switch off in the HA UI.** Nothing else is needed, and restarting the
+resolver does *not* clear it — the mute lives in Home Assistant, not in the resolver.
+
+**The ceiling is silent and `paused`.** If an announcement's clip failed to play *and* its replay of
+the interrupted source also failed, the zone is left paused holding nothing. Recovery is the
+resolver's own **`resume`** — not a restart:
+
+```bash
+curl -s -H "X-Resolver-Key: $KEY" -H 'Content-Type: application/json' \
+  -d '{"intent":"interaction","params":{"mode":"resume"}}' \
+  http://192.168.122.1:8770/command
+```
+
+> ⚠️ As of 2026-09-27 `automation.voice_ceiling_announce` is **disabled**, so announcements should
+> not be occurring at all. If you hit either symptom, check that automation first — something
+> re-enabled it. See `ONBOARDING.md` and the AN-01 correction document.
 ## 4. Safety
 
 - **No host / VM / service restart without explicit user approval.**

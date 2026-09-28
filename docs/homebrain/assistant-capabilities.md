@@ -294,3 +294,21 @@ RULES
 - Don't claim a song is playing unless you actually used the play tool.
 - Don't describe how the system works internally, and don't mention device or setting names.
 ```
+
+## Announcements are deliberately NOT an LLM-exposed tool
+
+AN-01 added an `announce` mode to the resolver's `interaction` capability — chime, spoken message,
+satellite microphone muted for the duration, volume raised and restored. **It is reached only by two
+fixed sentence triggers, never by the model, and it is not in the exposed `script.*` surface.**
+
+That is a decision, not an omission. `CHANGELOG.md` 2026-09-06 records the lesson the hard way: a
+model in the loop for a deterministic action turns a fixed behaviour into a negotiable one. An
+announcement broadcasts to a room the caller may not be in, at a volume they did not choose, while
+muting a microphone — the least suitable place for an LLM's discretion. The sentence triggers do
+exactly one thing with exactly one parameter.
+
+Nothing new is exposed, so no NL-02 exposure-lockstep work applies.
+
+> ⚠️ **As of 2026-09-27 the feature is disabled anyway** — `automation.voice_ceiling_announce` is
+> off because roughly 1 announcement in 15 is silent. See `ONBOARDING.md`. `say_text` (the
+> satellite reply route) is unaffected and in daily use.
