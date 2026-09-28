@@ -593,5 +593,124 @@ class QueueFailureTest(unittest.TestCase):
         self.assertEqual(len(self.play_indexes(q)), 1)
 
 
+class QueueContinuityTest(unittest.TestCase):
+    def test_barge_in_before_first_turn_recorded_its_clip(self):
+        q = FakeQueue([track(i) for i in range(1, 6)], current=2, elapsed=47.0)
+        q.clip_play_reads = 3                         # A's clip is still PLAYING at A's first poll sleep
+        ctx = ctx_for(q)
+        state = {"fired": False}
+        def hook(n):
+            # A's clip is playing and A has recorded nothing yet: B arrives (barge-in).
+            if (not state["fired"] and q.state == "playing" and q.cur()
+                    and q.cur()["queue_item_id"].startswith("c")):
+                state["fired"] = True
+                capability.run(cap, ctx, {"mode": "say", "uri": CLIP2}, "ridB")
+        cap = new_cap(hook)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(cap, ctx)
+        self.assertTrue(state["fired"])
+        self.assertEqual(q.ids(), ["t1", "t2", "t3", "t4", "t5"])           # both clips gone
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "t3", 47)])
+        self.assertEqual([c for c in q.calls if c[0] == "replace"], [])
+        self.assertFalse(any("UNIDENTIFIED" in m for m in lg.output))     # superseded A does not probe
+
+    def test_superseded_without_successor_capture_leaves_a_pending_resume(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, elapsed=47.0)
+        q.clip_play_reads = 3
+        ctx = ctx_for(q)
+        state = {"fired": False}
+        def hook(n):
+            # An announcement claims the generation and aborts before _say: nobody else captures.
+            if not state["fired"] and q.state == "playing" and q.cur()["queue_item_id"].startswith("c"):
+                state["fired"] = True
+                with cap._lock:
+                    cap._say_gen[ZONE] = cap._say_gen.get(ZONE, 0) + 1
+        cap = new_cap(hook)
+        say(cap, ctx)
+        self.assertFalse(cap._queue_targets[ZONE]["live"])
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(q.cur()["queue_item_id"], "t2")
+
+    def test_pause_question_resume(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        r = say(cap, ctx)
+        self.assertEqual(r["metadata"]["resume"], "none")
+        self.assertEqual(q.cur()["media_item"]["uri"], "builtin://radio/" + CLIP)
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertTrue(r2["metadata"]["resumed"])
+        self.assertEqual(r2["metadata"]["how"], "queue_pending")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(q.cur()["queue_item_id"], "t2")
+        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "t2", 47)])
+
+    def test_pause_two_questions_resume(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        say(cap, ctx, uri=CLIP2, rid="rid2")
+        capability.run(cap, ctx, {"mode": "resume"}, "rid3")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(q.cur()["queue_item_id"], "t2")
+
+    def test_same_fixed_reply_twice_identifies_the_new_clip_not_the_anchor(self):
+        # HA's TTS cache gives the same URL for the same text: after Q1 the current item is c1(CLIP), and Q2's
+        # anchor IS that identical clip. Q2's clip must be found at anchor + 1.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        say(cap, ctx, rid="rid2")
+        capability.run(cap, ctx, {"mode": "resume"}, "rid3")
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(sorted(c[1] for c in q.calls if c[0] == "delete"), ["c1", "c2"])
+
+    def test_plain_pause_resume_unpauses_in_place(self):
+        q = FakeQueue([track(1), track(2)], current=1, state="paused")
+        ctx = ctx_for(q)
+        r = capability.run(new_cap(), ctx, {"mode": "resume"}, "rid1")
+        self.assertEqual(r["metadata"]["how"], "unpause_queue")
+        self.assertIn(("media_player", "media_play", {"entity_id": ZONE}), ctx.ha.calls)
+        self.assertEqual([c for c in q.calls if c[0] in ("replace", "play_index")], [])
+
+    def test_resume_while_already_playing_is_a_no_op(self):
+        q = FakeQueue([track(1), track(2)], current=1, state="playing")
+        ctx = ctx_for(q)
+        r = capability.run(new_cap(), ctx, {"mode": "resume"}, "rid1")
+        self.assertEqual(r["metadata"]["how"], "already_playing")
+        self.assertEqual([c for c in q.calls if c[0] in ("replace", "play_index")], [])
+
+    def test_paused_reply_clip_is_never_unpaused(self):
+        q = FakeQueue([track(1), clip_item("c9", CLIP)], current=1, state="paused")
+        ctx = ctx_for(q)
+        capability.run(new_cap(), ctx, {"mode": "resume"}, "rid1")
+        self.assertNotIn(("media_player", "media_play", {"entity_id": ZONE}), ctx.ha.calls)
+
+    def test_unconfirmed_resume_leaves_pending_that_resume_uses(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, elapsed=47.0)
+        q.lag = 50
+        ctx = ctx_for(q)
+        cap = new_cap()
+        r = say(cap, ctx)
+        self.assertEqual(r["metadata"]["resume"], "unconfirmed")
+        q.lag = 0; q._pending = None                  # the late play_index never landed
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r2["metadata"]["how"], "queue_pending")
+        self.assertEqual(q.cur()["queue_item_id"], "t2")
+
+    def test_note_playback_clears_the_pending_record(self):
+        q = FakeQueue([track(1), track(2)], current=0, state="paused")
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        self.assertIn(ZONE, cap._queue_targets)
+        cap.note_playback(ctx, ZONE, "library://track/99")
+        self.assertNotIn(ZONE, cap._queue_targets)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -509,7 +509,69 @@ class InteractionCapability(capability.Capability):
         return cr.ok(self.name, rid, "Volume set.", spoken_text=None,
                      metadata={"changed": True, "to": new, "applied": "live", "zone": zone})
 
+    def _resume_from_queue(self, ctx, zone, rid):
+        """Design 4.6: continue a pending queue resume, un-pause a paused real item in place, or do nothing
+        when a real item is already playing (a legacy replay would replace the queue). None -> the existing
+        resume logic runs."""
+        if not self._queue_on(ctx):
+            return None
+        queue_id = ctx.settings.queue_id
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            rec = dict(rec, clips=list(rec["clips"])) if rec is not None else None
+        ma = None
+        try:
+            ma = self._ma_open(ctx)
+            s = ma.queue_state(queue_id)
+            if not _ma_ok(s):
+                return None
+            q = s.get("result") or {}
+            ci = q.get("current_item") or {}
+            cur_id = ci.get("queue_item_id")
+            cur_uri = (ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""
+            cur_is_clip = is_reply_clip_uri(cur_uri)
+            if (rec is not None and not rec.get("live") and rec.get("target") is not None
+                    and cur_id in rec["clips"]):
+                t = rec["target"]
+                r = ma.play_index(queue_id, t["item"], seek_position=seek_target(t))
+                if not _ma_ok(r):
+                    LOG.warning("RESUME req=%s zone=%s pending queue resume refused (%s); current logic",
+                                rid, zone, r.get("error_code") if isinstance(r, dict) else "no reply")
+                    return None
+                for cid in rec["clips"]:
+                    try:
+                        ma.delete_item(queue_id, cid)
+                    except Exception as e:
+                        LOG.warning("RESUME req=%s zone=%s delete failed for %s (%r)", rid, zone, cid, e)
+                LOG.info("RESUME req=%s zone=%s resumed pending queue item %s (clips deleted: %s)",
+                         rid, zone, t["item"], rec["clips"])
+                self.note_playback(ctx, zone, t.get("uri") or "queue")
+                return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                             metadata={"resumed": True, "uri": t.get("uri"), "how": "queue_pending",
+                                       "zone": zone})
+            if cur_id and not cur_is_clip and q.get("state") == "playing":
+                LOG.info("RESUME req=%s zone=%s already playing queue item %s; nothing to do", rid, zone, cur_id)
+                return cr.ok(self.name, rid, "Already playing.", spoken_text=None,
+                             metadata={"resumed": False, "uri": cur_uri or None, "how": "already_playing",
+                                       "zone": zone})
+            if cur_id and not cur_is_clip and q.get("state") == "paused":
+                ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
+                self.note_playback(ctx, zone, cur_uri or "unpaused")
+                LOG.info("RESUME req=%s zone=%s un-paused the queue in place", rid, zone)
+                return cr.ok(self.name, rid, "Resuming.", spoken_text=None,
+                             metadata={"resumed": True, "uri": cur_uri or None, "how": "unpause_queue",
+                                       "zone": zone})
+            return None
+        except Exception as e:
+            LOG.warning("RESUME req=%s zone=%s queue check failed (%r); current logic", rid, zone, e)
+            return None
+        finally:
+            self._ma_close(ma)
+
     def _resume(self, ctx, zone, rid):
+        res = self._resume_from_queue(ctx, zone, rid)
+        if res is not None:
+            return res
         with self._lock:
             uri = self._last_source.get(zone)
         if uri:
@@ -530,7 +592,7 @@ class InteractionCapability(capability.Capability):
             st = {}
         state = st.get("state")
         cid = ((st.get("attributes") or {}).get("media_content_id")) or ""
-        if state == "paused":
+        if state == "paused" and not self._is_reply_uri(cid):
             ctx.ha.call_service_rest("media_player", "media_play", {"entity_id": zone})
             self.note_playback(ctx, zone, cid or "unpaused")
             LOG.info("RESUME req=%s zone=%s un-paused", rid, zone)
@@ -597,6 +659,8 @@ class InteractionCapability(capability.Capability):
         it is confirming, and _say's capture runs while that station is still starting, so it
         captures no source to replay and the zone ends up idle holding the TTS clip. Keyed to the
         TURN, not a timer: a question asked seconds later is a new turn and still gets its reply."""
+        with self._lock:
+            self._queue_targets.pop(zone, None)      # MR-08c: new media started; nothing pending to resume
         self.remember_source(zone, uri)          # resumable regardless of who started it
         with self._lock:
             turn = self._turns.get(zone)
@@ -1535,10 +1599,29 @@ class InteractionCapability(capability.Capability):
         return qm
 
     def _queue_adopt_target(self, qm, rid, zone):
-        """Which item this turn resumes. Task 3: the captured item, unless it is itself a reply clip.
-        (Task 5 replaces this with barge-in / pending-resume inheritance, design 4.5-4.6.)"""
+        """Which item this turn resumes (design 4.5-4.6). A record left by a superseded turn (live) or by a
+        turn that did not resume (pending) is INHERITED when this turn's current item is one of its clips --
+        or, for a live record whose turn recorded none yet, when the current item is a reply clip: that item
+        is then recorded as the earlier turn's clip (it sits at that turn's anchor + 1). Capturing a real
+        item clears any record."""
         cap = qm["cap"]
-        if is_reply_clip_uri(cap["uri"]):
+        is_clip = is_reply_clip_uri(cap["uri"])
+        with self._lock:
+            rec = self._queue_targets.get(zone)
+            rec = dict(rec, clips=list(rec["clips"])) if rec is not None else None
+            if not is_clip:
+                self._queue_targets.pop(zone, None)
+        if rec is not None and is_clip and rec.get("target") is not None and (
+                cap["item"] in rec["clips"] or rec.get("live")):
+            if cap["item"] not in rec["clips"]:
+                rec["clips"].append(cap["item"])
+            qm["target"] = rec["target"]
+            qm["clips"] = rec["clips"]
+            qm["inherited_from"] = rec.get("rid")
+            LOG.info("SAY req=%s zone=%s inherited resume target item=%s from req=%s (clips=%s)",
+                     rid, zone, rec["target"]["item"], rec.get("rid"), rec["clips"])
+            return
+        if is_clip:
             LOG.info("SAY req=%s zone=%s current queue item %s is a reply clip; no resume target",
                      rid, zone, cap["item"])
             return
