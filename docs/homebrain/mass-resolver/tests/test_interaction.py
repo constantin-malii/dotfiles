@@ -474,9 +474,11 @@ class Round2FindingsTest(unittest.TestCase):
             def __init__(self, cap):
                 self._cap = cap
                 self.calls = []
-            def get_entity_state(self, entity_id):
+            def get_entity_state(self, entity_id, timeout=None):
                 return playing(0.40)
-            def call_service_rest(self, domain, service, data):
+            # Signature mirrors haconn.call_service_rest, which has always taken a timeout.
+            # These local fakes were narrower than the interface they stand in for.
+            def call_service_rest(self, domain, service, data, timeout=5):
                 held["locked"] = self._cap._lock.locked()
                 self.calls.append((domain, service, data))
         ha = LockCheckingHA(cap)
@@ -529,11 +531,11 @@ class Round3FindingsTest(unittest.TestCase):
         first_timer = FakeTimer.created[0]
         real_write = ha.call_service_rest
         calls = {"n": 0}
-        def flaky_write(domain, service, data):
+        def flaky_write(domain, service, data, timeout=5):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise IOError("first restore write fails")
-            return real_write(domain, service, data)
+            return real_write(domain, service, data, timeout)
         ha.call_service_rest = flaky_write
         first_timer.fire()                                          # _auto_restore -> _restore raises -> re-arm
         self.assertEqual(len(FakeTimer.created), 2)                 # a NEW timer was armed
@@ -582,9 +584,11 @@ class RealThreadingTest(unittest.TestCase):
             def __init__(self):
                 self.calls = []
                 self._n = 0
-            def get_entity_state(self, entity_id):
+            def get_entity_state(self, entity_id, timeout=None):
                 return playing(0.40)
-            def call_service_rest(self, domain, service, data):
+            # Signature mirrors haconn.call_service_rest, which has always taken a timeout.
+            # These local fakes were narrower than the interface they stand in for.
+            def call_service_rest(self, domain, service, data, timeout=5):
                 self._n += 1
                 if self._n == 1:                                    # first writer (thread A) blocks here
                     started.set()
@@ -6410,6 +6414,153 @@ class ResolvedTtsUrlIsLoggedTest(unittest.TestCase):
             run(self._cap(), self._ctx(ha), {"mode": "say_text", "text": "hello"})
         joined = "\n".join(self._lines(cm))
         self.assertIn(long_url, joined)
+
+
+class LockHeldCallsAreBoundedTest(unittest.TestCase):
+    """P3-lite: every HA call made while `_lock` is held must carry an explicit short timeout.
+
+    `_duck` and `_restore` hold the single `_lock` for their whole bodies, including a
+    `get_entity_state` read and a `volume_set` write. Both went out on the client default. A hung
+    Home Assistant therefore holds `_lock` for as long as the socket takes to give up -- and `_lock`
+    also gates `_claim_gen`, `interaction_in_flight` (which `core.dispatch` calls on EVERY result)
+    and the volume-recovery timer. The microphone dead-man queues behind it too.
+
+    This does not narrow the critical section -- that is a real check-then-act and a bigger change.
+    It bounds the hold, which is the cheap 90% and touches no locking structure. `_mic_confirm`
+    already does exactly this.
+    """
+
+    ZONE = "media_player.ceiling_speakers"
+
+    def _cap(self):
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0,
+                                                 sleeper=FakeSleeper())
+
+    # A SENTINEL, not the real value. FakeHA.call_service_rest defaults to timeout=5, so asserting
+    # "not None" or "<= 5" cannot tell an explicit 5.0 from the fake's own default -- an earlier
+    # version of these tests passed with the timeout argument removed entirely. Patching the
+    # constant to a value nothing else produces makes the assertion prove the value FLOWED.
+    SENTINEL = 3.25
+
+    def _patched(self, fn):
+        real = interaction.LOCK_HELD_CALL_TIMEOUT
+        interaction.LOCK_HELD_CALL_TIMEOUT = self.SENTINEL
+        try:
+            return fn()
+        finally:
+            interaction.LOCK_HELD_CALL_TIMEOUT = real
+
+    def test_duck_bounds_its_read_and_its_write(self):
+        ha = FakeHA(playing(0.40))
+        cap = self._cap()
+        self._patched(lambda: run(cap, FakeCtx(ha), {"mode": "duck"}))
+        self.assertTrue(ha.state_timeouts, "duck made no state read")
+        for t in ha.state_timeouts:
+            self.assertEqual(t, self.SENTINEL, "an in-lock read did not carry the bound")
+        vol = [t for (s, t) in ha.timeouts if s == "volume_set"]
+        self.assertTrue(vol, "duck made no volume_set, so this test proves nothing")
+        for t in vol:
+            self.assertEqual(t, self.SENTINEL, "the in-lock write did not carry the bound")
+
+    def test_restore_bounds_its_read_and_its_write(self):
+        ha = FakeHA(playing(0.40))
+        cap = self._cap()
+        run(cap, FakeCtx(ha), {"mode": "duck"})
+        # The zone must still be AT THE DUCK FLOOR, or _restore reads a volume the operator moved
+        # and takes the "Kept." path without writing at all.
+        ha._state = playing(0.15)
+        ha.state_timeouts = []
+        ha.timeouts = []
+        self._patched(lambda: run(cap, FakeCtx(ha), {"mode": "restore"}))
+        self.assertTrue(ha.state_timeouts, "restore made no state read")
+        for t in ha.state_timeouts:
+            self.assertEqual(t, self.SENTINEL, "an in-lock read did not carry the bound")
+        vol = [t for (s, t) in ha.timeouts if s == "volume_set"]
+        self.assertTrue(vol, "restore made no volume_set, so this test proves nothing")
+        for t in vol:
+            self.assertEqual(t, self.SENTINEL, "the in-lock write did not carry the bound")
+
+    def test_the_bound_is_shorter_than_the_play_media_allowance(self):
+        # It must be SHORT: this one is taken while holding the lock everything else waits on,
+        # unlike the 20s play_media call, which is not.
+        self.assertLess(interaction.LOCK_HELD_CALL_TIMEOUT, 20.0)
+        self.assertGreater(interaction.LOCK_HELD_CALL_TIMEOUT, 0.0)
+
+
+class ChimeOutcomeIsNotOverstatedTest(unittest.TestCase):
+    """F4: the chime was the last clip still judged by `started` alone.
+
+    With `end_observed` a first-class fact for the message, reporting `chime: {played: True,
+    reason: None}` for a chime whose end was never seen is the same overclaim the message path was
+    just fixed for -- smaller, because the chime is decorative and design 8.3 deliberately does not
+    let it fail the turn, but the metadata is what an operator reads when asking why an
+    announcement sounded wrong.
+    """
+
+    ENT = "switch.respeaker_test_microphone_mute"
+
+    def setUp(self):
+        FakeTimer.created = []
+        self.chime_signed = ("http://192.168.122.10:8123/media/local/timer_chime.wav?authSig="
+                             + FAKE_SIG)
+        self.tts = "http://192.168.122.10:8123/api/tts_proxy/x.mp3"
+
+    def _cap(self):
+        clock = MovingClock()
+        return interaction.InteractionCapability(timer_factory=FakeTimer, clock=clock,
+                                                 sleeper=AdvancingSleeper(clock))
+
+    def _ctx(self, ha):
+        ctx = FakeCtx(ha)
+        ctx.settings = FakeSettings()
+        ctx.settings.announce_mic_mute_entity = self.ENT
+        return ctx
+
+    def _ha(self, states, tail):
+        ha = FakeHA(tail)
+        ha.tts_url = self.tts
+        ha.media_url = self.chime_signed
+        ha.set_states(states)
+        return ha
+
+    def _head(self):
+        return [{"state": "off", "attributes": {}},
+                {"state": "on", "attributes": {}},
+                playing_with_id(0.36, "library://radio/2")]
+
+    def test_a_chime_whose_end_was_never_seen_is_not_reported_as_cleanly_played(self):
+        chime_playing = playing_with_id(0.80, "builtin://track/" + self.chime_signed)
+        # The chime starts and then never ends: it burns its own finish budget.
+        ha = self._ha(self._head() + [chime_playing], chime_playing)
+        res = run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        chime = res["metadata"]["chime"]
+        self.assertTrue(chime["played"], "it did start, so played must stay true")
+        self.assertFalse(chime["end_observed"])
+        self.assertEqual(chime["reason"], "end_unobserved")
+
+    def test_a_clean_chime_reports_a_clean_chime(self):
+        ha = self._ha(self._head() + [playing_with_id(0.80, "builtin://track/" + self.chime_signed),
+                                      idle_state(), idle_state(),
+                                      playing_with_id(0.80, "builtin://radio/" + self.tts),
+                                      idle_state(), idle_state()],
+                      idle_state())
+        res = run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        chime = res["metadata"]["chime"]
+        self.assertTrue(chime["played"])
+        self.assertTrue(chime["end_observed"])
+        self.assertIsNone(chime["reason"])
+
+    def test_a_chime_that_never_started_still_says_so(self):
+        ha = self._ha(self._head() + [idle_state()] * 12
+                      + [playing_with_id(0.80, "builtin://radio/" + self.tts),
+                         idle_state(), idle_state()],
+                      idle_state())
+        res = run(self._cap(), self._ctx(ha), {"mode": "announce", "text": "dinner is ready"})
+        chime = res["metadata"]["chime"]
+        self.assertFalse(chime["played"])
+        self.assertFalse(chime["end_observed"])
+        self.assertEqual(chime["reason"], "never_started")
+        self.assertTrue(res["ok"], "a bad chime must still not fail the announcement")
 
 
 if __name__ == "__main__":
