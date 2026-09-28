@@ -99,5 +99,22 @@ class HttpConfigDefaultsTest(unittest.TestCase):
             shutil.rmtree(d, ignore_errors=True)
 
 
+class ShouldAnnounceTest(unittest.TestCase):
+    class S(object):
+        announce_failures = True
+
+    def test_failure_announces(self):
+        self.assertTrue(resolver._should_announce({"ok": False, "spoken": "x"}, self.S(), False))
+
+    def test_dry_run_never_announces(self):
+        self.assertFalse(resolver._should_announce({"ok": False, "spoken": "x"}, self.S(), True))
+
+    def test_success_or_no_text_or_disabled_never_announces(self):
+        self.assertFalse(resolver._should_announce({"ok": True, "spoken": "x"}, self.S(), False))
+        self.assertFalse(resolver._should_announce({"ok": False, "spoken": None}, self.S(), False))
+        s = self.S(); s.announce_failures = False
+        self.assertFalse(resolver._should_announce({"ok": False, "spoken": "x"}, s, False))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
