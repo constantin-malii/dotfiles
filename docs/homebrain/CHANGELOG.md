@@ -3,6 +3,43 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-28 — MR-08 resolver deploy: curated playlists by voice, dry-runs silent
+
+> Voice: "Okay Nabu, play Costea mix" plays the curated Music Assistant playlist
+> **my music - costea (local)** (library id 28) from its **local** tracks only.
+> Rollback: `~/mass-resolver/.bak/20260928-110035/` (sha256-verified backup, 52 files) + restart.
+
+- **Shipped** (branch `homebrain/mr-playlist-voice`, design `2026-09-27-mr-08-playlist-voice-design.md`):
+  - curated MA playlist = builtin mapping + `is_editable is True` + `is_dynamic is False` (fail closed);
+    tracks fetched by the **library** id, played as the **local-track URI list** (cap 500);
+  - exact playlist aliases (`config.json` `playlist_aliases`), playlist-only, exact target, no fall-through;
+  - trailing "…playlist"; "the/my playlist" alone is not-found; "shuffle …" plays in order with a note (MR-08b);
+  - **dry-runs never speak** — `core.dispatch` (params or settings flag) and the CLI (`_should_announce`).
+    This closes the 2026-09-27 incident where a CLI dry-run spoke on the ceiling.
+- **Probe (read-only, 2026-09-27):** the design's "numeric builtin id" rule was **wrong** — a user playlist's
+  builtin mapping id is its *name*; `is_editable` is what separates it from MA's 8 automatic lists.
+- **Deploy:** gate claimed in PR #63. Host files differed from `main` only by CRLF line endings (content
+  identical) — no host-only change overwritten. Staged in `~/mr08-staging/mass-resolver`; copies verified by
+  **sha256 end to end**; **host tests, Python 3.5.2: 780 OK across all 23 host modules**, `COMPILE OK`;
+  promoted with a sha256 match (30 files). Local suite: 895 OK. Operator restarts **11:03:55**, **12:33:12**,
+  **12:41:35**; clean startup, `key=200`/`nokey=401`, no tracebacks.
+- **Dry-runs:** CLI and `/command` — curated `local: 8, total: 8`, `.m3u` unchanged, unknown query
+  `not_found` with `ANNOUNCE suppressed: dry-run`; `ANNOUNCE via` count **100 before and after** every run.
+- **Live test — the alias list had to follow what speech-to-text actually hears.** The first two tries
+  failed as not-found: HA's `script.play_music` trace showed the query **"Costa Mix"** (and once
+  **"Costanix"**); Nabu's reply pronounced it "Kostya", which misled the first fix. Final aliases:
+  `costea mix`, `costea mics`, `kostya mix`, `kostia mix`, `costia mix`, `kostea mix`, `costa mix`,
+  `kosta mix`, `costanix` (config-only redeploys, backups `.bak/20260928-122642-aliases`,
+  `.bak/20260928-124109-aliases`). Third try: `alias='costa mix'` → `PLAYING library://playlist/28` —
+  **MA accepts the URI list** (the last unverified design assumption).
+- **Confirmed limitation (design §6 → `MR-08c`, next):** a question during playback cuts the queue to the
+  current song — the reply replaces the queue and replays only the current track. Observed: queue =
+  [reply clip, current song]; with repeat=all it then returned to the stale `.flac` reply clip and **stopped
+  after one song**. Pre-existing for albums/`.m3u` too; MR-08 did not introduce it.
+- **Follow-ups logged:** `MR-08d` (let the conversation agent know playlist names/aliases), `MR-08e` (log the
+  query on a music miss — misses are invisible in `resolver.log` today), `MR-08f` (short volume commands are
+  misheard over music: "volume up" arrived as "Hold him up.").
+
 ## 2026-09-27 — AN-01 resolver redeploy #2: bounded in-lock HA calls, honest chime metadata
 
 > Announcements remain **disabled**; the only live path affected is the satellite reply.

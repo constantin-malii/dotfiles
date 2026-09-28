@@ -169,6 +169,9 @@ The name used is the phrase the user said (alias key or query). `validate` picks
 
 ## 6. Known limitation — resume of a curated playlist (operator decision: document)
 
+> **Confirmed live 2026-09-28:** after one question the queue was [reply clip, current song]; playback
+> stopped after that song. Fix tracked as `MR-08c` (next).
+
 The first play is local-only (§3.1-4). The two resume paths behave differently, and neither keeps that guarantee:
 
 - **Plain "resume" issued before any satellite reply** — `interaction._resume` (interaction.py ~408) replays the

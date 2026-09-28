@@ -102,6 +102,12 @@ is found.
 Music is **local-only** today. If asked for something not in the library, say it isn't available
 locally yet and that acquisition is on the roadmap.
 
+**Playlists (MR-08, live 2026-09-28).** `play_music` also plays the operator's **curated Music Assistant
+playlists** — by name, or by an exact alias from the resolver's `playlist_aliases` (e.g. "play Costea mix";
+aliases also cover the spellings speech-to-text produces, like "Costa Mix"). Only the playlist's **local**
+tracks play; a playlist with none says so. **Not yet:** shuffle (MR-08b — "shuffle …" plays in order with a
+note), and a question asked during playback currently cuts the queue to the current song (MR-08c).
+
 ## Routing rules (encoded in tool descriptions + the prompt below)
 
 - **Music:** call `play_music` with the user's phrase as the query; leave `media_type` empty unless the

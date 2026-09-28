@@ -13,7 +13,11 @@ A host-side **`mass-resolver`** service (Python 3.5, on the host `costea@192.168
 - **Increments:** Inc 0 (local music play) ✅, Inc 1 (radio play + station find) ✅, and **Foundation F1 + F1-R** (synchronous results) ✅ — all complete.
 - **Contract:** every capability returns a **`CommandResult`** (`ok` / `spoken_text` / `chat_text` / `metadata` / `error{code,reason}`) via a **`resolve → validate → execute`** interface.
 - **Exposed ChatGPT tools (all synchronous — F1-R "hard tool return"):**
-  - `script.play_music` — play from the **local** music library (MA `filesystem_smb`).
+  - `script.play_music` — play from the **local** music library (MA `filesystem_smb`). Since **MR-08
+    (2026-09-28)** this includes **curated Music Assistant playlists** by name or by an exact alias in
+    `config.json` `playlist_aliases` (they play their local tracks only). Aliases must match what
+    speech-to-text actually produces — check HA's `script.play_music` trace for the real query. Known
+    limitation (`MR-08c`): a question during playback cuts the queue to the current song.
   - `script.play_radio` — radio (favorites-first → RadioBrowser; by station/genre/country/language).
   - `script.find_stations` — list stations (genre/country), and with **no filter** the favourites list.
   - `script.news` — read the latest world headlines (resolver `news` capability).
