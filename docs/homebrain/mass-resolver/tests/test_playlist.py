@@ -4,6 +4,7 @@ import os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import capability
 import music
+import core
 
 
 class FakeSettings(object):
@@ -294,6 +295,39 @@ class AliasAndPhraseTest(unittest.TestCase):
         self.assertIsNone(r["spoken_text"])
         self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
         self.assertEqual(r["metadata"]["media_type"], "playlist")
+
+
+class DispatchIntegrationTest(unittest.TestCase):
+    class Interaction(object):
+        def __init__(self):
+            self.noted = []
+        def note_playback(self, ctx, zone, uri):
+            self.noted.append((zone, uri))
+
+    class Speaker(object):
+        def __init__(self):
+            self.said = []
+        def speak(self, t):
+            self.said.append(t)
+
+    def test_curated_play_sets_playback_flag_with_string_uri(self):
+        ma = FakeMA({"playlist": [curated("my music - costea (local)", "28")]}, {"28": EIGHT})
+        s = FakeSettings(); s.ceiling_entity = "media_player.ceiling_speakers"; s.announce_failures = True
+        s.playlist_aliases = ALIASES
+        ctx = FakeCtx(ma, s); ctx.speaker = self.Speaker(); ctx.radio_cfg = {}; ctx.news_cfg = {}
+        fake = self.Interaction()
+        saved = core.CAPS.get("interaction")
+        core.CAPS["interaction"] = fake
+        try:
+            r = core.dispatch(ctx, "music", {"query": "costea mix"})
+        finally:
+            if saved is None:
+                core.CAPS.pop("interaction", None)
+            else:
+                core.CAPS["interaction"] = saved
+        self.assertTrue(r["ok"])
+        self.assertEqual(fake.noted, [("media_player.ceiling_speakers", "library://playlist/28")])
+        self.assertEqual(ctx.speaker.said, [])
 
 
 if __name__ == "__main__":
