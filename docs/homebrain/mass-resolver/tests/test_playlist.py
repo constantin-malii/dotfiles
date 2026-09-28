@@ -187,5 +187,110 @@ class CuratedPlaylistTest(unittest.TestCase):
         self.assertEqual(ma.played, ["filesystem_smb--kd66vco4://artist/42"])
 
 
+def with_aliases(aliases):
+    s = FakeSettings(); s.playlist_aliases = aliases; return s
+
+
+ALIASES = {"costea mix": "my music - costea (local)", "chill": "chill set"}
+
+
+class AliasAndPhraseTest(unittest.TestCase):
+    def lib(self):
+        return {"artist": [smb("Costea Mix", "a1")],
+                "playlist": [curated("my music - costea (local)", "28"), smb("costea-playlist", "c.m3u")]}
+
+    def test_alias_forces_playlist_and_beats_same_named_artist(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "Costea mix", settings=with_aliases(ALIASES))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["uri"], "library://playlist/28")
+        self.assertEqual(r["chat_text"], "Playing costea mix.")
+
+    def test_alias_to_missing_target_is_not_found_and_never_an_artist(self):
+        lib = self.lib(); lib["playlist"] = [smb("costea-playlist", "c.m3u")]   # target renamed away
+        # An artist named exactly like the target, and one named like the phrase ("Costea Mix"):
+        # neither may play, whichever way a broken alias branch falls through.
+        lib["artist"] = [smb("Costea Mix", "a1"), smb("my music - costea (local)", "a2")]
+        ma = FakeMA(lib)
+        r = run(ma, "costea mix", settings=with_aliases(ALIASES))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error"]["code"], "not_found")
+        self.assertEqual(ma.played, [])
+
+    def test_alias_to_no_local_playlist_is_not_found(self):
+        ma = FakeMA(self.lib(), {"28": [ytm_track("y", "a")]})
+        r = run(ma, "costea mix", settings=with_aliases(ALIASES))
+        self.assertFalse(r["ok"])
+        self.assertIn("costea mix has no songs", r["spoken_text"])
+        self.assertEqual(ma.played, [])
+
+    def test_alias_target_never_fuzzy_matches_another_playlist(self):
+        lib = {"playlist": [curated("my music - costea (local) old", "27")]}
+        ma = FakeMA(lib, {"27": EIGHT})
+        r = run(ma, "costea mix", settings=with_aliases(ALIASES))
+        self.assertFalse(r["ok"])
+        self.assertEqual(ma.track_calls, [])
+
+    def test_short_alias_does_not_hijack_longer_query(self):
+        ma = FakeMA({"album": [smb("Chill Out", "al1")], "playlist": [curated("chill set", "4")]}, {"4": EIGHT})
+        r = run(ma, "chill out", settings=with_aliases(ALIASES))
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["media_type"], "album")
+
+    def test_the_prefix_does_not_change_todays_ranking(self):
+        ma = FakeMA({"album": [smb("Wall of Sound", "w1"), smb("The Wall", "w2")]})
+        r = run(ma, "the wall", "album")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["candidate"], "The Wall")
+
+    def test_trailing_playlist_word_is_stripped_and_playlist_tried_first(self):
+        ma = FakeMA({"artist": [smb("costea-playlist band", "b1")],
+                     "playlist": [smb("costea-playlist", "c.m3u")]})
+        r = run(ma, "costea-playlist playlist")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["media_type"], "playlist")
+
+    def test_only_the_word_playlist_is_no_match(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "playlist")
+        self.assertFalse(r["ok"])
+        self.assertEqual(ma.played, [])
+
+    def test_apostrophes_and_punctuation_match_alias(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "Costea's-mix", settings=with_aliases({"costeas mix": "my music - costea (local)"}))
+        self.assertTrue(r["ok"])
+
+    def test_shuffle_word_is_tolerated_and_noted(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "shuffle Costea mix", settings=with_aliases(ALIASES))
+        self.assertTrue(r["ok"])
+        self.assertIn("(shuffle isn't supported yet)", r["chat_text"])
+
+    def test_title_starting_with_shuffle_still_resolves_unstripped(self):
+        # Unstripped first: "shuffle the deck" must play the track of that name, not "The Deck"
+        # (which a strip-first order would pick) and without the shuffle note.
+        ma = FakeMA({"track": [smb("The Deck", "d1"), smb("Shuffle the Deck", "s1")]})
+        r = run(ma, "shuffle the deck")
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["metadata"]["candidate"], "Shuffle the Deck")
+        self.assertNotIn("shuffle isn't supported", r["chat_text"])
+
+    def test_library_fetched_once_per_type_across_shuffle_retry(self):
+        # "shuffle nothing here" misses, then is retried stripped: without the per-resolve cache
+        # every type's library would be fetched twice.
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        run(ma, "shuffle nothing here")
+        self.assertEqual(len(ma.library_calls), len(set(ma.library_calls)))
+        self.assertEqual(len(ma.library_calls), 4)
+
+    def test_dry_run_plays_nothing(self):
+        ma = FakeMA(self.lib(), {"28": EIGHT})
+        r = run(ma, "costea mix", settings=with_aliases(ALIASES), dry_run=True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(ma.played, [])
+        self.assertIsNone(r["spoken_text"])
+
+
 if __name__ == "__main__":
     unittest.main()

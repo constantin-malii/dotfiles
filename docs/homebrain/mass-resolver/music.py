@@ -122,6 +122,44 @@ def _types(settings, first):
     return order
 
 
+def _strip_edges(phrase):
+    """(stripped, had_playlist_suffix). Leading 'the ' and trailing ' playlist' removed, whole words,
+    on the clean() form. Used ONLY for the alias lookup and when the phrase ends in 'playlist' --
+    ordinary queries resolve unstripped so today's ranking is unchanged ("the wall")."""
+    c = clean(phrase)
+    had = False
+    if c == "playlist" or c.endswith(" playlist"):
+        c = c[:-len("playlist")].strip()
+        had = True
+    if c.startswith("the "):
+        c = c[len("the "):].strip()
+    return c, had
+
+
+def _lookup(ma, phrase, media_type, settings, rid, lib):
+    """One attempt for a phrase -> (hit, no_local_name, alias_key or None).
+    1) exact alias -> playlist only, exact target; 2) trailing 'playlist' -> stripped form, playlist
+    first; 3) otherwise today's resolution of the unstripped phrase."""
+    stripped, had_playlist = _strip_edges(phrase)
+    aliases = getattr(settings, "playlist_aliases", None) or {}
+    a = favorites.match_alias(aliases, stripped) if (aliases and stripped) else None
+    if a:
+        key, target = a
+        hit, nl = _resolve_type(ma, target, "playlist", settings, rid, lib, exact=True)
+        if hit or nl:
+            LOG.info("req=%s alias=%r -> %r", rid, key, target)
+        else:
+            LOG.info("req=%s alias=%r target=%r decision=REJECTED reason=alias-target-missing", rid, key, target)
+        return hit, nl, key
+    if had_playlist:
+        if not stripped:
+            return None, None, None
+        hit, nl = _resolve_all(ma, stripped, _types(settings, "playlist"), settings, rid, lib)
+        return hit, nl, None
+    hit, nl = _resolve_all(ma, phrase, _types(settings, media_type), settings, rid, lib)
+    return hit, nl, None
+
+
 class MusicCapability(capability.Capability):
     name = "music"
 
@@ -130,11 +168,20 @@ class MusicCapability(capability.Capability):
         if getattr(ma, "s", None) is None:
             ma.connect()
         try:
-            q = params.get("query")
+            q = params.get("query") or ""
             mt = params.get("media_type") or ""
-            hit, nl = _resolve_all(ma, q, _types(ctx.settings, mt), ctx.settings, params.get("_rid", ""), {})
+            rid = params.get("_rid", "")
+            lib = {}
+            note = None
+            hit, nl, alias = _lookup(ma, q, mt, ctx.settings, rid, lib)
+            if not hit and not nl and alias is None:
+                c = clean(q)
+                if c.startswith("shuffle "):        # shuffle is MR-08b; tolerate the word meanwhile
+                    hit, nl, alias = _lookup(ma, c[len("shuffle "):], mt, ctx.settings, rid, lib)
+                    if hit:
+                        note = "shuffle"
             dry_run = params.get("dry_run") or ctx.settings.dry_run
-            return {"ma": ma, "query": q, "hit": hit, "no_local": nl, "alias": None, "note": None,
+            return {"ma": ma, "query": q, "hit": hit, "no_local": nl, "alias": alias, "note": note,
                     "dry_run": dry_run}
         except Exception:
             ma.close()
