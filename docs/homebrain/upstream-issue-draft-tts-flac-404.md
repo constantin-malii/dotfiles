@@ -23,8 +23,17 @@
 An announcement produces **no audio at all** while the player continues to report `state: playing`
 indefinitely. MA decides the item is unplayable **91 ms after starting the stream** and skips it.
 
-The URL handed to MA is always an `.mp3`. MA then requests **`<same-id>.flac`** from HA's
-`tts_proxy`, which returns **404**, because HA only minted and cached the `.mp3`.
+The queue item MA skipped is a **`.flac`** URL, and HA's `tts_proxy` returns **404** for it.
+
+> ⚠️ **What we can and cannot show.** We did **not** capture the URL our caller passed on the
+> failing turn — our own log truncated it just short of the extension, which is why this took a
+> day to spot. Two readings therefore remain open and we are not claiming to have separated
+> them: **(a)** HA returned a `.flac` for that call and MA simply wrapped it, or **(b)** HA
+> returned an `.mp3`, as it has for every probe we have made since, and the `.flac` was derived
+> downstream. What points at (b) is that three earlier `.flac` 404s sit beside
+> `Playback announcement … <id>.mp3` lines (below) — but that is adjacency in a log, not proof
+> of the same request. Our caller now logs the URL it passes, so the next occurrence settles it
+> and we will follow up here.
 
 This happens only when MA **does not** break out of queue flow into a single-item stream. When it
 does break out, the `.mp3` is played as given and everything works.
@@ -33,8 +42,9 @@ does break out, the `.mp3` is played as given and everything works.
 
 1. Resolve a Piper TTS URL through HA: `POST /api/tts_get_url` → `http://<ha>/api/tts_proxy/<id>.mp3`.
 2. Call `music_assistant.play_media` on a Squeezelite player with that URL as `media_id`.
-3. Most of the time it plays. Intermittently (1 in ~7 here) it produces silence, and the log shows
-   the sequence below.
+3. Most of the time it plays. Intermittently — **once in 8** queue-flow starts across our logs,
+   and once in 7 announcements on the day we measured it — it produces silence, and the log
+   shows the sequence below.
 
 ### Expected behavior
 
@@ -49,8 +59,9 @@ microphone muted for 52 s while the code waited for a clip that was never going 
 
 ### Relevant logs
 
-The failing turn — note the whole thing is over in **176 ms**, and the extension is `.flac`
-although the URL supplied was `.mp3`:
+The failing turn. The item is judged unplayable **91 ms** after the stream starts and the
+stream is finished at **176 ms**. The extension is `.flac`
+(see the caveat above about what the caller supplied):
 
 ```
 16:01:50.897 INFO  [music_assistant.streams.audio] Start Queue Flow stream for Queue Ceiling Speakers - crossfade: disabled
@@ -105,12 +116,13 @@ Every `tts_proxy` URL MA logged, by extension:
 | `.mp3` | 28 | 0 |
 | `.flac` | 4 | **4** |
 
-### Home Assistant is not the variable
+### Home Assistant returns `.mp3` for every call we have tested
 
 `/api/tts_get_url` was probed 8 times against `tts.piper` — the exact text that failed, three texts
 that succeeded, two never-before-spoken sentences, and the failing text repeated. **All 8 returned
-`.mp3`.** The extension does not depend on the text, on caching, or on anything the caller controls.
-The `.flac` URL is constructed downstream of that.
+`.mp3`.** Within those probes the extension does not depend on the text, on caching, or on
+anything the caller controls. All 8 were taken after the failure, so they bound HA's behaviour
+now — not its behaviour on the failing call.
 
 ### It is not specific to one caller
 
