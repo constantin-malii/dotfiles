@@ -32,6 +32,14 @@ All endpoints are relative to the app base in SKILL.md (`/api/v3` Radarr/Sonarr,
    "sample" in name and size > ~300 MB (episodes) / 0.3 GB (movies); only benign rejection allowed:
    "Unable to determine if file is a sample" on a full-size file (mediainfo couldn't read runtime).
 5. Rescan can link a **sample** as a movie's file when a folder holds both — check `movieFile.size` afterwards.
+6. No queue row left (SAB history entry gone) → `downloadId` scan is impossible; scan the download **folder** instead.
+   Names Radarr can't parse (e.g. `LOTR.The.Two.Towers…`) come back "Unknown Movie": reprocess with the movieId.
+7. **"database is locked" under NAS load** (log: `MovieService failed while processing [MovieFileAddedEvent]`) leaves a
+   movie with a moviefile record (`GET moviefile?movieId=`) but `movieFileId=0` / `hasFile=false`. `RescanMovie`,
+   `RefreshMovie` and `PUT movie` with `movieFileId` do NOT fix it. Unmonitor the movie (else Radarr may grab a
+   duplicate), have the user delete the file in Radarr so it lands in the recycle bin (or move it out in File Station),
+   then ManualImport it back (re-add the movie first if it was deleted too) — verified fix. Keep NAS load low (SAB
+   paused) while doing heavy imports; the lock came from parallel downloads + Lidarr refreshes + API calls.
 
 ## Bringing existing files under an *arr (no moves)
 - Radarr: `GET parse?title=<folder>` → `GET movie/lookup?term="title year"`; accept only exact normalized title

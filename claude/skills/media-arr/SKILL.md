@@ -28,7 +28,8 @@ key). Never read keys out of an app's web page, never print them, never put them
 ## Tool
 `python -u scripts/arr.py --help` — `status`, `queue <app>`, `check-paths`, `movies --genre G --min-imdb X --have`,
 `get … [--out FILE]`, `poll`, and `send … --confirm` (the only write path). Always `-u`; start `poll <app>` beside any
-wait over ~2 min. After editing `arr.py`, run `python scripts/test_arr.py` (offline stub test).
+wait over ~2 min. Pass `send` bodies as `@file.json` — PowerShell mangles inline JSON quotes. After editing `arr.py`,
+run `python scripts/test_arr.py` (offline stub test).
 
 ## Before fixing any stuck queue: run `check-paths`
 Mass "import blocked / sample / root folder" items are nearly always systemic. Fix the cause first:
