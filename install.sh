@@ -9,12 +9,49 @@
 #   bash install.sh --config           # Only tool configs (lazygit, lazydocker, terminal)
 #   bash install.sh --only jira        # Only the jira skill + its scripts
 #   bash install.sh --list             # List available skills
+#
+# Optional skills (a `.optional` marker file in the skill dir, e.g. home-only media-arr) are skipped by
+# a full or --claude install unless requested; once installed they are kept up to date:
+#   bash install.sh --include media-arr            # full install + the optional media-arr skill
+#   bash install.sh --claude --include a,b         # comma-separated or repeated --include
 
 set -e
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLAUDE_DIR="$HOME/.claude"
 BACKUP_DIR="$CLAUDE_DIR/.backup-$(date +%Y%m%d-%H%M%S)"
+
+# Pull out --include <skill[,skill]> (allowed anywhere, repeatable); the rest is parsed below
+INCLUDE_SKILLS=()
+REST_ARGS=()
+while [[ $# -gt 0 ]]; do
+    if [[ "$1" == "--include" ]]; then
+        if [[ -z "$2" ]]; then
+            echo "ERROR: --include requires a skill name" >&2
+            exit 1
+        fi
+        IFS=',' read -ra _inc <<< "$2"
+        INCLUDE_SKILLS+=("${_inc[@]}")
+        shift 2
+    else
+        REST_ARGS+=("$1")
+        shift
+    fi
+done
+set -- "${REST_ARGS[@]}"
+for _s in "${INCLUDE_SKILLS[@]}"; do
+    if [[ ! -d "$REPO_DIR/claude/skills/$_s" ]]; then
+        echo "ERROR: Skill '$_s' (from --include) not found in $REPO_DIR/claude/skills/" >&2
+        exit 1
+    fi
+done
+
+is_optional() { [[ -f "$REPO_DIR/claude/skills/$1/.optional" ]]; }
+is_included() {
+    local s
+    for s in "${INCLUDE_SKILLS[@]}"; do [[ "$s" == "$1" ]] && return 0; done
+    return 1
+}
 
 # Parse arguments
 RUN_CLAUDE=false
@@ -41,7 +78,11 @@ elif [[ "$1" == "--list" ]]; then
     for skill_dir in "$REPO_DIR/claude/skills"/*/; do
         skill_name=$(basename "$skill_dir")
         desc=$(sed -n 's/^description: *//p' "$skill_dir/SKILL.md" 2>/dev/null | head -1)
-        echo "  $skill_name - $desc"
+        if is_optional "$skill_name"; then
+            echo "  $skill_name [optional: --include $skill_name] - $desc"
+        else
+            echo "  $skill_name - $desc"
+        fi
     done
     exit 0
 elif [[ "$1" == "--claude" ]]; then
@@ -56,7 +97,7 @@ elif [[ -z "$1" ]]; then
     RUN_CONFIG=true
 else
     echo "ERROR: Unknown option '$1'" >&2
-    echo "Usage: bash install.sh [--claude | --shell | --config | --only <skill> | --list]" >&2
+    echo "Usage: bash install.sh [--claude | --shell | --config | --only <skill> | --list] [--include <skill>]" >&2
     exit 1
 fi
 
@@ -147,8 +188,16 @@ if [[ "$RUN_CLAUDE" == true ]]; then
         chmod +x "$CLAUDE_DIR/scripts/"*.py 2>/dev/null || true
 
         echo "→ Copying skills..."
-        rsync -a --delete "$REPO_DIR/claude/skills/" "$CLAUDE_DIR/skills/" 2>/dev/null || \
-            cp -r "$REPO_DIR/claude/skills/"* "$CLAUDE_DIR/skills/" 2>/dev/null || true
+        for skill_dir in "$REPO_DIR/claude/skills"/*/; do
+            skill_name=$(basename "$skill_dir")
+            if is_optional "$skill_name" && ! is_included "$skill_name" && [[ ! -d "$CLAUDE_DIR/skills/$skill_name" ]]; then
+                echo "   skipping optional skill '$skill_name' (install with: --include $skill_name)"
+                continue
+            fi
+            mkdir -p "$CLAUDE_DIR/skills/$skill_name"
+            rsync -a --delete "$skill_dir" "$CLAUDE_DIR/skills/$skill_name/" 2>/dev/null || \
+                cp -r "$skill_dir." "$CLAUDE_DIR/skills/$skill_name/"
+        done
 
         echo "→ Copying agents..."
         mkdir -p "$CLAUDE_DIR/agents"
@@ -213,8 +262,10 @@ echo ""
 echo "=========================================="
 if [[ -n "$ONLY_SKILL" ]]; then
     echo "Skill '$ONLY_SKILL' installed!"
-    echo ""
-    echo "Test: bash $CLAUDE_DIR/scripts/${ONLY_SKILL}-rest-api.sh 2>&1 | head -5"
+    if [[ -f "$CLAUDE_DIR/scripts/${ONLY_SKILL}-rest-api.sh" ]]; then
+        echo ""
+        echo "Test: bash $CLAUDE_DIR/scripts/${ONLY_SKILL}-rest-api.sh 2>&1 | head -5"
+    fi
 elif [[ "$RUN_CLAUDE" == true ]] && [[ "$RUN_SHELL" == false ]] && [[ "$RUN_CONFIG" == false ]]; then
     echo "Claude Code files installed!"
 elif [[ "$RUN_SHELL" == true ]] && [[ "$RUN_CLAUDE" == false ]] && [[ "$RUN_CONFIG" == false ]]; then

@@ -197,6 +197,7 @@ cd ~/repos/dotfiles && bash install.sh        # installs everything
 #   bash install.sh --claude   # only Claude Code files (skills, commands, agents)
 #   bash install.sh --shell    # only shell configs (.bash_profile, .gitconfig, starship)
 #   bash install.sh --config   # only tool configs (lazygit, lazydocker, terminal)
+#   bash install.sh --include media-arr   # also install an optional (home-only) skill
 
 # 6. Create local identity
 printf '[user]\n\tname = Your Name\n\temail = you@email.com\n' > ~/.gitconfig.local
@@ -276,6 +277,13 @@ bash verify.sh
 3. Run `bash install.sh --only <skill>` to deploy
 4. Test: `bash ~/.claude/scripts/<script-name>.sh`
 5. Commit
+
+### Machine-specific (optional) skills
+
+A skill that only makes sense on some machines (e.g. `media-arr`, home NAS only) gets an `.optional`
+marker file in its directory. `install.sh` then skips it on a full/`--claude` install unless run with
+`--include <skill>`; once installed it is kept up to date. `verify.sh` reports a missing optional skill
+as OK, not as a failure. `bash install.sh --list` marks optional skills.
 
 ### Add a new agent
 

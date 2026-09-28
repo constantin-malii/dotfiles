@@ -159,6 +159,8 @@ for skill_dir in "$REPO_DIR/claude/skills"/*/; do
     skill_name=$(basename "$skill_dir")
     if [[ -d "$CLAUDE_DIR/skills/$skill_name" ]]; then
         ok "$skill_name skill"
+    elif [[ -f "$skill_dir/.optional" ]]; then
+        ok "$skill_name skill (optional, not installed — add with: bash install.sh --include $skill_name)"
     else
         fail "$skill_name skill not found in ~/.claude/skills/ — run: bash install.sh"
     fi

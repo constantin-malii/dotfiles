@@ -1,0 +1,2 @@
+Home-network-only skill (Synology NAS media stack). Not installed by default; opt in with:
+  bash install.sh --include media-arr
