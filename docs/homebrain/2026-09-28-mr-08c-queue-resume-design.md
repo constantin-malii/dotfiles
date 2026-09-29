@@ -318,6 +318,23 @@ clip kept.
   `play_index`; a predecessor clip positioned before the successor's current item is not deleted and stays
   recorded; the re-pause requires `playing`.
 
+**A3 — clip anchor follows the buffer (operator-directed 2026-09-28, after live check 4).** Live evidence
+(20:09, `.bak`-era build 60434fd): a paused station held a pending "Paused." clip at index 1 with
+`index_in_buffer=1`; the question's clip was inserted at index **2** (after the buffered item, not after the
+current item), so the anchored identity at current+1 missed it, the clip stayed unrecorded and voice "resume"
+fell back to URI replay. `enqueue: "play"` inserts after `index_in_buffer`.
+
+- **A3.1** The first clip's anchor (§4.3-4) is `index_in_buffer` when it is an integer consistent with the
+  capture snapshot (`current_index ≤ index_in_buffer < items`); otherwise `current_index` as before. Later clips
+  of the same turn keep anchoring on the previous clip's index. Identity stays exact and position-anchored: a
+  wrong anchor can only leave a clip unidentified, never record a wrong item.
+- **A3.2** The anchor used is logged with the capture (`anchor=<n> (buffer|current)`).
+- **A3.3 Tests:** a buffered prior clip (station restarted and re-paused, pending clip at index 1, buffer 1)
+  → the question's clip at index 2 is identified and recorded; voice "resume" then takes the queue path
+  (`play_index(T)`, both clips deleted, verified) — no URI replay. End-to-end playlist pause → question →
+  resume: same song resumes at its position, both clips deleted, the rest of the playlist intact. Invalid
+  buffer values fall back to `current_index`.
+
 ## 5. Radio and live streams
 
 Same path: the radio queue is `[station]`; the clip is inserted after it; resume is `play_index(<station
