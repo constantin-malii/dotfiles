@@ -176,6 +176,7 @@ class FakeQueue(object):
         self._restart_armed = False                  #   each `after` MA reads after the previous one
         self._plan = []
         self.ma_flip = False
+        self.on_ma_read = None                       # hook(result) after each successful queue_state reply
 
     def _f(self, name):
         seq = self.fail.get(name)
@@ -286,6 +287,8 @@ class FakeQueue(object):
         if self.buffer_mode != "missing":
             res["index_in_buffer"] = {"nonnumeric": str(b), "bool": True, "out_of_range": len(self.items),
                                       "below_current": self.current - 1}.get(self.buffer_mode, b)
+        if self.on_ma_read is not None:
+            self.on_ma_read(res)
         return {"result": res}
 
     def queue_items(self, offset, limit):
@@ -1681,7 +1684,38 @@ class RepauseWatchTakeoverTest(unittest.TestCase):
         # T appears paused, then playing: without the takeover rule the watch would pause it.
         q.restart_plan = [{"after": 0, "item": "t2", "state": "paused"},
                           {"after": 1, "item": "t2", "state": "playing"}]
-        ctx, cap, box = self.run_with_midwatch(q, lambda c, x: c.note_playback(x, ZONE, "library://track/2"))
+        def act(c, x):
+            box_ev["at"] = len(q.events)
+            c.note_playback(x, ZONE, "library://track/2")
+        box_ev = {}
+        ctx, cap, box = self.run_with_midwatch(q, act)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        # A2.2a "stop at once": no further MA read once the record is no longer this turn's.
+        self.assertEqual([e for e in q.events[box_ev["at"]:] if e == ("ma",)], [])
+
+    def test_takeover_during_the_read_that_shows_t_playing_skips_the_pause(self):
+        # The record changes while the very read reporting T `playing` is in flight: only the check made
+        # immediately before the pause can see it.
+        q = self.paused_tracks()
+        q.restart_plan = [{"after": 1, "item": "t2", "state": "playing"}]
+        ctx = ctx_for(q)
+        cap = new_cap()
+        box = {"watching": False, "fired": False}
+        real = cap._queue_not_playing_cleanup
+
+        def watch(*a, **k):
+            box["watching"] = True
+            return real(*a, **k)
+        cap._queue_not_playing_cleanup = watch
+
+        def on_read(res):
+            cur = (res.get("current_item") or {}).get("queue_item_id")
+            if box["watching"] and not box["fired"] and cur == "t2" and res.get("state") == "playing":
+                box["fired"] = True
+                cap.note_playback(ctx, ZONE, "library://track/2")
+        q.on_ma_read = on_read
+        say(cap, ctx)
+        self.assertTrue(box["fired"])
         self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
 
     def test_voice_resume_mid_watch_is_not_undone(self):
