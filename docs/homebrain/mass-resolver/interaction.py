@@ -2317,7 +2317,7 @@ class InteractionCapability(capability.Capability):
         if cap is not None and qm["target"] is not None and cap["item"] == qm["target"]["item"]:
             qm["target"] = dict(qm["target"], pos=cap["pos"])
 
-    def _queue_not_playing_cleanup(self, ctx, rid, zone, qm, superseded):
+    def _queue_not_playing_cleanup(self, ctx, rid, zone, qm, superseded, my_gen=None):
         """Design 4.8 A1.5 as amended by A2.2: the queue was NOT playing at capture (the reply to "pause", or a
         question while paused/idle). After the clip, WATCH the queue for up to REPAUSE_WATCH_S at say_poll_ms --
         MA restarts a paused station by itself ~1 s after the clip (spike 4 / 3.3-3), later than one read:
@@ -2327,8 +2327,22 @@ class InteractionCapability(capability.Capability):
             deletes A1.2 permits, verified.
         When the watch ends with nothing to pause, the last read decides: on a recorded clip (idle on it,
         3.3-2) or on T not playing -> pending record; anything else -> permitted deletes. Each read with T
-        current refreshes the pending position (A2.3). Owns this turn's deletes (_queue_finish only books)."""
-        if superseded():
+        current refreshes the pending position (A2.3). Owns this turn's deletes (_queue_finish only books).
+
+        A2.2a: "superseded" here means a newer turn took over -- the reply generation advanced, OR (with
+        `my_gen`) the zone's queue record is no longer this turn's: a voice "resume" or new playback
+        (note_playback) cleared or replaced it. A watch that paused T after that would undo the user's resume.
+        A current item that is a reply clip we did not identify is still ours and does not end the watch."""
+        def taken_over():
+            if superseded():
+                return True
+            if my_gen is None:
+                return False
+            with self._lock:
+                rec = self._queue_targets.get(zone)
+                return rec is None or rec.get("gen") != my_gen
+
+        if taken_over():
             return
         qm["cleaned"] = True
         t = qm["target"]
@@ -2340,8 +2354,8 @@ class InteractionCapability(capability.Capability):
             last = None
             waited = 0.0
             while True:
-                if superseded():
-                    LOG.info("SAY req=%s zone=%s re-pause watch stopped: superseded", rid, zone)
+                if taken_over():
+                    LOG.info("SAY req=%s zone=%s re-pause watch stopped: a newer turn took over", rid, zone)
                     return
                 q = None
                 try:
@@ -2352,18 +2366,22 @@ class InteractionCapability(capability.Capability):
                     q = None
                 if q is not None:
                     last = q
-                    cur = (q.get("current_item") or {}).get("queue_item_id")
+                    ci = q.get("current_item") or {}
+                    cur = ci.get("queue_item_id")
+                    cur_uri = (ci.get("media_item") or {}).get("uri") or ci.get("uri") or ""
                     if t is not None and cur == t["item"]:
                         self._refresh_target_pos(qm, q)
                         if q.get("state") == "playing":
-                            if superseded():
+                            if taken_over():            # immediately before the pause (A2.2a)
+                                LOG.info("SAY req=%s zone=%s re-pause skipped: a newer turn took over", rid, zone)
                                 return
                             LOG.info("SAY req=%s zone=%s queue restarted item %s by itself after the reply "
                                      "(watch %.1fs); pausing it again (clips stay pending %s)", rid, zone, cur,
                                      waited, qm["clips"])
                             self._say_call(ctx, rid, zone, "media_player", "media_pause", {"entity_id": zone})
                             return
-                    elif cur is not None and cur not in qm["clips"]:
+                    elif (cur is not None and cur not in qm["clips"]
+                          and not is_reply_clip_uri(cur_uri)):   # an unidentified reply clip is still ours
                         LOG.info("SAY req=%s zone=%s re-pause watch: another item %s is current; no pause",
                                  rid, zone, cur)
                         break
@@ -2385,7 +2403,7 @@ class InteractionCapability(capability.Capability):
                          rid, zone, cur)
                 return
             n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qid, qm["clips"], "after reply, not playing",
-                                       target=t, stop=superseded)
+                                       target=t, stop=taken_over)
             qm["deleted"] += n
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s clip cleanup (not playing) failed (%r)", rid, zone, e)
@@ -2880,7 +2898,8 @@ class InteractionCapability(capability.Capability):
                     replayed = self._queue_resume(ctx, rid, zone, qm, source_id, call_timeout,
                                                   superseded=superseded)
                 elif not was_playing and not superseded():
-                    self._queue_not_playing_cleanup(ctx, rid, zone, qm, superseded)     # design 4.8 A1.5
+                    self._queue_not_playing_cleanup(ctx, rid, zone, qm, superseded,
+                                                    my_gen=my_gen)                   # design 4.8 A1.5/A2.2
                 if not superseded():
                     # A turn superseded after the clip loop (e.g. during the volume restore) must
                     # NOT finish here -- its clips belong to whichever successor captured next; the

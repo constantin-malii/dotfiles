@@ -1638,11 +1638,72 @@ class ReviewAmendmentA2Test(unittest.TestCase):
         ctx = ctx_for(q)
         cap = new_cap()
         cap._queue_targets[ZONE] = {"gen": 9, "rid": "ridB", "target": None, "clips": ["c2"], "live": True}
-        qm = qm_for(["c1"])
-        cap._queue_superseded_exit(ctx, "ridA", ZONE, qm, 3)
+        # A target at t2 puts the permission window over c1 (index 2), so it is index_in_buffer (3) that
+        # refuses the delete -- not the window missing it.
+        qm = qm_for(["c1"], target={"item": "t2", "index": 1, "pos": 47.0, "duration": 240.0, "seekable": True})
+        with self.assertLogs("resolver", "INFO") as lg:
+            cap._queue_superseded_exit(ctx, "ridA", ZONE, qm, 3)
+        self.assertTrue(any("clip c1 kept" in m and "within the buffer" in m for m in lg.output))
         self.assertEqual(calls_of(q, "delete"), [])
         self.assertEqual(qm["clips"], ["c1"])
         self.assertIn("c1", q.ids())
+
+
+class RepauseWatchTakeoverTest(unittest.TestCase):
+    """Design 4.8 A2.2a: a newer turn takes over the zone when the reply generation advances OR the zone's queue
+    record is no longer this turn's (voice "resume", note_playback). The watch must then never pause."""
+
+    def paused_tracks(self):
+        return FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+
+    def run_with_midwatch(self, q, action):
+        ctx = ctx_for(q)
+        box = {"watching": False, "fired": False}
+
+        def hook(secs):
+            if box["watching"] and not box["fired"]:
+                box["fired"] = True
+                box["calls_at"] = len(ctx.ha.calls)
+                action(cap, ctx)
+        cap, sl = rec_cap(hook)
+        real = cap._queue_not_playing_cleanup
+
+        def watch(*a, **k):
+            box["watching"] = True
+            return real(*a, **k)
+        cap._queue_not_playing_cleanup = watch
+        say(cap, ctx)
+        self.assertTrue(box["fired"])
+        return ctx, cap, box
+
+    def test_note_playback_mid_watch_stops_the_watch(self):
+        q = self.paused_tracks()
+        # T appears paused, then playing: without the takeover rule the watch would pause it.
+        q.restart_plan = [{"after": 0, "item": "t2", "state": "paused"},
+                          {"after": 1, "item": "t2", "state": "playing"}]
+        ctx, cap, box = self.run_with_midwatch(q, lambda c, x: c.note_playback(x, ZONE, "library://track/2"))
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+
+    def test_voice_resume_mid_watch_is_not_undone(self):
+        q = self.paused_tracks()
+        q.restart_plan = [{"after": 0, "item": "t2", "state": "paused"}]
+        ctx, cap, box = self.run_with_midwatch(
+            q, lambda c, x: capability.run(c, x, {"mode": "resume"}, "ridR"))
+        later = ctx.ha.calls[box["calls_at"]:]
+        self.assertIn(("media_player", "media_play", {"entity_id": ZONE}), later)   # the user's resume
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])     # ...never undone
+        self.assertEqual(q.state, "playing")
+
+    def test_unidentified_reply_clip_does_not_end_the_watch(self):
+        q = self.paused_tracks()
+        q.first_wrapper = "odd://"                     # the clip is current but not identified / recorded
+        q.restart_item = "t2"; q.restart_delay_reads = 3
+        ctx = ctx_for(q)
+        cap = new_cap()
+        r = say(cap, ctx)
+        self.assertEqual(r["metadata"]["clips_unidentified"], 1)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"],
+                         [("media_player", "media_pause", {"entity_id": ZONE})])
 
 
 if __name__ == "__main__":
