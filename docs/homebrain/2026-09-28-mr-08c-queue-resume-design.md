@@ -327,7 +327,8 @@ fell back to URI replay. `enqueue: "play"` inserts after `index_in_buffer`.
 - **A3.1** The first clip's anchor (§4.3-4) is `index_in_buffer` when it is an integer consistent with the
   capture snapshot (`current_index ≤ index_in_buffer < items`); otherwise `current_index` as before. Later clips
   of the same turn keep anchoring on the previous clip's index. Identity stays exact and position-anchored: a
-  wrong anchor can only leave a clip unidentified, never record a wrong item.
+  wrong anchor can leave a clip unidentified, and can never record a non-reply item (a leftover reply clip
+  with the same cached TTS URL at anchor+1 is the only mis-record, the same exposure as before A3).
 - **A3.2** The anchor used is logged with the capture (`anchor=<n> (buffer|current)`).
 - **A3.3 Tests:** a buffered prior clip (station restarted and re-paused, pending clip at index 1, buffer 1)
   → the question's clip at index 2 is identified and recorded; voice "resume" then takes the queue path
