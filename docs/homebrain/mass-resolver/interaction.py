@@ -78,7 +78,21 @@ def parse_queue_capture(reply, now):
     return {"item": qid, "index": q.get("current_index"), "pos": pos, "duration": dur,
             "seekable": mi.get("media_type") == "track" and dur > 0,
             "uri": mi.get("uri") or ci.get("uri") or "", "state": q.get("state"),
-            "extrapolated": extrapolated}, None
+            "extrapolated": extrapolated,
+            "buffer": q.get("index_in_buffer"), "items": q.get("items")}, None
+
+
+def capture_anchor(cap):
+    """Design 4.8 A3.1: where the first reply clip lands. MA's enqueue=play inserts after the BUFFERED item, not
+    after the current one (live check 4: a pending clip buffered at 1 pushed the next clip to 2), so the anchor
+    is index_in_buffer when it is an integer consistent with the capture (current_index <= it < items), else
+    current_index as before. A wrong anchor can only leave a clip unidentified, never record a wrong item.
+    -> (anchor, "buffer" | "current")."""
+    cur = cap.get("index") if _is_int(cap.get("index")) else 0
+    ib, total = cap.get("buffer"), cap.get("items")
+    if _is_int(ib) and _is_int(total) and cur <= ib < total:
+        return ib, "buffer"
+    return cur, "current"
 
 
 def clip_uri_of(item):
@@ -1968,15 +1982,16 @@ class InteractionCapability(capability.Capability):
                 LOG.warning("SAY req=%s zone=%s queue capture unavailable (%r); legacy replay", rid, zone, e)
                 return None
             qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [], "unrecorded": [],
-                  "anchor": cap["index"] or 0, "unidentified": 0, "resume": "none", "seeked": False,
+                  "anchor": capture_anchor(cap)[0], "unidentified": 0, "resume": "none", "seeked": False,
                   "deleted": 0, "inherited_from": None, "cleaned": False}
             # Adopt and publish in ONE _lock hold, before any enqueue: a superseded turn's cleanup re-reads
             # this record's clips before each delete, so an inherited clip must be visible as ours the moment
             # the predecessor's record stops being its own (design 4.5). Pure bookkeeping: no MA call inside.
             self._queue_adopt_target(qm, rid, zone, my_gen)
             LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f (extrapolated %.1fs) seekable=%s "
-                     "stale_reply_clips=%d", rid, zone, cap["item"], cap["index"], cap["pos"], cap["extrapolated"],
-                     cap["seekable"], stale)
+                     "stale_reply_clips=%d anchor=%d (%s) index_in_buffer=%s", rid, zone, cap["item"], cap["index"],
+                     cap["pos"], cap["extrapolated"], cap["seekable"], stale, qm["anchor"], capture_anchor(cap)[1],
+                     cap.get("buffer"))
             if qm["clips"]:
                 # A1.7 sweep: recorded clips A1.2 permits in this read are deleted (verified); the rest stay.
                 # Permitted clips lie after the buffer, which is at or after the current index, so the capture's

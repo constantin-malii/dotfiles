@@ -194,8 +194,9 @@ class FakeQueue(object):
     def _insert_clip(self, uri):
         self.n += 1
         wrapper, self.first_wrapper = (self.first_wrapper or "builtin://radio/"), None
-        self.items.insert(self.current + 1, clip_item("c%d" % self.n, uri, wrapper))
-        self.current += 1; self.state = "playing"; self.clip_reads = self.clip_play_reads
+        at = max(self.current, self.real_buffer()) + 1   # A3: MA inserts after the BUFFERED item
+        self.items.insert(at, clip_item("c%d" % self.n, uri, wrapper))
+        self.current = at; self.state = "playing"; self.clip_reads = self.clip_play_reads
         self.clip_seen = False; self.clip_seen_count = 0
         self.buffer = None                           # MA is playing the clip: the buffer is at it
         self._script_armed = self.ha_script is not None
@@ -1738,6 +1739,85 @@ class RepauseWatchTakeoverTest(unittest.TestCase):
         self.assertEqual(r["metadata"]["clips_unidentified"], 1)
         self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"],
                          [("media_player", "media_pause", {"entity_id": ZONE})])
+
+
+class BufferAnchorTest(unittest.TestCase):
+    """Design 4.8 A3 (live check 4, 20:09): enqueue=play inserts after index_in_buffer, so the first clip's anchor
+    is the buffered index when it is consistent with the capture, else current_index."""
+
+    def replaces(self, q):
+        return calls_of(q, "replace")
+
+    def test_buffered_prior_clip_station_question_then_resume_takes_the_queue_path(self):
+        # A3.3 case 1: [T, C1], T current and paused, the pending "Paused." clip C1 buffered at index 1.
+        q = FakeQueue([station(), clip_item("c1", CLIP)], current=0, state="paused", elapsed=0.0)
+        q.buffer = 1
+        q.n = 1                                        # the next inserted clip is c2
+        ctx = ctx_for(q)
+        cap = new_cap()
+        cap._queue_targets[ZONE] = {"gen": 1, "rid": "ridP", "live": False, "clips": ["c1"],
+                                    "target": {"item": "st1", "index": 0, "pos": 0.0, "duration": 0.0,
+                                               "seekable": False, "uri": "library://radio/4"}}
+        with cap._lock:
+            cap._say_gen[ZONE] = 1
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx, uri=CLIP2, rid="ridQ")
+        self.assertEqual(q.ids(), ["st1", "c1", "c2"])                   # inserted after the buffered clip
+        self.assertEqual(r["metadata"]["clips_unidentified"], 0)
+        self.assertTrue(any("anchor=1 (buffer)" in m for m in lg.output))
+        self.assertEqual(sorted(cap._queue_targets[ZONE]["clips"]), ["c1", "c2"])
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "ridR")
+        self.assertEqual(r2["metadata"]["how"], "queue_pending")
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "st1", 0)])
+        self.assertEqual(sorted(c[1] for c in calls_of(q, "delete")), ["c1", "c2"])
+        self.assertEqual(q.ids(), ["st1"])                               # verified: both gone
+        self.assertEqual(self.replaces(q), [])                           # no URI replay
+        self.assertNotIn(ZONE, cap._queue_targets)
+
+    def test_playlist_pause_question_resume_end_to_end(self):
+        # A3.3 case 2: a playing playlist has the next track buffered (index_in_buffer = current + 1).
+        q = FakeQueue([track(1, 240), track(2), track(3)], current=0, state="playing", elapsed=60.0)
+        q.buffer = 1
+        ctx = ctx_for(q)
+        cap = new_cap()
+        capability.run(cap, ctx, {"mode": "duck"}, "ridP")
+        capability.run(cap, ctx, {"mode": "pause"}, "ridP")
+        rp = say(cap, ctx, rid="ridP")                 # "Paused." -> c1 after the buffered s2; MA idles on it
+        self.assertEqual(q.ids(), ["t1", "t2", "c1", "t3"])
+        self.assertEqual(rp["metadata"]["clips_unidentified"], 0)
+        self.assertEqual(calls_of(q, "play_index"), [])
+        rq = say(cap, ctx, uri=CLIP2, rid="ridQ")      # the question: inherits, c2 after c1
+        self.assertEqual(q.ids(), ["t1", "t2", "c1", "c2", "t3"])
+        self.assertEqual(rq["metadata"]["clips_unidentified"], 0)
+        self.assertEqual(sorted(cap._queue_targets[ZONE]["clips"]), ["c1", "c2"])
+        rr = capability.run(cap, ctx, {"mode": "resume"}, "ridR")
+        self.assertEqual(rr["metadata"]["how"], "queue_pending")
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "t1", 60)])      # the captured position
+        self.assertEqual(sorted(c[1] for c in calls_of(q, "delete")), ["c1", "c2"])
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+        self.assertEqual(q.cur()["queue_item_id"], "t1")
+        self.assertEqual(self.replaces(q), [])
+
+    def test_invalid_buffer_anchors_on_the_current_index(self):
+        # A3.3 case 3: the REPORTED index_in_buffer is unusable; MA really inserts after the current item.
+        for mode in ("missing", "nonnumeric", "bool", "below_current", "out_of_range"):
+            with self.subTest(mode=mode):
+                q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+                q.buffer_mode = mode
+                with self.assertLogs("resolver", "INFO") as lg:
+                    r = say(new_cap(), ctx_for(q))
+                self.assertTrue(any("anchor=2 (current)" in m for m in lg.output))
+                self.assertEqual(r["metadata"]["clips_unidentified"], 0)
+
+    def test_buffer_equal_to_current_is_unchanged(self):
+        # A3.3 case 4 (regression): the common playing case, buffer == current.
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        self.assertTrue(any("anchor=2 (buffer)" in m for m in lg.output))
+        self.assertEqual(r["metadata"]["clips_unidentified"], 0)
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "t3", 47)])
+        self.assertEqual(q.ids(), ORIG8)
 
 
 if __name__ == "__main__":
