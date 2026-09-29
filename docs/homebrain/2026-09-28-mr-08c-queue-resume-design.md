@@ -292,6 +292,27 @@ no `play_index`; paused-at-start idle on C → no pause, pending record; reply/r
 `index_in_buffer` missing / non-numeric / out of range / below `current_index` → no delete, reason logged,
 clip kept.
 
+**A2 — review amendment (operator-approved 2026-09-28).** Supersedes the conflicting parts of A1.2, A1.5 and A1.6.
+
+- **A2.1 Two kinds of read.** The *permission* read (A1.2) is `queue_state` plus a small item window starting at
+  T's index (limit = number of recorded clips + 5); it is what the first delete waits on. The *verification*
+  read (A1.3) is the whole-queue read. The first permitted delete after `play_index` must be sent before any
+  whole-queue read and before the confirmation poll.
+- **A2.2 Re-pause watch (replaces A1.5's single read).** After the clip ends, watch for up to **3 s** at
+  `say_poll_ms`. Pause (`media_pause`) only when the **exact original item T is current and `playing`**. Stop
+  immediately, without pausing, when the turn is superseded or when any item other than T or a recorded clip
+  becomes current. When the watch ends with nothing to pause, the A1.5 outcomes apply to the last read (idle on
+  C → pending record; other item → only permitted deletes, verified).
+- **A2.3 Fresh position.** Whenever a pending resume is created or refreshed from a read in which T is the
+  current item, its position is taken from that read (extrapolated per §4.3-1). On voice "resume", when T is
+  current, the seek comes from the live read, never from the stored position.
+- **A2.4 Tests added:** first delete precedes the buffer advance (SAY path and pending-resume path, with the
+  buffer advancing right after the first post-`play_index` read); the watch pauses when the restart arrives
+  N reads late, never pauses when another item becomes current, stops on supersede; resume after the user
+  un-paused/re-paused T seeks from the live position; superseded check directly before the buffer-reset
+  `play_index`; a predecessor clip positioned before the successor's current item is not deleted and stays
+  recorded; the re-pause requires `playing`.
+
 ## 5. Radio and live streams
 
 Same path: the radio queue is `[station]`; the clip is inserted after it; resume is `play_index(<station
