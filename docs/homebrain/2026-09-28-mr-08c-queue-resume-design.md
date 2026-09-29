@@ -63,6 +63,27 @@ Queue before: 8 songs, idle. Queue after: the same 8 songs, clip deleted, left p
    and read back `builtin://radio/http://192.168.1.104:8123/api/tts_proxy/<id>.mp3`. The resolver plays
    the normalised internal URL, so exact equality is against the URL `_say` played.
 
+### 3.3 Spike 4 (2026-09-28, operator-approved live experiment after live checks 3–4 failed, throwaway)
+
+Queue state sampled every 250 ms from HA and MA while a short reply clip was inserted with `enqueue: "play"`.
+Player restored afterwards (idle, volume 0.46, costa mix, no clips). Queue settings at the time: shuffle on,
+repeat `all`; `flow_mode` was observed both false and true on the same day (MA switches it itself).
+
+1. **Flip (playlist, both paused-settled and not):** ~1.3 s after the clip started, **both** HA and MA reported
+   the interrupted song as current (HA even `playing`) for ~0.75 s, then the clip again. Waiting for MA to
+   confirm the pause before enqueueing did not prevent it. Two consecutive "other item" readings plus the MA
+   cross-check both read this flip as the clip's end — the live 18:32 early resume.
+2. **True end of a clip in a playlist:** HA goes `idle` with the clip as the media id, then MA goes `idle` with
+   the clip current. The song does **not** restart by itself.
+3. **Paused station:** MA reported the queue `paused` for the whole (audible) clip, then ~1 s after the clip
+   **restarted the station by itself** — live check 4's "resumed by itself".
+4. **Deletes:** succeeded right after `play_index(T)` while the queue was still idle; returned success but
+   **did nothing** for the current item and for the clip sitting next behind the playing station.
+5. MA 2.9 exposes `index_in_buffer` in `player_queues/get`; its delete guard ignores items at or below it
+   (reporting success). This explains every observation in 4 (the current item is always within the buffer;
+   `play_index` resets the buffer to T). The spike did not log the value, so the implementation logs it at
+   every cleanup step and never relies on it alone (§4.8).
+
 ## 4. Design
 
 ### 4.1 Invariants (operator-stated, binding)
@@ -200,6 +221,76 @@ When a queue-mode turn does not resume but captured a real item — or its resum
 Duck/restore, volume ownership, mic/announce gating (AN-01, still disabled), barge-in generations, the
 fresh-playback skip, the stopped-turn guard, music/radio initial play (`maconn.play`, replace), and the entire
 legacy path.
+
+### 4.8 Amendment A1 — finish rule, buffer-aware cleanup, paused-at-start (operator-approved 2026-09-28)
+
+Supersedes the finish-detection note in §4.3-3, the MA finish cross-check added after live check 2, the
+deletion rule in §4.3-8, and §4.6 step 1–2 where they conflict. Queue mode only; the legacy path is unchanged.
+Evidence: §3.3.
+
+**Terms.** T = the interrupted (target) queue item, C = a recorded reply clip, both by `queue_item_id`. A
+*read* = one `queue_state` (state, `current_item.queue_item_id`, `current_index`, `index_in_buffer`) plus the
+item list around the positions involved.
+
+**A1.1 Finish rule (queue mode).**
+- HA `state` not `playing` (idle, paused, off, …) → the clip has ended, immediately (existing two-reading rule).
+- HA `playing` with a **different, non-empty** media id → counts as the end only after it has persisted
+  **≥ 1.5 s continuously** (`say_queue_other_item_s`, default 1.5); any reading back on the clip resets it.
+- The empty-media-id grace, the finish timeout and the turn deadline are unchanged.
+- The MA cross-check (`clip_still_current`) is removed.
+
+**A1.2 When a delete is permitted.** C may be deleted only when one read shows all of: C is in the item list;
+C is not the current item; `index_in_buffer` is an integer consistent with the snapshot
+(`0 ≤ index_in_buffer < items`, and `index_in_buffer ≥ current_index` when both are known); and C's index
+**> `index_in_buffer`**. **Fail closed:** if `index_in_buffer` is missing, non-numeric, or inconsistent with
+the item-list snapshot, do not delete — log the reason and keep C recorded for the next sweep.
+
+**A1.3 Deletes are verified, never trusted.** After every delete call, whatever it returned, re-read the item
+list. C counts as deleted only if it is absent; otherwise it stays recorded. A reply that says "error" while
+the item is gone counts as deleted.
+
+**A1.4 Resume path** (queue was playing at capture):
+1. Clip end detected per A1.1.
+2. `play_index(T, seek)` per §4.4 (this resets MA's buffer to T).
+3. Immediately: read; delete each C that A1.2 permits; verify per A1.3.
+4. **Retry trigger:** a C is still present after verification **and** the read has not yet shown MA applying
+   the jump (current ≠ T, or `index_in_buffer` ≠ T's index). Re-read at **+1 s and +2 s** after `play_index`;
+   delete whenever A1.2 permits; verify. No retries once every C is gone or MA shows current = T with the
+   buffer at T. Retries stop if the turn is superseded.
+5. **Buffer-reset retry (once):** if after +2 s a C is still present, lies **after** T, and is **within** the
+   buffer (index ≤ `index_in_buffer`), it would play when T ends. Issue one more `play_index(T, seek =
+   T's current position)` and immediately delete + verify. If C still survives: log WARNING `clip <id> will
+   play after the current item`, keep it recorded, no further attempts. A C lying **before** T's position is
+   left recorded for the next sweep.
+
+**A1.5 Queue not playing at capture** (the reply to "pause", or a question while paused). After the clip ends,
+one read decides:
+- current item **is exactly T** and the queue is `playing` (MA restarted it, §3.3-3) → `media_pause`; C
+  (inside the buffer) stays in the pending-resume record;
+- current item **is C** (idle on the clip, §3.3-2) → no pause; C stays in the pending-resume record;
+- anything else (newer user playback) → no pause, no `play_index`; only delete a C that A1.2 permits in that
+  read, verified.
+The re-pause is issued only by the turn that owns the zone (not superseded) and only on that exact-T check.
+
+**A1.6 Resume from a pending record.** A voice "resume" with a pending record whose clips are still present
+uses A1.4 steps 2–5 (`play_index(T, seek)` then delete), instead of un-pausing in place, so C is deleted in the
+window MA allows. With no clips left, §4.6 is unchanged.
+
+**A1.7 Next-turn sweep.** At the next turn's capture, every recorded clip that A1.2 permits in that read is
+deleted and verified; the rest stay recorded.
+
+**A1.8 Logging.** Every cleanup read logs `current_index`, `index_in_buffer` and each C's index, so live checks
+confirm or refute the buffer rule.
+
+**A1.9 Tests** (fake queue models MA: delete of an item ≤ `index_in_buffer` or of the current item returns
+success and does nothing; `play_index` sets current = T and the buffer to T's index, optionally a few reads
+late; once playback starts the buffer advances to the next item): the 0.75 s flip ends only at idle; ≥ 1.5 s
+persistence ends; delete no-op not counted, retries while the buffer reset lags; loaded-as-next → exactly one
+buffer-reset retry, with a still-failing variant (WARNING, recorded, no second attempt); paused-at-start
+station restart → pause + record, resume via `play_index` deletes C; paused-at-start newer playback → no pause,
+no `play_index`; paused-at-start idle on C → no pause, pending record; reply/reality mismatch both ways;
+`index_in_buffer` missing / non-numeric / out of range / below `current_index` → no delete, reason logged,
+clip kept.
 
 ## 5. Radio and live streams
 
