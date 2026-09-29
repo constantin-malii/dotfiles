@@ -1820,5 +1820,34 @@ class BufferAnchorTest(unittest.TestCase):
         self.assertEqual(q.ids(), ORIG8)
 
 
+class BufferAnchorReviewMinorsTest(unittest.TestCase):
+    """A3 review minors: the UNIDENTIFIED warning carries the live indices; a playing question with the next track
+    already buffered."""
+
+    def test_unidentified_warning_logs_live_current_index_and_buffer(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1)
+        q.first_wrapper = "odd://"
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx_for(q), uris=[CLIP, CLIP2])
+        warn = [m for m in lg.output if "queue_item UNIDENTIFIED" in m]
+        self.assertEqual(len(warn), 1)
+        self.assertIn("anchor=1 current_index=2 index_in_buffer=2", warn[0])
+
+    def test_playing_question_with_the_next_track_buffered(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        q.buffer = 3                                   # t4 already buffered
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx_for(q))
+        self.assertTrue(any("anchor=3 (buffer)" in m for m in lg.output))
+        self.assertEqual(r["metadata"]["clips_unidentified"], 0)
+        self.assertEqual(calls_of(q, "enqueue"), [("enqueue", CLIP)])
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "t3", 47)])
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])  # c1 landed at 4, after the buffered t4
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)           # verified
+        self.assertEqual(q.ids(), ORIG8)
+        self.assertEqual(q.cur()["queue_item_id"], "t3")
+        self.assertEqual(calls_of(q, "replace"), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,8 +86,9 @@ def capture_anchor(cap):
     """Design 4.8 A3.1: where the first reply clip lands. MA's enqueue=play inserts after the BUFFERED item, not
     after the current one (live check 4: a pending clip buffered at 1 pushed the next clip to 2), so the anchor
     is index_in_buffer when it is an integer consistent with the capture (current_index <= it < items), else
-    current_index as before. A wrong anchor can only leave a clip unidentified, never record a wrong item.
-    -> (anchor, "buffer" | "current")."""
+    current_index as before. Identity stays exact (URL, or TTS name) at anchor + 1, so a wrong anchor can leave
+    a clip unidentified and can never record a non-reply item; the only possible mis-record is a leftover reply
+    clip with the same cached TTS URL sitting at anchor + 1. -> (anchor, "buffer" | "current")."""
     cur = cap.get("index") if _is_int(cap.get("index")) else 0
     ib, total = cap.get("buffer"), cap.get("items")
     if _is_int(ib) and _is_int(total) and cur <= ib < total:
@@ -1981,8 +1982,9 @@ class InteractionCapability(capability.Capability):
             except Exception as e:
                 LOG.warning("SAY req=%s zone=%s queue capture unavailable (%r); legacy replay", rid, zone, e)
                 return None
+            anchor, anchor_src = capture_anchor(cap)
             qm = {"queue_id": queue_id, "cap": cap, "target": None, "clips": [], "played": [], "unrecorded": [],
-                  "anchor": capture_anchor(cap)[0], "unidentified": 0, "resume": "none", "seeked": False,
+                  "anchor": anchor, "unidentified": 0, "resume": "none", "seeked": False,
                   "deleted": 0, "inherited_from": None, "cleaned": False}
             # Adopt and publish in ONE _lock hold, before any enqueue: a superseded turn's cleanup re-reads
             # this record's clips before each delete, so an inherited clip must be visible as ours the moment
@@ -1990,7 +1992,7 @@ class InteractionCapability(capability.Capability):
             self._queue_adopt_target(qm, rid, zone, my_gen)
             LOG.info("SAY req=%s zone=%s queue capture: item=%s idx=%s pos=%.1f (extrapolated %.1fs) seekable=%s "
                      "stale_reply_clips=%d anchor=%d (%s) index_in_buffer=%s", rid, zone, cap["item"], cap["index"],
-                     cap["pos"], cap["extrapolated"], cap["seekable"], stale, qm["anchor"], capture_anchor(cap)[1],
+                     cap["pos"], cap["extrapolated"], cap["seekable"], stale, anchor, anchor_src,
                      cap.get("buffer"))
             if qm["clips"]:
                 # A1.7 sweep: recorded clips A1.2 permits in this read are deleted (verified); the rest stay.
@@ -2077,7 +2079,7 @@ class InteractionCapability(capability.Capability):
         the next clip of the same turn."""
         ma = None
         qid, idx, why = None, None, None
-        cur_idx, cur_is_clip = None, False
+        cur_idx, cur_is_clip, cur_buf = None, False, None
         try:
             ma = self._ma_open(ctx)
             s = ma.queue_state(qm["queue_id"])
@@ -2085,6 +2087,7 @@ class InteractionCapability(capability.Capability):
                 q = s.get("result") or {}
                 ci = q.get("current_item") or {}
                 cur_idx = q.get("current_index")
+                cur_buf = q.get("index_in_buffer")
                 cur_is_clip = is_reply_clip_uri((ci.get("media_item") or {}).get("uri") or ci.get("uri") or "")
                 if cur_idx == qm["anchor"] + 1 and ci.get("queue_item_id"):
                     qid, idx, why = anchored_clip([ci], cur_idx, qm["anchor"], played_uri)
@@ -2098,9 +2101,11 @@ class InteractionCapability(capability.Capability):
             self._ma_close(ma)
         if qid is None:
             qm["unidentified"] += 1
+            searched = qm["anchor"]                  # log the anchor that was searched, not the updated one
             if cur_is_clip and cur_idx is not None:
                 qm["anchor"] = cur_idx              # the next clip is inserted after this one
-            LOG.warning("SAY req=%s zone=%s clip=%s queue_item UNIDENTIFIED (%s)", rid, zone, clip, why)
+            LOG.warning("SAY req=%s zone=%s clip=%s queue_item UNIDENTIFIED (%s; anchor=%s current_index=%s "
+                        "index_in_buffer=%s)", rid, zone, clip, why, searched, cur_idx, cur_buf)
             return
         if qid not in qm["clips"]:
             qm["clips"].append(qid)
