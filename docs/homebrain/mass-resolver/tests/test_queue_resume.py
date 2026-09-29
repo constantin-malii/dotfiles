@@ -130,11 +130,17 @@ ZONE = "media_player.ceiling_speakers"
 
 
 class FakeQueue(object):
-    """MA's queue as measured (design 3): enqueue=play inserts after current and plays it (also when paused);
-    a clip plays for `clip_play_reads` HA reads then goes idle (or never, with clip_never_idle); deleting the
-    current item is a no-op; play_index by id at a position. `lag` = confirming reads before a play_index shows.
+    """MA's queue as measured (design 3, 3.3): enqueue=play inserts after current and plays it (also when
+    paused); a clip plays for `clip_play_reads` HA reads then goes idle (or never, with clip_never_idle);
+    play_index by id at a position. `lag` = confirming reads before a play_index shows.
     `fail[name]` = list consumed per call: None (normal), "error", "none" (MA sent no reply: the call
-    returns None), or an Exception to raise."""
+    returns None), or an Exception to raise.
+
+    MA 2.9 buffer model (design 4.8 A1.9): player_queues/get reports `index_in_buffer` and `items`. The buffer
+    FOLLOWS THE CURRENT INDEX unless something moved it, so a delete of an item after the current one works as
+    before. A delete of the current item or of any item at index <= the buffer replies success and does
+    nothing. play_index resets the buffer to T (after `buffer_lag` reads); `start_after` (one entry per
+    play_index: M reads, or None) advances it to T+1 once playback "starts"."""
     NO_REPLY = object()
     def __init__(self, items, current=0, state="playing", elapsed=47.0, last_upd=None):
         self.items = list(items); self.current = current; self.state = state
@@ -149,10 +155,24 @@ class FakeQueue(object):
         # queue item (the station) while MA still plays the clip. QueueHA reports that for the first
         # `ha_flicker_reads` reads after the clip was first seen playing. The clip keeps playing underneath.
         self.ha_flicker_reads = 0; self.clip_seen = False; self.in_flicker = False
-        self.ma_fails_in_flicker = False             # queue_state raises when read during a flicker read
         self.events = []                             # ("ha", state, cid) / ("ma",) in read order
         self.clip_reads_at_play_index = []           # (clip_reads left, state) at each play_index
-        self.on_flicker_ma_read = None               # hook per such read (e.g. a slow MA advancing a clock)
+        self.ha_flicker_after = 1                    # clip reads before the flicker begins
+        self.clip_seen_count = 0
+        self.ha_script = None                        # scripted HA reads after an enqueue: "clip", "other",
+        self._script_armed = False                   #   "idle", "blank" (one per read), then the model again
+        # A1.9 buffer knobs
+        self.buffer = None                           # explicit buffer index; None = follows current
+        self.buffer_mode = None                      # None | "missing" | "nonnumeric" | "bool" |
+                                                     #   "out_of_range" | "below_current" (REPORTED value only)
+        self.buffer_lag = 0                          # reads after play_index before the buffer resets to T
+        self._buffer_hold = None
+        self.start_after = []                        # per play_index: reads until the buffer advances to T+1
+        self._start_countdown = None
+        self.delete_mode = None                      # None | "error_but_removes" | "ok_but_keeps"
+        self.restart_item = None                     # after the clip goes idle, MA restarts this item (3.3-3)
+        self._restart_armed = False
+        self.ma_flip = False
 
     def _f(self, name):
         seq = self.fail.get(name)
@@ -172,7 +192,12 @@ class FakeQueue(object):
         wrapper, self.first_wrapper = (self.first_wrapper or "builtin://radio/"), None
         self.items.insert(self.current + 1, clip_item("c%d" % self.n, uri, wrapper))
         self.current += 1; self.state = "playing"; self.clip_reads = self.clip_play_reads
-        self.clip_seen = False
+        self.clip_seen = False; self.clip_seen_count = 0
+        self.buffer = None                           # MA is playing the clip: the buffer is at it
+        self._script_armed = self.ha_script is not None
+
+    def real_buffer(self):
+        return self.buffer if self.buffer is not None else self.current
 
     def cur(self):
         return self.items[self.current] if 0 <= self.current < len(self.items) else None
@@ -202,27 +227,46 @@ class FakeQueue(object):
                 self.clip_reads -= 1
             elif not self.clip_never_idle:
                 self.state = "idle"
+                if self.restart_item is not None:
+                    self._restart_armed = True
         return self.state, mid
 
     # MA side
     def queue_state(self):
         self.events.append(("ma",))
-        if self.in_flicker:
-            if self.on_flicker_ma_read is not None:
-                self.on_flicker_ma_read()
-        if self.ma_fails_in_flicker and self.in_flicker:
-            self.in_flicker = False                  # only the read made for THIS flicker poll fails
-            raise OSError("MA read failed during the flicker")
         r = self._f("queue_state")
         if r is not None:
             return r
+        if self._restart_armed:
+            self._restart_armed = False
+            self.current = self.ids().index(self.restart_item); self.state = "playing"; self.buffer = None
         if self._pending is not None:
             if self.lag > 0:
                 self.lag -= 1
             else:
                 self.current, self._pending = self._pending, None
-        return {"result": {"state": self.state, "current_index": self.current, "elapsed_time": self.elapsed,
-                           "elapsed_time_last_updated": self.last_upd, "current_item": self.cur()}}
+        if self._pending is None and self._buffer_hold is not None:
+            if self._buffer_hold <= 0:
+                self.buffer = None; self._buffer_hold = None
+            else:
+                self._buffer_hold -= 1
+        if self._pending is None and self._buffer_hold is None and self._start_countdown is not None:
+            if self._start_countdown <= 0:
+                self._start_countdown = None
+                if self.current + 1 < len(self.items):
+                    self.buffer = self.current + 1
+            else:
+                self._start_countdown -= 1
+        res = {"state": self.state, "current_index": self.current, "elapsed_time": self.elapsed,
+               "elapsed_time_last_updated": self.last_upd, "current_item": self.cur(), "items": len(self.items)}
+        if self.ma_flip:
+            self.ma_flip = False                     # one MA read per scripted "other" HA read
+            res["current_index"] = self.current - 1; res["current_item"] = self.items[self.current - 1]
+        b = self.real_buffer()
+        if self.buffer_mode != "missing":
+            res["index_in_buffer"] = {"nonnumeric": str(b), "bool": True, "out_of_range": len(self.items),
+                                      "below_current": self.current - 1}.get(self.buffer_mode, b)
+        return {"result": res}
 
     def queue_items(self, offset, limit):
         r = self._f("queue_items")
@@ -233,6 +277,7 @@ class FakeQueue(object):
     def play_index(self, item_id, seek_position):
         self.calls.append(("play_index", item_id, seek_position))
         self.clip_reads_at_play_index.append((self.clip_reads, self.state))
+        self.events.append(("play_index",))
         r = self._f("play_index")
         if r is self.NO_REPLY:
             return None
@@ -240,6 +285,11 @@ class FakeQueue(object):
             return r
         idx = [i for i, x in enumerate(self.items) if x["queue_item_id"] == item_id][0]
         self.state = "playing"; self.elapsed = float(seek_position)
+        if self.buffer_lag:
+            self.buffer = self.real_buffer(); self._buffer_hold = self.buffer_lag
+        else:
+            self.buffer = None; self._buffer_hold = None
+        self._start_countdown = self.start_after.pop(0) if self.start_after else None
         if self.lag:
             self._pending = idx
         else:
@@ -254,12 +304,18 @@ class FakeQueue(object):
         r = self._f("delete_item")
         if r is not None:
             return r
-        idx = [i for i, x in enumerate(self.items) if x["queue_item_id"] == item_id][0]
-        if idx == self.current:
-            return {"result": None}                  # measured: deleting the current item is a no-op
+        if item_id not in self.ids():
+            return {"error_code": 404, "details": "no such item"}
+        idx = self.ids().index(item_id)
+        if self.delete_mode == "ok_but_keeps":
+            return {"result": None}
+        if idx == self.current or idx <= self.real_buffer():
+            return {"result": None}                  # MA 2.9: the current item / the buffer -- a silent no-op
         del self.items[idx]
         if idx < self.current:
             self.current -= 1
+        if self.delete_mode == "error_but_removes":
+            return {"error_code": 999, "details": "boom"}
         return {"result": None}
 
     def ids(self):
@@ -290,13 +346,31 @@ class QueueHA(FakeHA):
         if self.first_state is not None:
             (st, mid), self.first_state = self.first_state, None
             return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
-        st, mid = self.q.ha_state()
         q = self.q
+        if q._script_armed and q.ha_script:
+            kind = q.ha_script.pop(0)
+            clip_mid = ((q.cur() or {}).get("media_item") or {}).get("uri") or ""
+            if kind == "idle":
+                q.state = "idle"
+                st, mid = "idle", clip_mid
+            elif kind == "other":
+                # Spike 4: BOTH HA and MA name the interrupted item during the flip.
+                st, mid = "playing", q.items[q.current - 1]["media_item"]["uri"]
+                q.ma_flip = True
+            elif kind == "blank":
+                st, mid = "playing", ""
+            else:
+                st, mid = "playing", clip_mid
+            q.events.append(("ha", st, mid))
+            return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
+        st, mid = self.q.ha_state()
         q.in_flicker = False
         if st == "playing" and interaction.is_reply_clip_uri(mid):
-            if q.clip_seen and q.ha_flicker_reads > 0 and q.current > 0:
+            if (q.clip_seen_count >= q.ha_flicker_after and q.ha_flicker_reads > 0 and q.current > 0):
                 q.ha_flicker_reads -= 1; q.in_flicker = True
                 mid = q.items[q.current - 1]["media_item"]["uri"]      # the station, not the clip
+            else:
+                q.clip_seen_count += 1
             q.clip_seen = True
         q.events.append(("ha", st, mid))
         return {"state": st, "attributes": {"volume_level": self.volume, "media_content_id": mid}}
@@ -827,7 +901,9 @@ class FinalReviewFixTest(unittest.TestCase):
         self.assertEqual(r["metadata"]["clips_deleted"], 2)
 
     def test_superseded_exit_deletes_own_recorded_clips_when_record_not_its_own(self):
-        q = FakeQueue([track(1), track(2), clip_item("c1", CLIP), clip_item("c2", CLIP2), track(3)], current=3)
+        # A1: c1 lies AFTER the current clip (MA 2.9 ignores a delete at or below index_in_buffer, so a clip
+        # before the current one is not deletable -- this test used to place c1 there).
+        q = FakeQueue([track(1), track(2), clip_item("c2", CLIP2), clip_item("c1", CLIP), track(3)], current=2)
         ctx = ctx_for(q)
         cap = new_cap()
         succ = {"gen": 9, "rid": "ridB", "target": None, "clips": [], "live": True}
@@ -1034,120 +1110,367 @@ class FinalReviewFixTest(unittest.TestCase):
         self.assertEqual(rec["target"]["item"], "t3")
 
 
-class QueueFlickerTest(unittest.TestCase):
-    """Live 2026-09-28: `finish-poll exit after 1.0s: state=playing cid=library://radio/2`. In queue mode the
-    station stays in MA's queue, so HA's media_content_id can briefly name it while the reply clip still plays;
-    two such reads used to end the wait and resume the station over the tail of the answer."""
+class RecSleeper(object):
+    """Records each sleep's length; an optional hook(secs) fires per call."""
+    def __init__(self, hook=None):
+        self.secs = []
+        self._hook = hook
 
-    def radio(self, flicker=3, play_reads=6):
+    def __call__(self, secs):
+        self.secs.append(secs)
+        if self._hook is not None:
+            self._hook(secs)
+
+
+def rec_cap(hook=None):
+    sl = RecSleeper(hook)
+    return interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: 1000.0, sleeper=sl), sl
+
+
+def calls_of(q, kind):
+    return [c for c in q.calls if c[0] == kind]
+
+
+ORIG8 = ["t%d" % i for i in range(1, 9)]
+
+
+class FinishRuleTest(unittest.TestCase):
+    """Design 4.8 A1.1 (spike 4, 3.3-1). In queue mode HA `playing` with ANOTHER media id ends the clip only after
+    it has persisted >= say_queue_other_item_ms (default 1500) continuously; any reading back on the clip resets
+    it; not-`playing` keeps the two-reading rule. The MA cross-check is gone. Replaces QueueFlickerTest, which
+    pinned that cross-check."""
+
+    def radio(self, script, poll_ms=500):
         q = FakeQueue([station()], current=0, elapsed=1799.0)
-        q.clip_play_reads = play_reads                # the clip plays for several reads, then goes idle
-        q.ha_flicker_reads = flicker
-        return q
-
-    def test_station_cid_flicker_waits_for_the_clip_to_really_end(self):
-        q = self.radio()
-        with self.assertLogs("resolver", "INFO") as lg:
-            r = say(new_cap(), ctx_for(q))
-        self.assertEqual(q.ha_flicker_reads, 0)                          # the flicker was actually served
-        # The resume happened only once the clip had played out and HA saw it idle -- not mid-answer.
-        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
-        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
-        self.assertEqual(q.ids(), ["st1"])
-        self.assertEqual(r["metadata"]["resume"], "queue")
-        self.assertTrue(r["metadata"]["clips"][0]["ended"])
-        overrides = [m for m in lg.output if "but MA still plays the clip; waiting" in m]
-        self.assertEqual(len(overrides), 3)                              # one per flicker read
-        self.assertFalse(any("finish-poll exit" in m and "radio/4" in m for m in lg.output))
-
-    def test_override_uses_short_lived_connections(self):
-        q = self.radio()
+        q.clip_never_idle = True                      # only the scripted HA reads end the clip
+        q.ha_script = list(script)                    # first entry = the start-poll read
         ctx = ctx_for(q)
+        ctx.settings.say_poll_ms = poll_ms
+        return q, ctx
+
+    def test_three_quarter_second_flip_ends_only_at_idle(self):
+        # Spike 4: clip, clip, song for ~0.75 s (three 250 ms reads), clip, idle.
+        q, ctx = self.radio(["clip", "clip", "other", "other", "other", "clip", "idle", "idle"], poll_ms=250)
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx)
+        self.assertEqual(q.ha_script, [])             # the finish poll read on through BOTH idle readings
+        self.assertTrue(r["metadata"]["clips"][0]["ended"])
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "st1", 0)])
+        self.assertTrue(any("finish-poll exit" in m and "state=idle" in m for m in lg.output))
+        self.assertFalse(any("persisted" in m and "finish-poll exit" in m for m in lg.output))
+
+    def test_other_item_persisting_ends_at_the_threshold_not_before(self):
+        q, ctx = self.radio(["clip"] + ["other"] * 8)
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(new_cap(), ctx)
+        # other@0.0, 0.5, 1.0 do not end it; other@1.5 does. Then the restore read takes one more.
+        self.assertEqual(len(q.ha_script), 8 - 4 - 1)
+        self.assertTrue(any("finish-poll exit after 1.5s" in m and "persisted" in m for m in lg.output))
+        self.assertTrue(r["metadata"]["clips"][0]["ended"])
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "st1", 0)])
+
+    def test_threshold_comes_from_settings(self):
+        q, ctx = self.radio(["clip"] + ["other"] * 10)
+        ctx.settings.say_queue_other_item_ms = 2500
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx)
+        self.assertEqual(len(q.ha_script), 10 - 6 - 1)
+        self.assertTrue(any("finish-poll exit after 2.5s" in m for m in lg.output))
+
+    def test_a_reading_back_on_the_clip_resets_the_persistence(self):
+        # 1.0 s of "other" twice (and once more around a blank reading) never adds up to 1.5 s.
+        script = (["clip"] + ["other"] * 3 + ["clip"] + ["other"] * 3 + ["blank"] + ["other"] * 3
+                  + ["clip", "idle", "idle"])
+        q, ctx = self.radio(script)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx)
+        self.assertEqual(q.ha_script, [])
+        self.assertTrue(any("finish-poll exit" in m and "state=idle" in m for m in lg.output))
+
+    def test_no_ma_read_during_the_finish_wait(self):
+        q, ctx = self.radio(["clip", "clip", "other", "other", "clip", "idle", "idle"])
         say(new_cap(), ctx)
-        self.assertTrue(ctx.mas and all(m.s is None for m in ctx.mas))  # no socket held across the wait
+        ev = q.events
+        clip_mid = "builtin://radio/" + CLIP
+        i0 = ev.index(("ha", "playing", clip_mid))
+        idle = [i for i, e in enumerate(ev) if e == ("ha", "idle", clip_mid)]
+        self.assertNotIn(("ma",), ev[i0:idle[1] + 1])
 
-    def test_ma_read_failure_during_flicker_falls_back_to_the_ha_rule(self):
-        q = self.radio()
-        q.ma_fails_in_flicker = True
-        with self.assertLogs("resolver", "INFO") as lg:
-            r = say(new_cap(), ctx_for(q))
-        # Today's rule: two consecutive "ended" reads end the wait, clip still playing underneath.
-        self.assertEqual(len(q.clip_reads_at_play_index), 1)
-        left, st = q.clip_reads_at_play_index[0]
-        self.assertGreater(left, 0)
-        self.assertEqual(st, "playing")
-        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
-        self.assertTrue(any("finish-poll exit" in m for m in lg.output))
-        self.assertEqual(r["metadata"]["resume"], "queue")
-        self.assertEqual(q.ids(), ["st1"])
-
-    def test_ma_reporting_another_item_counts_the_observation(self):
-        # MA itself no longer has the clip current: the HA reading is believed, as today.
-        q = self.radio()
-        orig = q.queue_state
-        def moved_on():
-            r = orig()
-            if q.in_flicker:
-                r = {"result": dict(r["result"], current_item=station(), current_index=0)}
-            return r
-        q.queue_state = moved_on
-        with self.assertLogs("resolver", "INFO") as lg:
-            say(new_cap(), ctx_for(q))
-        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
-        self.assertGreater(q.clip_reads_at_play_index[0][0], 0)          # ended on the HA rule
-
-    def test_raised_enqueue_that_landed_also_waits_out_the_flicker(self):
-        # The design 4.3-5 wait (_queue_after_raised_enqueue -> issue=False) is queue mode too.
-        q = self.radio()
+    def test_raised_enqueue_that_landed_uses_the_same_rule(self):
+        q, ctx = self.radio(["clip", "clip", "other", "other", "other", "clip", "idle", "idle"])
         q.enqueue_raises_after_landing = True
-        with self.assertLogs("resolver", "INFO") as lg:
-            r = say(new_cap(), ctx_for(q))
-        self.assertEqual(q.ha_flicker_reads, 0)
-        self.assertEqual(len([c for c in q.calls if c[0] == "enqueue"]), 1)
-        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
-        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
-        self.assertEqual(q.ids(), ["st1"])
-        self.assertEqual(r["metadata"]["resume"], "queue")
-        self.assertEqual(len([m for m in lg.output if "but MA still plays the clip; waiting" in m]), 3)
+        r = say(new_cap(), ctx)
+        self.assertEqual(q.ha_script, [])
+        self.assertEqual(len(calls_of(q, "enqueue")), 1)
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "st1", 0)])
+        self.assertTrue(r["metadata"]["clips"][0]["ended"])
 
-    def test_ma_check_stops_at_the_clip_finish_deadline(self):
-        # say has no turn deadline, so only accumulated sleep bounds the poll and a blocking MA check is not
-        # counted in it. A stalled clip + HA flickering on EVERY read + a slow-but-answering MA (2 s per check)
-        # must not hold the zone past the clip's own finish deadline: past it, the HA rule applies again.
-        clk = [1000.0]
-        q = self.radio(flicker=10 ** 6)
-        q.clip_never_idle = True
-        def slow_ma():
-            clk[0] += 2.0
-        q.on_flicker_ma_read = slow_ma
-        cap = interaction.InteractionCapability(timer_factory=FakeTimer, clock=lambda: clk[0],
-                                                sleeper=FakeSleeper())
+    def test_ha_idle_ends_the_wait_on_two_readings(self):
+        q = FakeQueue([station()], current=0, elapsed=1799.0)
+        q.clip_play_reads = 2
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
+        self.assertEqual(r["metadata"]["resume"], "queue")
+
+    def test_the_cross_check_is_gone(self):
+        self.assertFalse(hasattr(interaction.InteractionCapability, "_queue_clip_checker"))
+
+
+class DeletePermissionTest(unittest.TestCase):
+    """Design 4.8 A1.2: delete_permission(state_result, index_of, qiid) -> (bool, reason), fail closed."""
+    IDX = {"t1": 0, "t2": 1, "t3": 2, "c1": 3, "t4": 4, "t5": 5}
+
+    def st(self, **kw):
+        base = {"current_index": 2, "index_in_buffer": 2, "items": 6, "current_item": {"queue_item_id": "t3"}}
+        base.update(kw)
+        return base
+
+    def test_after_the_buffer_is_permitted(self):
+        ok, why = interaction.delete_permission(self.st(), self.IDX, "c1")
+        self.assertTrue(ok, why)
+
+    def test_current_index_unknown_still_permits_after_the_buffer(self):
+        self.assertTrue(interaction.delete_permission(self.st(current_index=None), self.IDX, "c1")[0])
+
+    def test_fail_closed(self):
+        no_key = self.st()
+        del no_key["index_in_buffer"]
+        cases = [
+            (no_key, "c1", "index_in_buffer missing"),
+            (self.st(index_in_buffer=None), "c1", "index_in_buffer missing"),
+            (self.st(index_in_buffer="2"), "c1", "not an integer"),
+            (self.st(index_in_buffer=True), "c1", "not an integer"),
+            (self.st(index_in_buffer=2.5), "c1", "not an integer"),
+            (self.st(index_in_buffer=-1), "c1", "outside the queue"),
+            (self.st(index_in_buffer=6), "c1", "outside the queue"),
+            (self.st(index_in_buffer=1), "c1", "below current_index"),
+            (self.st(items=None), "c1", "item count unknown"),
+            (self.st(), "c9", "not in the queue"),
+            (self.st(current_index=3, index_in_buffer=3, current_item={"queue_item_id": "c1"}), "c1",
+             "still current"),
+            (self.st(index_in_buffer=3), "c1", "within the buffer"),
+            (self.st(), "t1", "within the buffer"),
+        ]
+        for st, cid, frag in cases:
+            with self.subTest(st=st, cid=cid):
+                ok, why = interaction.delete_permission(st, self.IDX, cid)
+                self.assertFalse(ok)
+                self.assertIn(frag, why)
+
+
+class BufferAwareCleanupTest(unittest.TestCase):
+    """Design 4.8 A1.3/A1.4/A1.8: verified deletes, retries at +1/+2 s, one buffer-reset retry."""
+
+    def q8(self):
+        return FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+
+    def test_delete_waits_for_the_lagging_buffer_reset_and_retries(self):
+        # A1.9 case 3: play_index lands but MA keeps the buffer at the clip for a few reads.
+        q = self.q8(); q.buffer_lag = 4
+        cap, sl = rec_cap()
         with self.assertLogs("resolver", "INFO") as lg:
             r = say(cap, ctx_for(q))
-        # 30 s budget / 2 s per check -> about 15 checks, then two HA "ended" reads end the wait. Without the
-        # gate every one of the 60 polls the sleep budget allows would consult MA.
-        # Each consulted check returns True here (stalled clip still current + playing), so each logs one
-        # override line: that count IS the number of checker calls made during the wait.
-        overrides = [m for m in lg.output if "but MA still plays the clip; waiting" in m]
-        self.assertGreater(len(overrides), 0)
-        self.assertLessEqual(len(overrides), 16)
-        self.assertTrue(any("finish-poll exit" in m for m in lg.output))  # ended on the HA rule
-        self.assertFalse(any("finish-poll gave up" in m for m in lg.output))
-        self.assertEqual([c for c in q.calls if c[0] == "play_index"], [("play_index", "st1", 0)])
-        self.assertEqual(r["metadata"]["resume"], "queue")
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])    # never sent while the buffer covered it
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)
+        self.assertEqual(q.ids(), ORIG8)
+        self.assertEqual(len(calls_of(q, "play_index")), 1)             # the retries sufficed: no buffer reset
+        self.assertIn(1.0, sl.secs)                                     # the +1 s retry
+        self.assertIn(2.0, sl.secs)                                     # the +2 s retry
+        self.assertTrue(any("clip c1 kept" in m and "within the buffer" in m for m in lg.output))
+        self.assertTrue(any("retry +2s" in m and "clip c1 deleted" in m for m in lg.output))
+        # A1.8: every cleanup read logs current_index, index_in_buffer and the clip's index
+        self.assertTrue(any("current_index=2 index_in_buffer=3 clips=c1@3" in m for m in lg.output))
 
-    def test_ha_idle_ends_the_wait_without_an_ma_check(self):
-        q = self.radio(flicker=0, play_reads=2)
+    def test_clip_loaded_as_next_gets_exactly_one_buffer_reset(self):
+        # A1.9 case 4: playback starts at once, so the buffer is already at the clip (T+1) through +2 s.
+        q = self.q8(); q.start_after = [0, None]
+        cap, sl = rec_cap()
         with self.assertLogs("resolver", "INFO") as lg:
-            r = say(new_cap(), ctx_for(q))
-        ev = q.events
-        idle = [i for i, e in enumerate(ev) if e[0] == "ha" and e[1] == "idle"]
-        self.assertGreaterEqual(len(idle), 2)
-        # The two idle reads that end the wait are consecutive HA reads: no MA read between them.
-        self.assertEqual(idle[1], idle[0] + 1)
-        self.assertFalse(any("but MA still plays the clip" in m for m in lg.output))
-        self.assertEqual(q.clip_reads_at_play_index, [(0, "idle")])
-        self.assertEqual(r["metadata"]["resume"], "queue")
+            r = say(cap, ctx_for(q))
+        pis = [i for i, c in enumerate(q.calls) if c[0] == "play_index"]
+        self.assertEqual([q.calls[i] for i in pis], [("play_index", "t3", 47), ("play_index", "t3", 47)])
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])
+        self.assertGreater(q.calls.index(("delete", "c1")), pis[1])     # deleted right after the reset
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)
+        self.assertEqual(q.ids(), ORIG8)
+        self.assertIn(2.0, sl.secs)                                     # the reset came after the +2 s retry
+        self.assertFalse(any("will play after" in m for m in lg.output))
+
+    def test_clip_surviving_the_buffer_reset_is_warned_and_kept_recorded(self):
+        q = self.q8(); q.start_after = [0, 0]
+        cap = new_cap()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q))
+        self.assertEqual(len(calls_of(q, "play_index")), 2)             # one reset, never a second
+        self.assertEqual(calls_of(q, "delete"), [])
+        self.assertIn("c1", q.ids())
+        self.assertEqual(r["metadata"]["clips_deleted"], 0)
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])     # kept for the next sweep
+        self.assertIsNone(cap._queue_targets[ZONE]["target"])           # ...but nothing to resume
+        warn = [m for m in lg.output
+                if m.startswith("WARNING") and "clip c1 will play after the current item" in m]
+        self.assertEqual(len(warn), 1)
+
+    def test_delete_reply_error_but_item_gone_counts_as_deleted(self):
+        # A1.9 case 8, one way: presence decides, not the reply.
+        q = self.q8(); q.delete_mode = "error_but_removes"
+        r = say(new_cap(), ctx_for(q))
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)
+        self.assertEqual(q.ids(), ORIG8)
+
+    def test_delete_reply_ok_but_item_kept_is_not_counted(self):
+        # A1.9 case 8, the other way.
+        q = self.q8(); q.delete_mode = "ok_but_keeps"
+        cap = new_cap()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q))
+        self.assertEqual(len(calls_of(q, "delete")), 1)
+        self.assertEqual(r["metadata"]["clips_deleted"], 0)
+        self.assertIn("c1", q.ids())
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
+        self.assertTrue(any("clip c1 still in the queue after delete" in m for m in lg.output))
+
+    def test_unusable_index_in_buffer_withholds_every_delete(self):
+        # A1.9 case 9.
+        for mode, frag in (("missing", "index_in_buffer missing"), ("nonnumeric", "not an integer"),
+                           ("bool", "not an integer"), ("out_of_range", "outside the queue"),
+                           ("below_current", "below current_index")):
+            with self.subTest(mode=mode):
+                q = self.q8(); q.buffer_mode = mode
+                cap = new_cap()
+                with self.assertLogs("resolver", "INFO") as lg:
+                    say(cap, ctx_for(q))
+                self.assertEqual(calls_of(q, "delete"), [])
+                self.assertEqual(len(calls_of(q, "play_index")), 1)     # no buffer reset on it either
+                self.assertIn("c1", q.ids())
+                self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
+                self.assertTrue(any("clip c1 kept" in m and frag in m for m in lg.output))
+
+    def test_queue_larger_than_the_read_cap_is_not_deleted_from(self):
+        q = FakeQueue([track(i) for i in range(1, 502)], current=2, elapsed=47.0)
+        cap = new_cap()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q))
+        self.assertEqual(calls_of(q, "delete"), [])
+        self.assertEqual(r["metadata"]["clips_deleted"], 0)
+        self.assertTrue(any("clip c1 kept" in m and "too large" in m for m in lg.output))
+
+    def test_superseded_during_the_retries_stops_the_old_turn(self):
+        # A1.9 case 11. Without the supersede this run would end in a buffer-reset play_index.
+        q = self.q8(); q.buffer_lag = 50
+        box = {}
+
+        def hook(secs):
+            if secs >= 1.0 and "at" not in box:           # the +1 s retry wait (polls sleep 0.5 s)
+                box["at"] = len(q.calls)
+                with box["cap"]._lock:
+                    box["cap"]._say_gen[ZONE] += 1
+        cap, sl = rec_cap(hook)
+        box["cap"] = cap
+        say(cap, ctx_for(q))
+        self.assertIn("at", box)
+        self.assertEqual([c for c in q.calls[box["at"]:] if c[0] in ("delete", "play_index")], [])
+        self.assertEqual(len(calls_of(q, "play_index")), 1)
+        self.assertIn("c1", q.ids())
+
+
+class PausedAtStartTest(unittest.TestCase):
+    """Design 4.8 A1.5 / A1.6: the queue was not playing at capture."""
+
+    def test_station_restarted_by_ma_is_paused_then_resume_deletes_the_clip(self):
+        # A1.9 case 5 (spike 4, 3.3-3).
+        q = FakeQueue([station()], current=0, state="paused", elapsed=0.0)
+        q.restart_item = "st1"
+        ctx = ctx_for(q)
+        cap = new_cap()
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"],
+                         [("media_player", "media_pause", {"entity_id": ZONE})])
+        self.assertEqual(q.state, "paused")
+        self.assertEqual(calls_of(q, "play_index"), [])
+        self.assertEqual(r["metadata"]["resume"], "none")
+        self.assertTrue(any("restarted item st1" in m for m in lg.output))
+        rec = cap._queue_targets[ZONE]
+        self.assertFalse(rec["live"])
+        self.assertEqual(rec["target"]["item"], "st1")
+        self.assertEqual(rec["clips"], ["c1"])
+        self.assertIn("c1", q.ids())
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r2["metadata"]["how"], "queue_pending")
+        self.assertLess(q.calls.index(("play_index", "st1", 0)), q.calls.index(("delete", "c1")))
+        self.assertEqual(q.ids(), ["st1"])
+        self.assertEqual(q.cur()["queue_item_id"], "st1")
+        self.assertNotIn(ZONE, cap._queue_targets)
+
+    def test_pending_record_with_the_target_already_playing_is_not_jumped_back(self):
+        # A1.6 is for resuming FROM a pause/clip: re-seeking a T that already plays would jump it back.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        q.restart_item = "t2"
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)                                 # T restarted by MA, then re-paused (A1.5)
+        q.state = "playing"                           # un-paused from elsewhere
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r2["metadata"]["how"], "already_playing")
+        self.assertEqual(calls_of(q, "play_index"), [])
+
+    def test_newer_playback_is_neither_paused_nor_jumped(self):
+        # A1.9 case 6: the current item is some other item; the clip sits inside its buffer.
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        q.restart_item = "t3"
+        ctx = ctx_for(q)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        self.assertEqual(calls_of(q, "play_index"), [])
+        self.assertEqual(calls_of(q, "delete"), [])
+        self.assertTrue(any("clip c1 kept" in m for m in lg.output))
+
+    def test_newer_playback_deletes_only_what_is_permitted(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        q.restart_item = "t1"                          # the clip now lies after the buffer
+        ctx = ctx_for(q)
+        r = say(new_cap(), ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        self.assertEqual(calls_of(q, "play_index"), [])
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+
+    def test_idle_on_the_clip_no_pause_pending_then_resume_deletes(self):
+        # A1.9 case 7 (spike 4, 3.3-2).
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
+        self.assertEqual(q.cur()["queue_item_id"], "c1")
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r2["metadata"]["how"], "queue_pending")
+        self.assertLess(q.calls.index(("play_index", "t2", 47)), q.calls.index(("delete", "c1")))
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+
+
+class CaptureSweepTest(unittest.TestCase):
+    """Design 4.8 A1.7: at capture, recorded clips A1.2 permits are deleted and verified; the rest stay."""
+
+    def test_sweep_deletes_a_permitted_recorded_clip_and_keeps_the_rest(self):
+        items = [track(1), clip_item("cB", CLIP2), track(2), track(3), clip_item("cA", CLIP2), track(4)]
+        q = FakeQueue(items, current=2, elapsed=47.0)
+        cap = new_cap()
+        cap._queue_targets[ZONE] = {"gen": 1, "rid": "ridA", "target": {"item": "t2"}, "clips": ["cA", "cB"],
+                                    "live": False}
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = say(cap, ctx_for(q), rid="ridB")
+        self.assertLess(q.calls.index(("delete", "cA")), q.calls.index(("enqueue", CLIP)))
+        self.assertNotIn(("delete", "cB"), q.calls)
+        self.assertNotIn("cA", q.ids())
+        self.assertIn("cB", q.ids())
+        self.assertTrue(any("clip cB kept" in m for m in lg.output))
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["cB"])
+        self.assertEqual(r["metadata"]["clips_deleted"], 2)          # cA + this turn's own clip
 
 
 if __name__ == "__main__":

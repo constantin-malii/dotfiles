@@ -62,6 +62,11 @@ class ConfigTest(unittest.TestCase):
         self.assertTrue(config.Settings({}).say_queue_resume)
         self.assertFalse(config.Settings({"say_queue_resume": False}).say_queue_resume)
 
+    def test_say_queue_other_item_ms_default_and_override(self):
+        # MR-08c A1.1: HA naming another item while `playing` ends a queue-mode clip only after persisting.
+        self.assertEqual(config.Settings({}).say_queue_other_item_ms, 1500)
+        self.assertEqual(config.Settings({"say_queue_other_item_ms": 2500}).say_queue_other_item_ms, 2500)
+
 
 class InteractionTunablesTest(unittest.TestCase):
     def test_defaults(self):
