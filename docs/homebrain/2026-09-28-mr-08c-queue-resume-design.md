@@ -303,6 +303,11 @@ clip kept.
   immediately, without pausing, when the turn is superseded or when any item other than T or a recorded clip
   becomes current. When the watch ends with nothing to pause, the A1.5 outcomes apply to the last read (idle on
   C → pending record; other item → only permitted deletes, verified).
+- **A2.2a "A newer turn takes over"** (re-review) means any of: the reply generation advanced (a newer
+  `_say`/announce), **or** the zone's queue record is no longer this turn's (a voice "resume" or new playback
+  via `note_playback` cleared or replaced it). Checked every watch iteration and immediately before the pause.
+  A current item whose URI is one of our reply clips (`is_reply_clip_uri`) but was not identified does not end
+  the watch — it is still ours, and the station restart can follow it.
 - **A2.3 Fresh position.** Whenever a pending resume is created or refreshed from a read in which T is the
   current item, its position is taken from that read (extrapolated per §4.3-1). On voice "resume", when T is
   current, the seek comes from the live read, never from the stored position.
