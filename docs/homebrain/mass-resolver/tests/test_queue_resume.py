@@ -171,7 +171,10 @@ class FakeQueue(object):
         self._start_countdown = None
         self.delete_mode = None                      # None | "error_but_removes" | "ok_but_keeps"
         self.restart_item = None                     # after the clip goes idle, MA restarts this item (3.3-3)
-        self._restart_armed = False
+        self.restart_delay_reads = 0                 # ...this many MA reads after the clip went idle
+        self.restart_plan = None                     # or a list of {"after", "item", "state", "elapsed"} steps,
+        self._restart_armed = False                  #   each `after` MA reads after the previous one
+        self._plan = []
         self.ma_flip = False
 
     def _f(self, name):
@@ -195,6 +198,24 @@ class FakeQueue(object):
         self.clip_seen = False; self.clip_seen_count = 0
         self.buffer = None                           # MA is playing the clip: the buffer is at it
         self._script_armed = self.ha_script is not None
+
+    def arm_restart(self):
+        self._plan = [dict(p) for p in (self.restart_plan or
+                                        [{"after": self.restart_delay_reads, "item": self.restart_item,
+                                          "state": "playing"}])]
+        self._restart_armed = bool(self._plan)
+
+    def _restart_step(self):
+        step = self._plan[0]
+        if step["after"] > 0:
+            step["after"] -= 1
+            return
+        self._plan.pop(0)
+        self._restart_armed = bool(self._plan)
+        self.current = self.ids().index(step["item"]); self.state = step.get("state", "playing")
+        self.buffer = None
+        if "elapsed" in step:
+            self.elapsed = float(step["elapsed"])
 
     def real_buffer(self):
         return self.buffer if self.buffer is not None else self.current
@@ -227,8 +248,8 @@ class FakeQueue(object):
                 self.clip_reads -= 1
             elif not self.clip_never_idle:
                 self.state = "idle"
-                if self.restart_item is not None:
-                    self._restart_armed = True
+                if self.restart_item is not None or self.restart_plan:
+                    self.arm_restart()
         return self.state, mid
 
     # MA side
@@ -238,8 +259,7 @@ class FakeQueue(object):
         if r is not None:
             return r
         if self._restart_armed:
-            self._restart_armed = False
-            self.current = self.ids().index(self.restart_item); self.state = "playing"; self.buffer = None
+            self._restart_step()
         if self._pending is not None:
             if self.lag > 0:
                 self.lag -= 1
@@ -269,6 +289,7 @@ class FakeQueue(object):
         return {"result": res}
 
     def queue_items(self, offset, limit):
+        self.events.append(("items", offset, limit))
         r = self._f("queue_items")
         if r is not None:
             return r
@@ -301,6 +322,7 @@ class FakeQueue(object):
 
     def delete_item(self, item_id):
         self.calls.append(("delete", item_id))
+        self.events.append(("delete", item_id))
         r = self._f("delete_item")
         if r is not None:
             return r
@@ -1328,7 +1350,7 @@ class BufferAwareCleanupTest(unittest.TestCase):
         self.assertEqual(r["metadata"]["clips_deleted"], 0)
         self.assertIn("c1", q.ids())
         self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
-        self.assertTrue(any("clip c1 still in the queue after delete" in m for m in lg.output))
+        self.assertTrue(any("clip c1" in m and "still in the queue after delete" in m for m in lg.output))
 
     def test_unusable_index_in_buffer_withholds_every_delete(self):
         # A1.9 case 9.
@@ -1346,14 +1368,16 @@ class BufferAwareCleanupTest(unittest.TestCase):
                 self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
                 self.assertTrue(any("clip c1 kept" in m and frag in m for m in lg.output))
 
-    def test_queue_larger_than_the_read_cap_is_not_deleted_from(self):
+    def test_queue_larger_than_the_read_cap_is_never_counted_deleted(self):
+        # A2.1: permission comes from the small window, so the delete IS sent; but presence cannot be verified
+        # over CLEANUP_READ_CAP items, so nothing is counted (fail closed).
         q = FakeQueue([track(i) for i in range(1, 502)], current=2, elapsed=47.0)
         cap = new_cap()
         with self.assertLogs("resolver", "INFO") as lg:
             r = say(cap, ctx_for(q))
-        self.assertEqual(calls_of(q, "delete"), [])
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])
         self.assertEqual(r["metadata"]["clips_deleted"], 0)
-        self.assertTrue(any("clip c1 kept" in m and "too large" in m for m in lg.output))
+        self.assertTrue(any("clip c1 not verified deleted" in m and "too large" in m for m in lg.output))
 
     def test_superseded_during_the_retries_stops_the_old_turn(self):
         # A1.9 case 11. Without the supersede this run would end in a buffer-reset play_index.
@@ -1471,6 +1495,154 @@ class CaptureSweepTest(unittest.TestCase):
         self.assertTrue(any("clip cB kept" in m for m in lg.output))
         self.assertEqual(cap._queue_targets[ZONE]["clips"], ["cB"])
         self.assertEqual(r["metadata"]["clips_deleted"], 2)          # cA + this turn's own clip
+
+
+class ReviewAmendmentA2Test(unittest.TestCase):
+    """Design 4.8 A2 (review amendment) and the review findings of the A1 commit."""
+
+    def after(self, q, marker):
+        return q.events.index(marker)
+
+    def assert_first_delete_is_fast(self, q, clip="c1", n_clips=1):
+        ev = q.events
+        pi = ev.index(("play_index",))
+        dl = ev.index(("delete", clip))
+        ma_after = [i for i in range(pi + 1, len(ev)) if ev[i] == ("ma",)]
+        self.assertLess(dl, ma_after[1])               # before the SECOND MA read after play_index
+        for e in ev[pi:dl]:                            # A2.1: only the small permission window before it
+            if e[0] == "items":
+                self.assertEqual(e[2], n_clips + interaction.PERMISSION_WINDOW_EXTRA)
+
+    # I1 / I3 ----------------------------------------------------------------------------------------------------
+    def test_say_first_delete_precedes_the_buffer_advance(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        q.start_after = [1]                            # the buffer moves to T+1 right after the first read
+        r = say(new_cap(), ctx_for(q))
+        self.assert_first_delete_is_fast(q)
+        self.assertEqual(len(calls_of(q, "play_index")), 1)
+        self.assertEqual(r["metadata"]["clips_deleted"], 1)
+        self.assertEqual(q.ids(), ORIG8)
+
+    def test_pending_resume_first_delete_precedes_the_buffer_advance(self):
+        q = FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)                                  # idle on c1, pending
+        q.events[:] = []
+        q.start_after = [1]
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assert_first_delete_is_fast(q)
+        self.assertEqual(len(calls_of(q, "play_index")), 1)
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+
+    # I2 / A2.2 --------------------------------------------------------------------------------------------------
+    def paused_tracks(self):
+        return FakeQueue([track(1), track(2), track(3)], current=1, state="paused", elapsed=47.0)
+
+    def test_watch_pauses_when_the_restart_arrives_reads_late(self):
+        q = self.paused_tracks()
+        q.restart_item = "t2"; q.restart_delay_reads = 3
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"],
+                         [("media_player", "media_pause", {"entity_id": ZONE})])
+        self.assertEqual(calls_of(q, "play_index"), [])
+        self.assertEqual(cap._queue_targets[ZONE]["clips"], ["c1"])
+
+    def test_watch_stops_when_another_item_becomes_current(self):
+        q = self.paused_tracks()
+        # t3 becomes current first; had the watch carried on, it would then see T playing and pause it.
+        q.restart_plan = [{"after": 1, "item": "t3", "state": "playing"},
+                          {"after": 0, "item": "t2", "state": "playing"}]
+        ctx = ctx_for(q)
+        with self.assertLogs("resolver", "INFO") as lg:
+            say(new_cap(), ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        self.assertEqual(calls_of(q, "play_index"), [])
+        self.assertTrue(any("another item t3 is current; no pause" in m for m in lg.output))
+
+    def test_watch_stops_on_supersede(self):
+        q = FakeQueue([track(1), track(2), clip_item("c1", CLIP), track(3)], current=2, state="idle")
+        q.restart_plan = [{"after": 1, "item": "t2", "state": "playing"}]
+        q.arm_restart()
+        ctx = ctx_for(q)
+        calls = {"n": 0}
+
+        def superseded():
+            calls["n"] += 1
+            return calls["n"] > 2                      # owner for the entry check and the first watch read only
+        qm = qm_for(["c1"], target={"item": "t2", "index": 1, "pos": 47.0, "duration": 240.0, "seekable": True})
+        new_cap()._queue_not_playing_cleanup(ctx, "rid1", ZONE, qm, superseded)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        self.assertEqual(calls_of(q, "delete"), [])
+
+    def test_repause_requires_playing(self):
+        q = self.paused_tracks()
+        q.restart_plan = [{"after": 0, "item": "t2", "state": "paused"}]     # exact T current, but paused
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        self.assertEqual([c for c in ctx.ha.calls if c[1] == "media_pause"], [])
+        # A1.5 "anything else": the clip after T's buffer is deleted; T stays the pending target.
+        self.assertEqual(calls_of(q, "delete"), [("delete", "c1")])
+        rec = cap._queue_targets[ZONE]
+        self.assertEqual((rec["target"]["item"], rec["clips"], rec["live"]), ("t2", [], False))
+        r2 = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r2["metadata"]["how"], "unpause_queue")          # no clip left: un-pause in place
+
+    # I4 / A2.3 --------------------------------------------------------------------------------------------------
+    def test_repause_refreshes_the_pending_position_from_that_read(self):
+        q = self.paused_tracks()
+        q.restart_plan = [{"after": 1, "item": "t2", "state": "playing", "elapsed": 49.0}]
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)
+        self.assertEqual(cap._queue_targets[ZONE]["target"]["pos"], 49.0)
+
+    def test_resume_after_the_user_replayed_and_repaused_seeks_from_the_live_position(self):
+        q = self.paused_tracks()
+        ctx = ctx_for(q)
+        cap = new_cap()
+        say(cap, ctx)                                  # pending at 47 s, idle on c1
+        q.current = q.ids().index("t2"); q.state = "paused"; q.elapsed = 120.0   # app: play, listen, pause
+        r = capability.run(cap, ctx, {"mode": "resume"}, "rid2")
+        self.assertEqual(r["metadata"]["how"], "queue_pending")
+        self.assertEqual(calls_of(q, "play_index"), [("play_index", "t2", 120)])
+        self.assertEqual(q.ids(), ["t1", "t2", "t3"])
+
+    # minor --------------------------------------------------------------------------------------------------------
+    def test_superseded_check_directly_before_the_buffer_reset_play_index(self):
+        q = FakeQueue([track(i) for i in range(1, 9)], current=2, elapsed=47.0)
+        q.start_after = [0, None]                      # would need the buffer reset (case 4)
+        cap = new_cap()
+        real = interaction.parse_queue_capture
+
+        def parse(reply, now):
+            if calls_of(q, "play_index"):              # the buffer reset's position read
+                with cap._lock:
+                    cap._say_gen[ZONE] += 1
+            return real(reply, now)
+        interaction.parse_queue_capture = parse
+        try:
+            say(cap, ctx_for(q))
+        finally:
+            interaction.parse_queue_capture = real
+        self.assertEqual(len(calls_of(q, "play_index")), 1)
+
+    def test_superseded_exit_leaves_a_clip_before_the_successors_current_item(self):
+        # The realistic barge-in layout: our clip c1 sits BEFORE the successor's current clip c2, inside MA's
+        # buffer. No delete is sent (it would be a silent no-op) and c1 stays recorded.
+        q = FakeQueue([track(1), track(2), clip_item("c1", CLIP), clip_item("c2", CLIP2), track(3)], current=3)
+        ctx = ctx_for(q)
+        cap = new_cap()
+        cap._queue_targets[ZONE] = {"gen": 9, "rid": "ridB", "target": None, "clips": ["c2"], "live": True}
+        qm = qm_for(["c1"])
+        cap._queue_superseded_exit(ctx, "ridA", ZONE, qm, 3)
+        self.assertEqual(calls_of(q, "delete"), [])
+        self.assertEqual(qm["clips"], ["c1"])
+        self.assertIn("c1", q.ids())
 
 
 if __name__ == "__main__":

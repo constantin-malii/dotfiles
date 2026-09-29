@@ -27,6 +27,8 @@ MAX_EXTRAPOLATE_S = 60.0       # elapsed_time_last_updated is MA's clock, `now` 
 # Amendment A1 (design 4.8)
 CLEANUP_READ_CAP = 500         # a cleanup read covers the WHOLE queue; larger than this -> nothing is deleted
 RETRY_OFFSETS_S = (1.0, 2.0)   # A1.4-4: delete retries this long after play_index
+PERMISSION_WINDOW_EXTRA = 5    # A2.1: the permission read's item window = recorded clips + this, from T's index
+REPAUSE_WATCH_S = 3.0          # A2.2: how long a paused-at-start turn watches for MA restarting T by itself
 OTHER_ITEM_EPSILON_S = 1e-6    # accumulated float poll sleeps must not miss the threshold by a rounding error
 
 
@@ -577,7 +579,9 @@ class InteractionCapability(capability.Capability):
         ma = None
         try:
             ma = self._ma_open(ctx)
-            snap = self._queue_read(ma, queue_id)
+            pending = rec is not None and not rec.get("live") and rec.get("target") is not None
+            snap = self._queue_permission_read(ma, queue_id, len(rec["clips"]) if pending else 0,
+                                               rec["target"] if pending else None)
             if snap is None:
                 return None
             q = snap["q"]
@@ -595,6 +599,12 @@ class InteractionCapability(capability.Capability):
             if present:
                 t = rec["target"]
                 self._log_cleanup_read("RESUME", rid, zone, "pending resume", snap, rec["clips"])
+                if cur_id == t["item"]:
+                    # A2.3: T is current -- the user may have played and re-paused it since the record was
+                    # made, so seek from THIS read, never from the stored position.
+                    live, _ = parse_queue_capture({"result": q}, self._clock())
+                    if live is not None:
+                        t = dict(t, pos=live["pos"])
                 r = ma.play_index(queue_id, t["item"], seek_position=seek_target(t))
                 t0 = self._clock()
                 if r is None:
@@ -619,7 +629,7 @@ class InteractionCapability(capability.Capability):
                 # play_index just reset to T. Presence decides, so a lagging play_index cannot make a no-op
                 # delete of a still-current clip count as done.
                 n, snap = self._queue_cleanup(ma, "RESUME", rid, zone, queue_id, kept, "after play_index",
-                                              stop=superseded)
+                                              target=t, stop=superseded)
                 deleted += n
                 poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
                 seen, _ = self._queue_confirm(ma, queue_id, t["item"], poll_secs)
@@ -1746,38 +1756,96 @@ class InteractionCapability(capability.Capability):
                         list(clips))
             return
         q = snap["q"]
+        absent = "absent" if snap["complete"] else "?"
+        if snap.get("window") is not None:
+            extra = " window=%d+%d" % snap["window"]
+        else:
+            extra = ""
+        if not snap["complete"] and snap.get("window") is None:
+            extra += " (incomplete: %s)" % snap["why"]
+        elif snap.get("why"):
+            extra += " (%s)" % snap["why"]
         LOG.info("%s req=%s zone=%s cleanup read (%s): state=%s current=%s current_index=%s index_in_buffer=%s "
                  "clips=%s items=%s%s", tag, rid, zone, label, q.get("state"),
                  (q.get("current_item") or {}).get("queue_item_id"), q.get("current_index"),
                  q.get("index_in_buffer"),
-                 ",".join("%s@%s" % (c, snap["index_of"].get(c, "absent")) for c in clips) or "-",
-                 q.get("items"), "" if snap["complete"] else " (incomplete: %s)" % snap["why"])
+                 ",".join("%s@%s" % (c, snap["index_of"].get(c, absent)) for c in clips) or "-",
+                 q.get("items"), extra)
 
-    def _queue_cleanup(self, ma, tag, rid, zone, queue_id, clips, label, snap=None, skip=None, stop=None):
-        """Design 4.8 A1.2 + A1.3: from one read, delete each clip in `clips` that delete_permission allows, and
-        after EVERY delete re-read and decide by presence alone -- MA's reply is logged, never trusted (it says
-        success for a no-op, spike 4). `clips` is mutated: ids verified deleted, or absent from a complete read,
-        are removed; every other id stays recorded. `skip(cid)` -> True leaves a clip alone (checked
-        immediately before its delete); `stop()` -> True ends the pass (superseded). The post-delete read is
-        the permission read for the next clip, since a delete shifts indices. -> (verified deletes, last read).
-        """
+    def _queue_permission_read(self, ma, queue_id, n_clips, target=None):
+        """Design 4.8 A2.1: the PERMISSION read -- queue_state plus a small item window starting at T's index
+        (limit = recorded clips + PERMISSION_WINDOW_EXTRA). Light enough to send the first delete inside the
+        short window after play_index; presence is never concluded from it unless the window happens to cover
+        the whole queue. T's index is the live current_index when T is current, else the captured one; with no
+        target, the current index. -> None when the state read fails, else a snapshot like _queue_read's with
+        `window` = (offset, limit)."""
+        try:
+            s = ma.queue_state(queue_id)
+        except Exception:
+            return None
+        if not _ma_ok(s):
+            return None
+        q = s.get("result") or {}
+        cur = (q.get("current_item") or {}).get("queue_item_id")
+        cur_idx = q.get("current_index")
+        t_idx = None
+        if target is not None:
+            if cur == target.get("item") and _is_int(cur_idx):
+                t_idx = cur_idx
+            elif _is_int(target.get("index")):
+                t_idx = target["index"]
+        offset = t_idx if t_idx is not None else (cur_idx if _is_int(cur_idx) else 0)
+        offset = max(0, offset)
+        limit = n_clips + PERMISSION_WINDOW_EXTRA
+        snap = {"q": q, "index_of": {}, "complete": False, "why": None, "window": (offset, limit)}
+        try:
+            r = ma.queue_items(queue_id, offset=offset, limit=limit)
+        except Exception as e:
+            snap["why"] = "item window read failed (%r)" % (e,)
+            return snap
+        if not _ma_ok(r):
+            snap["why"] = "item window read failed"
+            return snap
+        items = r.get("result") or []
+        for i, it in enumerate(items):
+            qiid = (it or {}).get("queue_item_id")
+            if qiid:
+                snap["index_of"][qiid] = offset + i
+        total = q.get("items")
+        snap["complete"] = offset == 0 and _is_int(total) and len(items) == total
+        return snap
+
+    def _queue_cleanup(self, ma, tag, rid, zone, queue_id, clips, label, target=None, snap=None, skip=None,
+                       stop=None):
+        """Design 4.8 A1.2 + A1.3 + A2.1. One PERMISSION read (queue_state + a window at T's index); every clip
+        delete_permission allows is deleted straight from it -- so the first delete after a play_index goes out
+        before any whole-queue read. Then, if anything was sent, ONE whole-queue VERIFICATION read decides by
+        presence alone: MA's reply is logged, never trusted (it says success for a no-op, spike 4). Sending the
+        permitted deletes back to back from one read is safe: each lies after the buffer, and removing one
+        only shifts later items down onto indices still after it.
+
+        `clips` is mutated: ids verified deleted, or absent from a read that covers the whole queue, are
+        removed; every other id stays recorded. `skip(cid)` -> True leaves a clip alone (checked immediately
+        before its delete); `stop()` -> True ends the pass (superseded). -> (verified deletes, latest read);
+        the latest read is the verification read when one was made (None if it failed)."""
         if snap is None:
-            snap = self._queue_read(ma, queue_id)
+            snap = self._queue_permission_read(ma, queue_id, len(clips), target)
         self._log_cleanup_read(tag, rid, zone, label, snap, clips)
-        deleted = 0
+        if snap is None:
+            return 0, None
+        sent = []
         for cid in list(clips):
-            if snap is None:
-                break                               # read failed: nothing can be judged (logged above)
             if stop is not None and stop():
                 LOG.info("%s req=%s zone=%s cleanup (%s) stopped: superseded; clips kept %s", tag, rid, zone,
                          label, list(clips))
                 break
-            if not snap["complete"]:
-                LOG.info("%s req=%s zone=%s clip %s kept: %s", tag, rid, zone, cid, snap["why"])
-                continue
             if cid not in snap["index_of"]:
-                clips.remove(cid)
-                LOG.info("%s req=%s zone=%s clip %s already gone from the queue", tag, rid, zone, cid)
+                if snap["complete"]:
+                    clips.remove(cid)
+                    LOG.info("%s req=%s zone=%s clip %s already gone from the queue", tag, rid, zone, cid)
+                else:
+                    LOG.info("%s req=%s zone=%s clip %s kept: not in the read window%s", tag, rid, zone, cid,
+                             (" (%s)" % snap["why"]) if snap.get("why") else "")
                 continue
             if skip is not None and skip(cid):
                 continue
@@ -1791,17 +1859,24 @@ class InteractionCapability(capability.Capability):
                          "error %s" % (r.get("error_code") if isinstance(r, dict) else "no reply"))
             except Exception as e:
                 reply = "raised %r" % (e,)
-            snap = self._queue_read(ma, queue_id)
-            self._log_cleanup_read(tag, rid, zone, label + " verify", snap, clips)
-            if snap is not None and snap["complete"] and cid not in snap["index_of"]:
+            sent.append((cid, reply))
+        if not sent:
+            return 0, snap
+        ver = self._queue_read(ma, queue_id)
+        self._log_cleanup_read(tag, rid, zone, label + " verify", ver, clips)
+        deleted = 0
+        for cid, reply in sent:
+            if ver is not None and ver["complete"] and cid not in ver["index_of"]:
                 deleted += 1
                 clips.remove(cid)
                 LOG.info("%s req=%s zone=%s clip %s deleted (%s; verified absent; reply %s)", tag, rid, zone,
                          cid, label, reply)
             else:
-                LOG.warning("%s req=%s zone=%s clip %s still in the queue after delete (reply %s); kept recorded",
-                            tag, rid, zone, cid, reply)
-        return deleted, snap
+                LOG.warning("%s req=%s zone=%s clip %s not verified deleted (reply %s; %s); kept recorded",
+                            tag, rid, zone, cid, reply,
+                            "still in the queue after delete" if ver is not None and ver["complete"]
+                            else "verification read %s" % ("failed" if ver is None else ver["why"]))
+        return deleted, ver
 
     def _queue_jump_tail(self, ma, tag, rid, zone, queue_id, target, clips, t0, snap, superseded):
         """Design 4.8 A1.4 steps 4-5, after play_index(T) at clock `t0` and its immediate cleanup (`snap` = the
@@ -1827,9 +1902,9 @@ class InteractionCapability(capability.Capability):
             if superseded():
                 break
             n, snap = self._queue_cleanup(ma, tag, rid, zone, queue_id, clips, "retry +%ds" % int(off),
-                                          stop=superseded)
+                                          target=target, stop=superseded)
             deleted += n
-        if not clips or superseded() or snap is None or not snap["complete"]:
+        if not clips or superseded() or snap is None:
             return deleted
         q = snap["q"]
         if buffer_problem(q) is not None:
@@ -1848,6 +1923,9 @@ class InteractionCapability(capability.Capability):
                             "seekable": target.get("seekable")})
         LOG.info("%s req=%s zone=%s clip(s) %s loaded after item %s inside the buffer; buffer-reset play_index "
                  "(seek=%s)", tag, rid, zone, loaded, target["item"], seek if seek else "skipped")
+        if superseded():                            # directly before the jump: a successor owns the zone now
+            LOG.info("%s req=%s zone=%s buffer reset skipped: superseded", tag, rid, zone)
+            return deleted
         try:
             r = ma.play_index(queue_id, target["item"], seek_position=seek)
             if r is not None and not _ma_ok(r):
@@ -1857,7 +1935,8 @@ class InteractionCapability(capability.Capability):
             LOG.warning("%s req=%s zone=%s buffer-reset play_index raised (%r)", tag, rid, zone, e)
         if superseded():
             return deleted
-        n, snap = self._queue_cleanup(ma, tag, rid, zone, queue_id, clips, "buffer reset", stop=superseded)
+        n, snap = self._queue_cleanup(ma, tag, rid, zone, queue_id, clips, "buffer reset", target=target,
+                                      stop=superseded)
         deleted += n
         for c in loaded:
             if c in clips:
@@ -1903,7 +1982,8 @@ class InteractionCapability(capability.Capability):
                 # Permitted clips lie after the buffer, which is at or after the current index, so the capture's
                 # current_index -- this turn's anchor -- is unaffected.
                 try:
-                    n, _ = self._queue_cleanup(ma, "SAY", rid, zone, queue_id, qm["clips"], "capture sweep")
+                    n, _ = self._queue_cleanup(ma, "SAY", rid, zone, queue_id, qm["clips"], "capture sweep",
+                                               target=qm["target"])
                     qm["deleted"] += n
                 except Exception as e:
                     LOG.warning("SAY req=%s zone=%s capture sweep failed (%r)", rid, zone, e)
@@ -2075,7 +2155,7 @@ class InteractionCapability(capability.Capability):
                     # once T starts playing the buffer moves on to the next item (spike 4, 3.3-4/5).
                     try:
                         n, snap = self._queue_cleanup(ma, "SAY", rid, zone, qid, qm["clips"], "after play_index",
-                                                      stop=is_superseded)
+                                                      target=t, stop=is_superseded)
                         qm["deleted"] += n
                     except Exception as e:
                         LOG.warning("SAY req=%s zone=%s cleanup after play_index failed (%r)", rid, zone, e)
@@ -2230,42 +2310,82 @@ class InteractionCapability(capability.Capability):
         finally:
             self._ma_close(ma)
 
+    def _refresh_target_pos(self, qm, q):
+        """Design 4.8 A2.3: a read with T current is fresher than the capture -- take the position from it
+        (extrapolated per 4.3-1). qm["target"] is replaced, never mutated: it may be a record's shared dict."""
+        cap, _ = parse_queue_capture({"result": q}, self._clock())
+        if cap is not None and qm["target"] is not None and cap["item"] == qm["target"]["item"]:
+            qm["target"] = dict(qm["target"], pos=cap["pos"])
+
     def _queue_not_playing_cleanup(self, ctx, rid, zone, qm, superseded):
-        """Design 4.8 A1.5: the queue was NOT playing at capture (the reply to "pause", or a question while
-        paused/idle). After the clip, ONE read decides:
-          - current item is exactly T and the queue is playing (MA restarted it by itself, spike 4 / 3.3-3)
-            -> media_pause; the clips stay in the pending record;
-          - current item is one of our recorded clips (idle on it, 3.3-2) -> no pause; pending record;
-          - anything else (newer playback) -> no pause, no play_index; only deletes A1.2 permits, verified.
-        Only the turn that still owns the zone acts. Owns this turn's deletes (_queue_finish only books)."""
+        """Design 4.8 A1.5 as amended by A2.2: the queue was NOT playing at capture (the reply to "pause", or a
+        question while paused/idle). After the clip, WATCH the queue for up to REPAUSE_WATCH_S at say_poll_ms --
+        MA restarts a paused station by itself ~1 s after the clip (spike 4 / 3.3-3), later than one read:
+          - exact T current and `playing` -> media_pause; the clips stay in the pending record;
+          - superseded -> stop at once, nothing done;
+          - any item other than T or a recorded clip current -> stop at once: no pause, no play_index, only
+            deletes A1.2 permits, verified.
+        When the watch ends with nothing to pause, the last read decides: on a recorded clip (idle on it,
+        3.3-2) or on T not playing -> pending record; anything else -> permitted deletes. Each read with T
+        current refreshes the pending position (A2.3). Owns this turn's deletes (_queue_finish only books)."""
         if superseded():
             return
         qm["cleaned"] = True
         t = qm["target"]
+        qid = qm["queue_id"]
+        poll_secs = max(int(getattr(ctx.settings, "say_poll_ms", 500)) / 1000.0, 0.05)
         ma = None
         try:
             ma = self._ma_open(ctx)
-            snap = self._queue_read(ma, qm["queue_id"])
-            if snap is None:
+            last = None
+            waited = 0.0
+            while True:
+                if superseded():
+                    LOG.info("SAY req=%s zone=%s re-pause watch stopped: superseded", rid, zone)
+                    return
+                q = None
+                try:
+                    s = ma.queue_state(qid)
+                    if _ma_ok(s):
+                        q = s.get("result") or {}
+                except Exception:
+                    q = None
+                if q is not None:
+                    last = q
+                    cur = (q.get("current_item") or {}).get("queue_item_id")
+                    if t is not None and cur == t["item"]:
+                        self._refresh_target_pos(qm, q)
+                        if q.get("state") == "playing":
+                            if superseded():
+                                return
+                            LOG.info("SAY req=%s zone=%s queue restarted item %s by itself after the reply "
+                                     "(watch %.1fs); pausing it again (clips stay pending %s)", rid, zone, cur,
+                                     waited, qm["clips"])
+                            self._say_call(ctx, rid, zone, "media_player", "media_pause", {"entity_id": zone})
+                            return
+                    elif cur is not None and cur not in qm["clips"]:
+                        LOG.info("SAY req=%s zone=%s re-pause watch: another item %s is current; no pause",
+                                 rid, zone, cur)
+                        break
+                if waited + OTHER_ITEM_EPSILON_S >= REPAUSE_WATCH_S:
+                    break
+                self._sleeper(poll_secs)
+                waited += poll_secs
+            if last is None:
                 self._log_cleanup_read("SAY", rid, zone, "after reply, not playing", None, qm["clips"])
                 return
-            q = snap["q"]
-            cur = (q.get("current_item") or {}).get("queue_item_id")
-            if t is not None and cur == t["item"] and q.get("state") == "playing":
-                self._log_cleanup_read("SAY", rid, zone, "after reply, not playing", snap, qm["clips"])
-                if superseded():
-                    return
-                LOG.info("SAY req=%s zone=%s queue restarted item %s by itself after the reply; pausing it again "
-                         "(clips stay pending %s)", rid, zone, cur, qm["clips"])
-                self._say_call(ctx, rid, zone, "media_player", "media_pause", {"entity_id": zone})
-                return
+            cur = (last.get("current_item") or {}).get("queue_item_id")
+            if t is not None and cur == t["item"]:
+                # Not playing, so nothing to re-pause; A1.5 "anything else": permitted deletes only. T itself
+                # stays the pending target (an un-pause in place resumes it once no clip is left).
+                LOG.info("SAY req=%s zone=%s item %s current but %s after the reply; not paused", rid, zone, cur,
+                         last.get("state"))
             if cur is not None and cur in qm["clips"]:
-                self._log_cleanup_read("SAY", rid, zone, "after reply, not playing", snap, qm["clips"])
                 LOG.info("SAY req=%s zone=%s clip left as current item %s (still current); pending resume keeps it",
                          rid, zone, cur)
                 return
-            n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qm["queue_id"], qm["clips"],
-                                       "after reply, not playing", snap=snap, stop=superseded)
+            n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qid, qm["clips"], "after reply, not playing",
+                                       target=t, stop=superseded)
             qm["deleted"] += n
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s clip cleanup (not playing) failed (%r)", rid, zone, e)
@@ -2281,7 +2401,8 @@ class InteractionCapability(capability.Capability):
         try:
             if qm["clips"] and not qm.get("cleaned"):
                 ma = self._ma_open(ctx)
-                n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qm["queue_id"], qm["clips"], "finish")
+                n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qm["queue_id"], qm["clips"], "finish",
+                                           target=qm["target"])
                 qm["deleted"] += n
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s clip cleanup failed (%r)", rid, zone, e)
@@ -2305,7 +2426,9 @@ class InteractionCapability(capability.Capability):
                         del self._queue_targets[zone]
                 else:
                     # Did not resume, or resume unconfirmed/unknown: a later "resume" continues from here.
+                    # The target carries any position refreshed from a read with T current (A2.3).
                     rec["live"] = False
+                    rec["target"] = qm["target"]
                     rec["clips"] = list(qm["clips"])
         if qm["target"] is not None and qm["resume"] not in ("confirmed", "fallback_uri"):
             LOG.info("SAY req=%s zone=%s pending resume recorded (item=%s clips=%s)",
@@ -2348,7 +2471,7 @@ class InteractionCapability(capability.Capability):
         try:
             ma = self._ma_open(ctx)
             n, _ = self._queue_cleanup(ma, "SAY", rid, zone, qm["queue_id"], qm["clips"], "superseded",
-                                       skip=successor_owns)
+                                       target=qm["target"], skip=successor_owns)
             qm["deleted"] += n
         except Exception as e:
             LOG.warning("SAY req=%s zone=%s superseded: own clip cleanup failed (%r)", rid, zone, e)
