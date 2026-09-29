@@ -235,7 +235,7 @@ item list around the positions involved.
 **A1.1 Finish rule (queue mode).**
 - HA `state` not `playing` (idle, paused, off, …) → the clip has ended, immediately (existing two-reading rule).
 - HA `playing` with a **different, non-empty** media id → counts as the end only after it has persisted
-  **≥ 1.5 s continuously** (`say_queue_other_item_s`, default 1.5); any reading back on the clip resets it.
+  **≥ 1.5 s continuously** (`say_queue_other_item_ms`, default 1500, matching the other `say_*_ms` settings); any reading back on the clip resets it.
 - The empty-media-id grace, the finish timeout and the turn deadline are unchanged.
 - The MA cross-check (`clip_still_current`) is removed.
 
