@@ -30,12 +30,13 @@ sys.path.insert(0, ROOT)
 
 # Everything the announce work touches, plus the test modules -- those are deployed too, for the
 # on-host parity run, so they run under 3.5 as well.
-MODULES = ["interaction.py", "haconn.py", "config.py", "wsutil.py", "maconn.py", "music.py"]
+MODULES = ["interaction.py", "haconn.py", "config.py", "wsutil.py", "maconn.py", "music.py",
+           "tools/ha_apply.py"]
 TEST_MODULES = ["tests/test_interaction.py", "tests/test_haconn.py",
                 "tests/test_config.py", "tests/test_wsutil.py",
                 "tests/test_py35_compat.py", "tests/test_queue_resume.py",
                 "tests/test_maconn.py", "tests/test_playlist.py",
-                "tests/test_ha_garage_policy.py"]
+                "tests/test_ha_garage_policy.py", "tests/test_ha_apply.py"]
 
 
 def _node(name):
