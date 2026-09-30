@@ -331,5 +331,116 @@ class NotifyUsageTest(unittest.TestCase):
                     self.assertEqual(tag, "garage")
 
 
+NON_ENTITY_TARGETS = ("area_id", "device_id", "floor_id", "label_id")
+
+
+def entity_targets(d):
+    """(entity_ids, has_non_entity_target) for a service-call dict, merging top level, target and data."""
+    ents, other = [], False
+    for src in (d, d.get("target"), d.get("data")):
+        if not isinstance(src, dict):
+            continue
+        e = src.get("entity_id")
+        if isinstance(e, str):
+            ents.append(e)
+        elif isinstance(e, list):
+            ents.extend(str(x) for x in e)
+        other = other or any(k in src for k in NON_ENTITY_TARGETS)
+    return ents, other
+
+
+def could_move_door(d):
+    """True if this action might move THE GARAGE DOOR. Scoped to the door, not every cover.
+    Provably safe only when it is a service call with explicit, literal entity ids that are not the door.
+    Area/device/floor/label targets, templated or missing entity ids, 'all', and cover device actions
+    (offline their device id cannot be resolved) cannot be proven safe, so they count; stage 3's live
+    audit resolves the door's device id and is exact for device actions."""
+    if is_device_action(d):
+        return d.get("domain") == "cover" or DOOR in json.dumps(d)
+    act = d.get("action") if isinstance(d.get("action"), str) else ""
+    if not (act.startswith("cover.") or act in GENERIC_MOVES):
+        return False
+    ents, other = entity_targets(d)
+    # Substring, not equality: a legacy comma-separated string "cover.a, cover.msg100_..." is one element.
+    # Generic turn_on/toggle falls through to the same tail: homeassistant.turn_on on a cover OPENS it,
+    # so "all", a template or a missing entity target is as risky there as on cover.*.
+    return (any(DOOR in e for e in ents) or other or not ents or "all" in ents
+            or any("{{" in e or "{%" in e for e in ents))
+
+
+def moving_actions(obj):
+    return [d for d in actions_in(obj) + device_actions_in(obj) if could_move_door(d)]
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class HardRulesTest(unittest.TestCase):
+    def test_rule1_nothing_anywhere_opens_the_door(self):
+        for label, obj in all_managed():
+            for d in moving_actions(obj):
+                self.assertNotIn(d.get("action"), FORBIDDEN_MOVES, "%s: %s could open/move the door" % (label, d))
+
+    def test_rule2_only_the_close_script_can_move_the_door(self):
+        for label, obj in all_managed():
+            if label == "scripts/garage_close_checked.json":
+                continue
+            self.assertEqual(moving_actions(obj), [], "%s has an action that could move the door" % label)
+
+    def test_could_move_door_is_scoped_to_the_door(self):
+        other = "cover.living_room_blinds"
+        safe = [{"action": "cover.close_cover", "target": {"entity_id": other}},
+                {"action": "cover.open_cover", "target": {"entity_id": [other, "cover.bedroom_blinds"]}},
+                {"action": "homeassistant.turn_on", "target": {"entity_id": "light.porch"}},
+                {"action": "light.turn_on", "target": {"area_id": "garage"}}]
+        risky = [{"action": "cover.close_cover", "target": {"entity_id": DOOR}},
+                 {"action": "cover.open_cover", "data": {"entity_id": [other, DOOR]}},
+                 {"action": "cover.close_cover", "target": {"area_id": "garage"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "all"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "{{ door }}"}},
+                 {"action": "cover.close_cover"},
+                 {"action": "homeassistant.toggle", "target": {"area_id": "garage"}},
+                 {"action": "homeassistant.turn_on", "target": {"entity_id": "all"}},
+                 {"action": "homeassistant.turn_on", "target": {"entity_id": "{{ door }}"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "cover.a, " + DOOR}},
+                 {"device_id": "abc", "domain": "cover", "entity_id": "0123uuid", "type": "open"}]
+        for d in safe:
+            self.assertFalse(could_move_door(d), d)
+        for d in risky:
+            self.assertTrue(could_move_door(d), d)
+
+    def test_device_action_detector_sees_the_ui_shape(self):
+        ui = {"actions": [{"device_id": "abc", "domain": "cover", "entity_id": DOOR, "type": "close"}],
+              "conditions": [{"condition": "device", "device_id": "abc", "domain": "cover", "type": "is_open"}],
+              "triggers": [{"trigger": "device", "device_id": "abc", "domain": "cover", "type": "opened"}]}
+        found = device_actions_in(ui)
+        self.assertEqual(found, [ui["actions"][0]], "only the action, not the device trigger/condition")
+
+    def test_rule2_rule4_only_the_handler_invokes_the_close_script(self):
+        for label, obj in all_managed():
+            if label == "automations/garage_notification_action.json":
+                continue
+            text = json.dumps(obj)
+            self.assertNotIn("garage_close_checked", text.replace('"object_id": "garage_close_checked"', ""),
+                             "%s references the close script" % label)
+
+    def test_rule3_only_status_script_may_be_exposed(self):
+        with open(os.path.join(HA, "exposure", "assistants.json"), encoding="utf-8") as fh:
+            exposed = json.load(fh)["exposed_entities"]
+        garage = sorted(k for k in exposed if "garage" in k or k == DOOR)
+        self.assertIn(garage, ([], ["script.garage_status"]))
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class ManifestTest(unittest.TestCase):
+    def test_manifest_lists_every_garage_resource(self):
+        with open(os.path.join(HA, "MANIFEST.json"), encoding="utf-8") as fh:
+            m = json.load(fh)
+        for name in SCRIPTS:
+            self.assertIn(name, m["scripts"])
+        for name in AUTOMATIONS:
+            self.assertIn(name, m["automations"])
+        self.assertEqual(m["scripts"], sorted(m["scripts"]))
+        self.assertEqual(m["automations"], sorted(m["automations"]))
+
+
 if __name__ == "__main__":
     unittest.main()

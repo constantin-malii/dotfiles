@@ -1079,8 +1079,8 @@ class RealRepositoryManifestTest(unittest.TestCase):
         # The same function the exporter runs first, so a bad manifest fails here not on the host.
         ha_export.validate_manifest(self.manifest)
 
-    def test_declared_counts_match_the_live_inventory_recorded_2026_09_06(self):
-        expected = {"scripts": 16, "automations": 7, "pipelines": 5, "satellite_entities": 6}
+    def test_declared_counts_match_the_live_inventory_recorded_2026_09_06_plus_ha08(self):
+        expected = {"scripts": 19, "automations": 13, "pipelines": 5, "satellite_entities": 6}  # 2026-09-06 + HA-08 (3 scripts, 6 automations)
         for key, count in sorted(expected.items()):
             values = self.manifest[key]
             self.assertEqual(len(values), count, "%s: expected %d, got %d" % (key, count, len(values)))
