@@ -66,5 +66,79 @@ class PlaylistTracksTest(unittest.TestCase):
         self.assertEqual(self._ma(None).playlist_tracks(28), [])
 
 
+class QueueHelpersTest(unittest.TestCase):
+    def _ma(self, reply=None):
+        m = MA("h", 1, "t")
+        m.calls = []
+        def cmd(command, **a):
+            m.calls.append((command, a)); return reply
+        m.cmd = cmd
+        return m
+
+    def test_queue_state(self):
+        m = self._ma({"result": {"state": "playing"}})
+        self.assertEqual(m.queue_state("q1"), {"result": {"state": "playing"}})
+        self.assertEqual(m.calls, [("player_queues/get", {"queue_id": "q1"})])
+
+    def test_queue_items_window(self):
+        m = self._ma({"result": []})
+        m.queue_items("q1", offset=55, limit=5)
+        self.assertEqual(m.calls, [("player_queues/items", {"queue_id": "q1", "offset": 55, "limit": 5})])
+
+    def test_play_index_with_seek_position(self):
+        m = self._ma({"result": None})
+        m.play_index("q1", "abc", seek_position=47)
+        self.assertEqual(m.calls, [("player_queues/play_index",
+                                    {"queue_id": "q1", "index": "abc", "seek_position": 47})])
+
+    def test_play_index_default_from_start(self):
+        m = self._ma({"result": None})
+        m.play_index("q1", "abc")
+        self.assertEqual(m.calls[0][1]["seek_position"], 0)
+
+    def test_delete_item(self):
+        m = self._ma({"result": None})
+        m.delete_item("q1", "c9")
+        self.assertEqual(m.calls, [("player_queues/delete_item", {"queue_id": "q1", "item_id_or_index": "c9"})])
+
+
+class ConnectTimeoutTest(unittest.TestCase):
+    """MR-08c I3: the reply path passes short timeouts; every other caller keeps today's."""
+
+    def setUp(self):
+        import maconn
+        self.wsutil = maconn.wsutil
+        self.saved = (self.wsutil.ws_connect, self.wsutil.ws_read, self.wsutil.ws_send)
+        self.connects = []
+        test = self
+
+        class Sock(object):
+            def __init__(self):
+                self.timeouts = []
+            def settimeout(self, t):
+                self.timeouts.append(t)
+
+        def ws_connect(host, port, path, **kw):
+            test.sock = Sock()
+            test.connects.append((host, port, path, kw))
+            return test.sock, {"b": b""}
+        self.wsutil.ws_connect = ws_connect
+        self.wsutil.ws_read = lambda s, box: {"message_id": "1"}
+        self.wsutil.ws_send = lambda s, obj: None
+
+    def tearDown(self):
+        self.wsutil.ws_connect, self.wsutil.ws_read, self.wsutil.ws_send = self.saved
+
+    def test_default_connect_is_unchanged(self):
+        MA("h", 1, "t").connect()
+        self.assertEqual(self.connects, [("h", 1, "/ws", {})])     # ws_connect's own 15 s default
+        self.assertEqual(self.sock.timeouts, [60])
+
+    def test_timeouts_passed_through(self):
+        MA("h", 1, "t").connect(connect_timeout=3.0, call_timeout=5.0)
+        self.assertEqual(self.connects, [("h", 1, "/ws", {"timeout": 3.0})])
+        self.assertEqual(self.sock.timeouts, [5.0])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

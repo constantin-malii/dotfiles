@@ -11,8 +11,14 @@ class MA(object):
         self.host = host; self.port = port; self.token = token
         self.s = None; self.box = None; self.mid = 0
 
-    def connect(self):
-        self.s, self.box = wsutil.ws_connect(self.host, self.port, "/ws"); self.s.settimeout(60)
+    def connect(self, connect_timeout=None, call_timeout=None):
+        # Both None (music, radio): ws_connect's own default and a 60 s call timeout, as always.
+        # MR-08c's reply path passes short ones so an unresponsive MA cannot stall a reply.
+        if connect_timeout is None:
+            self.s, self.box = wsutil.ws_connect(self.host, self.port, "/ws")
+        else:
+            self.s, self.box = wsutil.ws_connect(self.host, self.port, "/ws", timeout=connect_timeout)
+        self.s.settimeout(call_timeout or 60)
         wsutil.ws_read(self.s, self.box)                 # server-info
         self.cmd("auth", token=self.token)
 
@@ -39,6 +45,21 @@ class MA(object):
         res = (r or {}).get("result")
         items = res.get("items") if isinstance(res, dict) else (res or [])
         return list(items)[:limit]
+
+    # MR-08c queue helpers (design 4.2). Raw replies: callers check "error_code".
+    def queue_state(self, queue_id):
+        return self.cmd("player_queues/get", queue_id=queue_id)
+
+    def queue_items(self, queue_id, offset=0, limit=50):
+        return self.cmd("player_queues/items", queue_id=queue_id, offset=offset, limit=limit)
+
+    def play_index(self, queue_id, queue_item_id, seek_position=0):
+        # One call resumes at a position (spike 3, design 3.2-3): no play-from-0-then-seek blip.
+        return self.cmd("player_queues/play_index", queue_id=queue_id, index=queue_item_id,
+                        seek_position=int(seek_position))
+
+    def delete_item(self, queue_id, queue_item_id):
+        return self.cmd("player_queues/delete_item", queue_id=queue_id, item_id_or_index=queue_item_id)
 
     def play(self, queue_id, uri, option="replace"):
         # "replace" => fresh queue each time (immune to stale/contaminated queue state)

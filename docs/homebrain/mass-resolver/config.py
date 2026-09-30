@@ -99,6 +99,11 @@ class Settings(object):
         # Silence the outgoing music before raising to reply_volume, so the raise is not heard as a
         # "bump" on the ~1s of music still playing before the clip replaces the stream.
         self.say_pause_before_reply = bool(cfg.get("say_pause_before_reply", True))
+        # MR-08c kill switch: false = the legacy replace-and-replay reply path, exactly as before.
+        self.say_queue_resume = bool(cfg.get("say_queue_resume", True))
+        # MR-08c A1.1: in queue mode, HA `playing` with ANOTHER media id ends a reply clip only after it has
+        # persisted this long -- MA flips back to the interrupted item for ~0.75 s mid-clip (spike 4).
+        self.say_queue_other_item_ms = int(cfg.get("say_queue_other_item_ms", 1500))
         # ---- AN-01 announce mode (design 6.2) -------------------------------------------
         # Louder than reply_volume: an announcement has to carry through the house, where a reply
         # only has to reach the person who asked.

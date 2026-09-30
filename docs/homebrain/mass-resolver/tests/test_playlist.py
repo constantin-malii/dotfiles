@@ -382,5 +382,20 @@ class DispatchIntegrationTest(unittest.TestCase):
         self.assertEqual(ctx.speaker.said, [])
 
 
+class MissLoggingTest(unittest.TestCase):
+    def test_miss_logs_the_query(self):
+        ma = FakeMA({"playlist": [curated("my music - costea (local)", "28")]}, {"28": EIGHT})
+        with self.assertLogs("resolver", "INFO") as lg:
+            r = run(ma, "Costa Rica")
+        self.assertFalse(r["ok"])
+        self.assertTrue(any("MISS" in m and "'Costa Rica'" in m for m in lg.output))
+
+    def test_hit_logs_no_miss(self):
+        ma = FakeMA({"playlist": [curated("my music - costea (local)", "28")]}, {"28": EIGHT})
+        with self.assertLogs("resolver", "INFO") as lg:
+            run(ma, "my music - costea (local)")
+        self.assertFalse(any("MISS" in m for m in lg.output))
+
+
 if __name__ == "__main__":
     unittest.main()
