@@ -192,12 +192,15 @@ def actions_in(obj):
     return [d for d in walk(obj) if isinstance(d.get("action"), str)]
 
 
+def is_device_action(d):
+    """A UI 'device action' has no "action" key: {device_id, domain, entity_id, type}. Device triggers and
+    conditions share that shape but carry "trigger"/"platform" or "condition", so they are not actions."""
+    return (isinstance(d, dict) and "device_id" in d and "domain" in d and "type" in d
+            and "action" not in d and not any(k in d for k in ("condition", "trigger", "platform")))
+
+
 def device_actions_in(obj):
-    """UI 'device actions' have no "action" key: {device_id, domain, entity_id, type}. Device triggers and
-    conditions share that shape but carry "trigger"/"platform" or "condition", so those are excluded."""
-    return [d for d in walk(obj)
-            if "device_id" in d and "domain" in d and "type" in d
-            and not any(k in d for k in ("condition", "trigger", "platform"))]
+    return [d for d in walk(obj) if is_device_action(d)]
 
 
 def notify_calls(obj):
@@ -838,17 +841,17 @@ def could_move_door(d):
     Area/device/floor/label targets, templated or missing entity ids, 'all', and cover device actions
     (offline their device id cannot be resolved) cannot be proven safe, so they count; stage 3's live
     audit resolves the door's device id and is exact for device actions."""
-    if d in device_actions_in(d):
+    if is_device_action(d):
         return d.get("domain") == "cover" or DOOR in json.dumps(d)
     act = d.get("action") if isinstance(d.get("action"), str) else ""
     if not (act.startswith("cover.") or act in GENERIC_MOVES):
         return False
     ents, other = entity_targets(d)
-    if DOOR in ents:
-        return True
-    if act in GENERIC_MOVES:
-        return other          # a generic turn_on/toggle by area could include the door
-    return other or not ents or "all" in ents or any("{{" in e or "{%" in e for e in ents)
+    # Substring, not equality: a legacy comma-separated string "cover.a, cover.msg100_..." is one element.
+    # Generic turn_on/toggle falls through to the same tail: homeassistant.turn_on on a cover OPENS it,
+    # so "all", a template or a missing entity target is as risky there as on cover.*.
+    return (any(DOOR in e for e in ents) or other or not ents or "all" in ents
+            or any("{{" in e or "{%" in e for e in ents))
 
 
 def moving_actions(obj):
@@ -881,6 +884,9 @@ class HardRulesTest(unittest.TestCase):
                  {"action": "cover.close_cover", "target": {"entity_id": "{{ door }}"}},
                  {"action": "cover.close_cover"},
                  {"action": "homeassistant.toggle", "target": {"area_id": "garage"}},
+                 {"action": "homeassistant.turn_on", "target": {"entity_id": "all"}},
+                 {"action": "homeassistant.turn_on", "target": {"entity_id": "{{ door }}"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "cover.a, " + DOOR}},
                  {"device_id": "abc", "domain": "cover", "entity_id": "0123uuid", "type": "open"}]
         for d in safe:
             self.assertFalse(could_move_door(d), d)
@@ -1645,11 +1651,10 @@ for s in get("/api/states"):
                 other = other or any(k in src for k in ("area_id", "device_id", "floor_id", "label_id"))
         if is_device_action:
             moves = d.get("device_id") == DEV or DOOR in text
-        elif act.startswith("cover."):
-            moves = (DOOR in ents or other or not ents or "all" in ents
+        elif act.startswith("cover.") or act in GENERIC:
+            # homeassistant.turn_on on a cover opens it, so generic calls get the same tail as cover.*
+            moves = (any(DOOR in x for x in ents) or other or not ents or "all" in ents
                      or any("{{" in x or "{%" in x for x in ents))
-        elif act in GENERIC:
-            moves = DOOR in ents or other
         else:
             moves = False
         calls_close = act in ("script.garage_close_checked", "script.turn_on") and "garage_close_checked" in text
