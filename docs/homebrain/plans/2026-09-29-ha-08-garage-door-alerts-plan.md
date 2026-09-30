@@ -69,7 +69,7 @@ it first; this plan argues from it.
 1. **Snooze tapped on a stale alert after the door closed.** Expected: nothing happens. If the timer started, the
    *next* opening within 3 h would get no reminders. → `test_snooze_refused_when_door_closed` (Task 3).
 2. **The door closes while HA is down,** so the `to: closed` cleanup is missed and the counter or snooze stays set.
-   Expected: the next episode alerts normally. → `test_cleanup_runs_at_boot_without_conditions` and
+   Expected: the next episode alerts normally. → `test_cleanup_runs_at_boot_and_only_acts_when_closed` and
    `test_initial_alert_resets_counter` (Task 3).
 3. **A person in a named zone (e.g. "Work"), or `unknown` at boot.** Expected: a named zone counts as away;
    `unknown`/`unavailable` does **not**. → `test_away_alert_requires_both_known_away_5min` (Task 3).
@@ -1430,6 +1430,10 @@ Expected: `backup=none (not present)` for both, then `applied; read-back matches
   3. `{"clear": true, "tag": "garage"}` → #1 disappears and #2 stays.
   4. `{"clear": true, "tag": "garage_result"}` → #2 disappears.
   Record the result per phone. A missing button or a failed replace/clear → **stop** (spec §7).
+  Each phone's call is guarded by its own registration check (`states.notify.sm_s948w_<phone> is not none`;
+  pre-live review fix). A real send must reach **both** phones, and **no** "Garage alerts: a phone is not
+  registered" persistent notification may appear. If one does, that phone's Companion registration is missing:
+  **stop**.
 
 - [ ] **Step 6: Run the status script in each real state.** `POST /api/services/script/garage_status?return_response=true`
   with the door closed → `"The garage door is closed."`. The operator opens the door; after it settles, the same call

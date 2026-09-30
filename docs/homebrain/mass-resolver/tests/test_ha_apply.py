@@ -123,6 +123,16 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(self.run_main(["--delete", p], c), 0)
         self.assertNotIn("DELETE", [m for m, _ in c.calls])
 
+    def test_same_resource_twice_in_one_run_is_refused_before_any_call(self):
+        # One timestamp per run: a second push of the same id would overwrite the first backup with the
+        # already-pushed state, losing the true original.
+        a = self.write("a.json", {"object_id": "garage_notify", "alias": "a"})
+        b = self.write("b.json", {"object_id": "garage_notify", "alias": "b"})
+        c = FakeClient()
+        self.assertEqual(self.run_main([a, b], c), 1)
+        self.assertEqual(c.calls, [], "refused before touching HA")
+        self.assertIn("more than once", self.lines[-1])
+
     def test_dry_run_and_delete_are_exclusive(self):
         p = self.write("s.json", {"object_id": "garage_status"})
         self.assertEqual(self.run_main(["--dry-run", "--delete", p], FakeClient()), 1)

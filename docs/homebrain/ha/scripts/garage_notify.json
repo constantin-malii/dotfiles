@@ -1,6 +1,6 @@
 {
   "alias": "Garage: notify phones",
-  "description": "HA-08, internal. Sends or clears a garage notification on both household phones. Tag 'garage' = actionable alerts (the only tag that may carry buttons); 'garage_result' = close outcomes. Not exposed.",
+  "description": "HA-08, internal. Sends or clears a garage notification on both household phones. Tag 'garage' = actionable alerts (the only tag that may carry buttons); 'garage_result' = close outcomes. Not exposed. Each phone is guarded by its own registration check (continue_on_error does not cover a missing service); a missing phone on send raises a persistent notification.",
   "fields": {
     "buttons": {
       "default": [],
@@ -44,34 +44,74 @@
     {
       "else": [
         {
-          "action": "notify.mobile_app_sm_s948w_costea",
-          "continue_on_error": true,
-          "data": {
-            "data": {
-              "actions": "{{ btns }}",
-              "channel": "Garage",
-              "priority": "high",
-              "tag": "{{ t }}",
-              "ttl": 0
-            },
-            "message": "{{ message }}",
-            "title": "Garage"
-          }
+          "else": [
+            {
+              "action": "persistent_notification.create",
+              "data": {
+                "message": "notify.mobile_app_sm_s948w_costea is missing (Companion app removed or re-registered?), so this garage alert did not reach that phone: {{ message }}",
+                "notification_id": "garage_phone_missing_costea",
+                "title": "Garage alerts: a phone is not registered"
+              }
+            }
+          ],
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ states.notify.sm_s948w_costea is not none }}"
+            }
+          ],
+          "then": [
+            {
+              "action": "notify.mobile_app_sm_s948w_costea",
+              "continue_on_error": true,
+              "data": {
+                "data": {
+                  "actions": "{{ btns }}",
+                  "channel": "Garage",
+                  "priority": "high",
+                  "tag": "{{ t }}",
+                  "ttl": 0
+                },
+                "message": "{{ message }}",
+                "title": "Garage"
+              }
+            }
+          ]
         },
         {
-          "action": "notify.mobile_app_sm_s948w_vio",
-          "continue_on_error": true,
-          "data": {
-            "data": {
-              "actions": "{{ btns }}",
-              "channel": "Garage",
-              "priority": "high",
-              "tag": "{{ t }}",
-              "ttl": 0
-            },
-            "message": "{{ message }}",
-            "title": "Garage"
-          }
+          "else": [
+            {
+              "action": "persistent_notification.create",
+              "data": {
+                "message": "notify.mobile_app_sm_s948w_vio is missing (Companion app removed or re-registered?), so this garage alert did not reach that phone: {{ message }}",
+                "notification_id": "garage_phone_missing_vio",
+                "title": "Garage alerts: a phone is not registered"
+              }
+            }
+          ],
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ states.notify.sm_s948w_vio is not none }}"
+            }
+          ],
+          "then": [
+            {
+              "action": "notify.mobile_app_sm_s948w_vio",
+              "continue_on_error": true,
+              "data": {
+                "data": {
+                  "actions": "{{ btns }}",
+                  "channel": "Garage",
+                  "priority": "high",
+                  "tag": "{{ t }}",
+                  "ttl": 0
+                },
+                "message": "{{ message }}",
+                "title": "Garage"
+              }
+            }
+          ]
         }
       ],
       "if": [
@@ -82,24 +122,44 @@
       ],
       "then": [
         {
-          "action": "notify.mobile_app_sm_s948w_costea",
-          "continue_on_error": true,
-          "data": {
-            "data": {
-              "tag": "{{ t }}"
-            },
-            "message": "clear_notification"
-          }
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ states.notify.sm_s948w_costea is not none }}"
+            }
+          ],
+          "then": [
+            {
+              "action": "notify.mobile_app_sm_s948w_costea",
+              "continue_on_error": true,
+              "data": {
+                "data": {
+                  "tag": "{{ t }}"
+                },
+                "message": "clear_notification"
+              }
+            }
+          ]
         },
         {
-          "action": "notify.mobile_app_sm_s948w_vio",
-          "continue_on_error": true,
-          "data": {
-            "data": {
-              "tag": "{{ t }}"
-            },
-            "message": "clear_notification"
-          }
+          "if": [
+            {
+              "condition": "template",
+              "value_template": "{{ states.notify.sm_s948w_vio is not none }}"
+            }
+          ],
+          "then": [
+            {
+              "action": "notify.mobile_app_sm_s948w_vio",
+              "continue_on_error": true,
+              "data": {
+                "data": {
+                  "tag": "{{ t }}"
+                },
+                "message": "clear_notification"
+              }
+            }
+          ]
         }
       ]
     }

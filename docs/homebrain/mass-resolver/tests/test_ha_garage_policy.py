@@ -104,6 +104,36 @@ class NotifyScriptTest(unittest.TestCase):
             if d["action"].startswith("notify."):
                 self.assertTrue(d.get("continue_on_error"), "one phone failing must not block the other")
 
+    def test_each_phone_call_is_guarded_by_its_own_registration_check(self):
+        # continue_on_error does NOT cover ServiceNotFound: without a guard, a removed/re-registered app on
+        # the first phone would abort the script and silence the second phone for every alert.
+        guards = {}
+        for d in walk(self.obj):
+            if "if" in d and "then" in d:
+                calls = [c["action"] for c in d["then"] if isinstance(c, dict) and str(c.get("action", "")).startswith("notify.")]
+                if calls:
+                    self.assertEqual(len(calls), 1, "one phone per guarded block")
+                    guards.setdefault(calls[0], []).append(d)
+        for svc in LEGACY_NOTIFY:
+            entity = "notify." + svc.split("notify.mobile_app_", 1)[1]
+            blocks = guards.get(svc, [])
+            self.assertEqual(len(blocks), 2, "%s: one guarded send and one guarded clear" % svc)
+            for b in blocks:
+                self.assertEqual(b["if"], [{"condition": "template", "value_template": "{{ states.%s is not none }}" % entity}])
+        # Every notify call anywhere in the script sits inside such a guard.
+        guarded = set(id(c) for bl in guards.values() for b in bl for c in b["then"])
+        for d in actions_in(self.obj):
+            if d["action"].startswith("notify."):
+                self.assertIn(id(d), guarded, "unguarded %s" % d["action"])
+
+    def test_a_missing_phone_on_send_is_reported_not_silent(self):
+        sends = [d for d in walk(self.obj) if "if" in d and "then" in d and "else" in d
+                 and any(str(c.get("action", "")).startswith("notify.") and c.get("data", {}).get("message") != "clear_notification"
+                         for c in d["then"] if isinstance(c, dict))]
+        self.assertEqual(len(sends), 2)
+        for b in sends:
+            self.assertEqual([c["action"] for c in b["else"]], ["persistent_notification.create"])
+
     def test_buttons_dropped_unless_alert_tag(self):
         text = json.dumps(self.obj)
         self.assertIn("if (tag | default('garage')) == 'garage' else []", text)

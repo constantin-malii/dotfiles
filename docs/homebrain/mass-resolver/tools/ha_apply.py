@@ -149,6 +149,14 @@ def main(argv=None, client=None, out=print):
         return 1
     stamp = time.strftime("%Y%m%d-%H%M%S")
     try:
+        # One timestamp per run: the same resource twice would overwrite its first backup with the
+        # already-pushed state and lose the true original. Refuse before touching HA.
+        seen = set()
+        for path in args.files:
+            key = load_resource(path)[:2]
+            if key in seen:
+                raise ApplyError(1, "%s.%s is given more than once in one run" % key)
+            seen.add(key)
         if client is None:
             if not args.token_file:
                 raise ApplyError(1, "--token-file is required")

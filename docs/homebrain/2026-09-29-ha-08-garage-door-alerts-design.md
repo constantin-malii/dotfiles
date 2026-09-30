@@ -50,6 +50,21 @@
 | Presence-based auto-close | Rejected | Violates hard rule 4. |
 | HA `alert:` integration for repeats | Rejected | YAML-only in `configuration.yaml` (no VM shell to edit it), and its acknowledge is indefinite, not a timed snooze. |
 | Garage logic in the resolver | Rejected | Puts door control in the media service, adds a host deploy per change, and couples the door to the resolver's uptime. |
+| Restrict button taps to the two household users (`trigger.event.context.user_id`) | Rejected (pre-live review, 2026-09-29) | Firing `mobile_app_notification_action` needs an HA token, and a token holder can call `cover.close_cover` on the unexposed cover directly, so the filter doesn't shrink the surface that matters. It would also break the stage-2 REST-fired test events. Don't re-propose it without a new threat. |
+
+### 1.3 Known behaviour, accepted (pre-live review, 2026-09-29)
+
+- **Snooze vs. a re-armed first alert.** If a snoozed door goes `open` → `closing` → `open` without reaching `closed`,
+  the 15-min trigger re-arms and its first alert fires even while snoozed (it also resets the reminder counter).
+  Accepted: the same "first alert ignores stale state" rule is what lets the next episode alert after a close that
+  HA missed while down.
+- **The away alert's 5 minutes count time in the current zone,** not total time away: moving Work → `not_home`
+  resets it. This can only suppress an alert, never cause a false one.
+- **`garage_status_lost` never fires on a flapping door.** After `unknown` → `unavailable`, the `from` state is no
+  longer one of the alert states, so a door flapping between `unavailable` and `unknown` doesn't trigger it.
+  HomeKit Controller normally goes `unavailable` and stays; offline detection in general is HA-06's job.
+- **A phone whose Companion registration disappears** doesn't silence the other phone (each call is guarded
+  separately); the send path raises a persistent notification naming the missing phone.
 
 ## 2. Approach
 
