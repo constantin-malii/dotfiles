@@ -67,6 +67,12 @@ History, measurements and two **retracted** root causes are in
 - **HAOS VM:** libvirt domain **`haos`** (qemu:///system), HAOS 18.0 / **HA Core 2026.6.4**, 4 GiB / 3 vCPU, autostart on. The **primary** Home Assistant.
   - **macvtap NIC → `192.168.1.104`** (the LAN IP you reach HA on).
   - **NAT NIC → `192.168.122.10`** (host↔VM only; see networking gotcha).
+  - **Discovery (zeroconf/SSDP) must listen on the LAN NIC `enp2s1`.** HA's *auto-configure* picked only
+    the NAT NIC `enp2s4`; since 2026-09-29 both are ticked by hand (Settings → System → Network).
+  - ⚠️ **The VM gets no IPv4 multicast from the LAN unless `macvtap0` carries `01:00:5e:00:00:fb`.**
+    libvirt does not mirror the guest's joins (no `trustGuestRxFilters`), so IPv4 mDNS discovery is blind
+    while IPv6 works. Added by hand 2026-09-29 — **lost on every VM restart** until `INF-09` lands. Check:
+    `ip maddr show dev macvtap0 | grep 01:00:5e:00:00:fb` on the host. See `CHANGELOG.md` 2026-09-29.
 - **Music Assistant:** add-on `d5369777_music_assistant` **v2.9.3**, UI/API at `http://192.168.1.104:8095`. Plays to **ceiling speakers** via a **Squeezelite** systemd service on the host (`squeezelite-ceiling.service`, ALSA `hw:1,0`).
 - **Audio path:** MA (VM) → SlimProto/HTTP stream over NAT `192.168.122.10` → Squeezelite (host) → ceiling speakers.
 - **Voice satellite (2026-07-14):** `reSpeaker Living Room` — Seeed **reSpeaker XVF3800 + XIAO ESP32-S3**,
@@ -207,6 +213,9 @@ History, measurements and two **retracted** root causes are in
 - ⚠️ **YTM cookie rotates** — re-extract via incognito when YTM returns nothing.
 - ⚠️ **Piper TTS** crashes the Assist pipeline → TTS **off** in pipelines; only explicit `tts.speak` to ceiling works. Whisper STT fine (model `auto`/sherpa-parakeet; couldn't pin tiny-int8). **Update 2026-07-14:** Piper TTS **runs fine in the new "Living Room Voice" satellite pipeline** (spoken replies confirmed on the reSpeaker) — the old crash may be version-stale; the shared HA/phone pipelines still keep TTS off pending a re-test.
 - ⚠️ **HA↔MA connection** drops after MA restarts / intermittently (internal DNS). Recover: `POST /api/config/config_entries/entry/01KVPNW1JFHJG30NANAPVARHY8/reload`. A1/A2a automate this.
+- ⚠️ **After an HA core restart, MA can stay down: `setup_error` "Authentication failed, addon discovery
+  not completed yet".** A reload does **not** fix it (A1/A2a will keep failing); **restart the MA add-on**,
+  which re-sends its Supervisor discovery. Seen 2026-09-29 (ceiling down ~13 h). Tracked as `INF-10`.
 - ⚠️ **The satellite false-wakes on ordinary conversation, and slot 2 carries web search.** Roughly
   8 of 20 stored pipeline runs were unaddressed speech (including a work call and a private medical
   conversation). `wake_word_sensitivity` is already at its floor, and three wake words have been

@@ -3,6 +3,52 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-29 — HA-08: Meross garage door paired; HA's IPv4 discovery was blind (two causes)
+
+> The **Meross MSG100** garage door opener is in HA via **HomeKit Controller**, fully local:
+> `cover.msg100_7982_garage_door` (device class `garage`) + `button.msg100_7982_identify`, area Garage,
+> fw 4.2.20. **Not exposed** to any assistant, **no** automation or script references it. HA-08's
+> control/automation design is still outstanding — pairing adds state visibility only.
+
+- **Device:** `MSG100-7982`, Wi-Fi, MAC `c4:e7:ae:0d:79:82`, `192.168.1.64` (no DHCP reservation yet),
+  HomeKit port 5010, HomeKit id `68:49:27:7c:08:6e`. Also registered in the Meross app (cloud) — that is
+  independent of HomeKit pairing and did not need undoing. It was advertising `sf=1` (unpaired), so the
+  roadmap's "remove from Apple Home first" step did not apply. Setup code kept out of the repo.
+- **Symptom:** HA never offered the device, although it was announcing correctly. HA's zeroconf cache held it
+  with **only its IPv6 link-local address**, which HA discards — so no discovery flow, no error, no log line.
+- **Cause 1 — HA listened on the wrong adapter.** Settings → System → Network was on *auto-configure*, which
+  had picked **only `enp2s4`** (the NAT NIC, `192.168.122.10`). The LAN NIC `enp2s1` (`192.168.1.104`) was
+  not used for discovery. Same NAT-vs-LAN auto-detect trap as the 2026-07-14 Internal URL fix. **Fixed:**
+  auto-configure off, **both** `enp2s1` and `enp2s4` enabled (NAT kept so nothing on that side changes).
+  Rollback: re-tick auto-configure. Synology, the Epson printer, the TELUS router and the Roomba appeared as
+  discovery cards immediately — none added.
+- **Cause 2 — the VM receives no IPv4 multicast from the LAN.** With debug logging on, HA's zeroconf showed,
+  over ~3,000 lines: **IPv6 multicast from LAN devices ✅, IPv4 multicast from LAN devices: 0**. The
+  multicast filter on the host's `macvtap0` contained `33:33:00:00:00:fb` (IPv6 mDNS — present only because
+  the host's own IPv6 stack joins it there) but **not `01:00:5e:00:00:fb` (IPv4 mDNS)**. libvirt 1.3.1 does
+  not mirror the guest's multicast joins into macvtap unless `trustGuestRxFilters='yes'`, which the `haos`
+  interface does not set (`type='direct'`, `mode='bridge'`). Ruled out along the way: router Wi-Fi→wired
+  multicast (the host's `eno1` hears the Meross's IPv4 multicast fine) and the Meross's packets (standard:
+  source port 5353, TTL 120, cache-flush set — same shape as the ecobee's).
+  **Fixed, NOT persistently:** `sudo ip maddr add 01:00:5e:00:00:fb dev macvtap0` (operator-run). HA then
+  received 101 LAN IPv4 packets in the next window against 1 before, and opened the `homekit_controller`
+  flow once the Meross re-announced. ⚠️ **This entry is lost when the VM restarts** (macvtap is recreated) →
+  permanent fix is `INF-09`. HomeKit Controller keeps working once paired; everything else goes IPv4-blind.
+- **Collateral — Music Assistant did not survive the HA core restart.** The integration went to
+  `setup_error`: *"Authentication failed, addon discovery not completed yet"*, 272 attempts over ~7 h (A2a's
+  probe reloads + manual reloads). The MA add-on was healthy; HA had never received the add-on's Supervisor
+  discovery (which carries the token and is sent at **add-on** start). **Reloading cannot fix this — restarting
+  the MA add-on does** (it re-sends discovery). A1/A2a only reload, so they cannot recover this case → `INF-10`.
+  Ceiling speakers were `unavailable` from ~04:19 to ~17:48 UTC. MA stayed on 2.9.3 (upgrade deliberately
+  deferred — one change at a time).
+- **Gate note:** these live changes (HA network adapters, HA core restart, MA add-on restart, `macvtap0`
+  filter) were made **while MR-08c held the gate** (§10), and outside it. The resolver was **not** touched
+  (still running since 2026-09-28 20:41 MDT, `/command` bound). MR-08c's four live checks are still pending;
+  they should start from a clean baseline that accounts for the MA add-on restart above.
+- **Still to do:** turn HA's temporary debug logging off (`logger.set_level` → `warning` for `zeroconf`,
+  `homeassistant.components.zeroconf`, `homeassistant.components.homekit_controller`, `aiohomekit`; a restart
+  also resets it) · DHCP reservation for `.64` · `INF-09` · `INF-10` · HA-08 design before any control path.
+
 ## 2026-09-28 — MR-08 resolver deploy: curated playlists by voice, dry-runs silent
 
 > Voice: "Okay Nabu, play Costea mix" plays the curated Music Assistant playlist
