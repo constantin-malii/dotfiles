@@ -30,8 +30,8 @@ working backlog, every item with all 14 fields as explicit columns.
 
 ### 🔵 Ready / Next *(all read-only / design / decision; no live gate)*
 - `RQ-06` Z-Wave coordinator adoption decision *(RQ)*
-- `INF-09` persist IPv4 multicast into the HA VM — **host-live, needs the gate + a VM restart** *(INF)*
-- `INF-10` MA self-heal after an HA core restart — **HA-live, needs the gate** *(INF)*
+- `INF-10` persist IPv4 multicast into the HA VM — **host-live, needs the gate + a VM restart** *(INF)*
+- `INF-11` MA self-heal after an HA core restart — **HA-live, needs the gate** *(INF)*
 - `P0` PCL notes-only MVP — Ready, **not** Active *(P)*
 - `NL-02` Prompt / `assistant-capabilities.md` lockstep discipline *(NL)*
 
@@ -217,8 +217,8 @@ Every item in the extended index (§5) carries all 14 fields as explicit columns
 | `INF-06` | Lidarr auto-sync · Beets · Plex Music add | INF | later | host-live | P2 | process | — | host data/services | none (host) | host change | revert host config | local-music §7 |
 | `INF-07` | Companion backup target (local-only) | INF | later | process | P2 | process | P0 | none (local-only) | backup script/config | none | revert config | PCL Q5 |
 | `INF-08` | UPS + NUT resilience (host + router/network + future coordinator) | INF | later | design→host-live | later | process | device roadmap; UPS ownership unknown | none (design) | design doc → NUT config | none (host-live at impl) | revert doc/config | confirm UPS ownership + design NUT approach | device-integration-architecture-roadmap.md |
-| `INF-09` | Persist IPv4 multicast into the HA VM (`trustGuestRxFilters='yes'` on the macvtap NIC) | INF | ready | host-live | P1 | process | — | **VM restart** (all of HA down a few minutes); macvtap config | `haos` domain XML + `CHANGELOG.md` | host change + VM stop/start | remove the attribute + VM stop/start; interim `ip maddr add` still works | back up `virsh dumpxml haos`, add the attribute, stop/start, verify `macvtap0` gains `01:00:5e:00:00:fb` by itself and HA still sees LAN IPv4 mDNS | CHANGELOG 2026-09-29 |
-| `INF-10` | MA integration does not self-heal after an HA core restart (`addon discovery not completed yet`) | INF | ready | design→HA-live | P1 | HA | — | media path (ceiling down until an operator restarts the MA add-on) | A1/A2a automations + `CHANGELOG.md` | HA automation change | restore automation backup | decide how to recover without a human: detect this `setup_error` reason and restart the add-on (`hassio.addon_restart`), rate-limited; A1/A2a only reload, which cannot fix it | CHANGELOG 2026-09-29 |
+| `INF-10` | Persist IPv4 multicast into the HA VM (`trustGuestRxFilters='yes'` on the macvtap NIC) | INF | ready | host-live | P1 | process | — | **VM restart** (all of HA down a few minutes); macvtap config | `haos` domain XML + `CHANGELOG.md` | host change + VM stop/start | remove the attribute + VM stop/start; interim `ip maddr add` still works | back up `virsh dumpxml haos`, add the attribute, stop/start, verify `macvtap0` gains `01:00:5e:00:00:fb` by itself and HA still sees LAN IPv4 mDNS | CHANGELOG 2026-09-29 |
+| `INF-11` | MA integration does not self-heal after an HA core restart (`addon discovery not completed yet`) | INF | ready | design→HA-live | P1 | HA | — | media path (ceiling down until an operator restarts the MA add-on) | A1/A2a automations + `CHANGELOG.md` | HA automation change | restore automation backup | decide how to recover without a human: detect this `setup_error` reason and restart the add-on (`hassio.addon_restart`), rate-limited; A1/A2a only reload, which cannot fix it | CHANGELOG 2026-09-29 |
 
 ### RQ — Backlog / Research / Purchasing
 | ID | Title | Track | Status | Type | Pri | Owner | Dependency | Risk / blast radius | Likely files | Live gates | Rollback | Next action | Source ref |

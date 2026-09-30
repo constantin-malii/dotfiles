@@ -33,12 +33,12 @@ design live in the per-topic docs; this log is for discrete operational changes.
   **Fixed, NOT persistently:** `sudo ip maddr add 01:00:5e:00:00:fb dev macvtap0` (operator-run). HA then
   received 101 LAN IPv4 packets in the next window against 1 before, and opened the `homekit_controller`
   flow once the Meross re-announced. ⚠️ **This entry is lost when the VM restarts** (macvtap is recreated) →
-  permanent fix is `INF-09`. HomeKit Controller keeps working once paired; everything else goes IPv4-blind.
+  permanent fix is `INF-10`. HomeKit Controller keeps working once paired; everything else goes IPv4-blind.
 - **Collateral — Music Assistant did not survive the HA core restart.** The integration went to
   `setup_error`: *"Authentication failed, addon discovery not completed yet"*, 272 attempts over ~7 h (A2a's
   probe reloads + manual reloads). The MA add-on was healthy; HA had never received the add-on's Supervisor
   discovery (which carries the token and is sent at **add-on** start). **Reloading cannot fix this — restarting
-  the MA add-on does** (it re-sends discovery). A1/A2a only reload, so they cannot recover this case → `INF-10`.
+  the MA add-on does** (it re-sends discovery). A1/A2a only reload, so they cannot recover this case → `INF-11`.
   Ceiling speakers were `unavailable` from ~04:19 to ~17:48 UTC. MA stayed on 2.9.3 (upgrade deliberately
   deferred — one change at a time).
 - **Gate note:** these live changes (HA network adapters, HA core restart, MA add-on restart, `macvtap0`
@@ -47,7 +47,7 @@ design live in the per-topic docs; this log is for discrete operational changes.
   changes and all passed (entry below); MR-08c then released the gate.
 - **Still to do:** turn HA's temporary debug logging off (`logger.set_level` → `warning` for `zeroconf`,
   `homeassistant.components.zeroconf`, `homeassistant.components.homekit_controller`, `aiohomekit`; a restart
-  also resets it) · DHCP reservation for `.64` · `INF-09` · `INF-10` · HA-08 design before any control path.
+  also resets it) · DHCP reservation for `.64` · `INF-10` · `INF-11` · HA-08 design before any control path.
 
 ||||||| 5ddf51b
 
