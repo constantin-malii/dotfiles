@@ -30,7 +30,10 @@ it first; this plan argues from it.
   Away: both `person.costea` and `person.vio` away **≥ 5 min**. Status lost: **10 min**.
 - Close script: `mode: single`, `max_exceeded: silent`; stable-open guard **T = 30 s** until stage 1 measures it;
   stuck > **60 s**; wait for `closed` **60 s**; **no automatic retry**.
-- Handler: `mode: queued`. It is the **kill switch**.
+- Handler: `mode: parallel` (max 10) — corrected from the spec's original `queued` after plan review: under `queued`
+  a second *Close* tap waits behind the first and then reports "already closed", whereas under `parallel` it hits the
+  close script's `mode: single` and is dropped silently, and a *Snooze* tap is still never blocked. It is the
+  **kill switch**.
 - Exposure: **only** `script.garage_status` → `conversation`, in stage 4. Never the cover or any other garage entity.
 - Gate: **HA-live / exposure** (not host-live), claimed at the start of stage 1 and released on merge.
 - Python code and tests: **3.5-safe** (no f-strings, no variable annotations); run with the workstation's Python.
@@ -47,10 +50,11 @@ it first; this plan argues from it.
 2. **Unexpected-state refusal.** Any state other than the known ones refuses ("unexpected state (…) — not
    closing"), so the close call is reached only from `open`.
 3. **Snooze ignored if the door is already closed** (Review Focus 1).
-4. **Cleanup also runs at HA start** (Review Focus 2). Its `last_triggered` doubles as the HA-start marker for the
-   voice status's "at least N minutes" (spec §5), because the instance has no uptime or boot sensor (checked
-   2026-09-29). Side effect, accepted: if the door is reopened within 2 min of closing, the status also says "at
-   least N", which is still true.
+4. **Cleanup also runs at HA start** (Review Focus 2), covering a door that closed while HA was down. Separately,
+   the voice status's "at least N minutes" (spec §5) needs an HA-start marker, and the instance has no uptime or
+   boot sensor (checked 2026-09-29). The marker is **`states.automation.garage_closed_cleanup.last_changed`**: the
+   entity is created fresh at boot and only changes again if someone toggles the automation, so it isn't coupled
+   to the automation's triggers.
 5. **`ha_apply.py`**, a small push/backup/read-back tool (Task 5), so each deploy is byte-for-byte the reviewed
    file rather than JSON pasted into a command.
 
@@ -65,7 +69,7 @@ it first; this plan argues from it.
    `unknown`/`unavailable` does **not**. → `test_away_alert_requires_both_known_away_5min` (Task 3).
 4. **The door reports an obstruction.** Expected: close refused. → `test_refusal_order` (Task 2).
 5. **A button from another notification, or an id that merely starts with `GARAGE_`.** Expected: it never reaches the
-   handler. → `test_handler_queued_and_exact_action_ids` (Task 3).
+   handler. → `test_handler_parallel_and_exact_action_ids` (Task 3).
 
 ---
 
@@ -186,6 +190,14 @@ def walk(node):
 
 def actions_in(obj):
     return [d for d in walk(obj) if isinstance(d.get("action"), str)]
+
+
+def device_actions_in(obj):
+    """UI 'device actions' have no "action" key: {device_id, domain, entity_id, type}. Device triggers and
+    conditions share that shape but carry "trigger"/"platform" or "condition", so those are excluded."""
+    return [d for d in walk(obj)
+            if "device_id" in d and "domain" in d and "type" in d
+            and not any(k in d for k in ("condition", "trigger", "platform"))]
 
 
 def notify_calls(obj):
@@ -319,7 +331,7 @@ Expected: ERROR/FAIL with `FileNotFoundError: ... ha/scripts/garage_notify.json`
     {"variables": {
       "st": "{{ states('cover.msg100_7982_garage_door') }}",
       "mins": "{% set s = states.cover.msg100_7982_garage_door %}{{ (((as_timestamp(now()) - as_timestamp(s.last_changed)) // 60) | int) if s else 0 }}",
-      "near_boot": "{% set s = states.cover.msg100_7982_garage_door %}{% set b = state_attr('automation.garage_closed_cleanup', 'last_triggered') %}{{ s is not none and b is not none and ((as_timestamp(s.last_changed) - as_timestamp(b)) | abs) < 120 }}"
+      "near_boot": "{% set s = states.cover.msg100_7982_garage_door %}{% set b = states.automation.garage_closed_cleanup %}{{ s is not none and b is not none and ((as_timestamp(s.last_changed) - as_timestamp(b.last_changed)) | abs) < 120 }}"
     }},
     {"variables": {"resp": {"chat_text": "{% if st == 'open' %}The garage door is open — {% if mins < 1 %}it just opened{% else %}it's been open for {{ 'at least ' if near_boot else '' }}{{ mins }} minute{{ '' if mins == 1 else 's' }}{% endif %}.{% elif st == 'closed' %}The garage door is closed.{% elif st in ['opening', 'closing'] and mins >= 1 %}The garage door has been {{ st }} for {{ mins }} minute{{ '' if mins == 1 else 's' }} — it may be stuck.{% elif st in ['opening', 'closing'] %}The garage door is {{ st }} right now.{% else %}I can't reach the garage door right now.{% endif %}"}}},
     {"response_variable": "resp", "stop": "done"}
@@ -514,7 +526,7 @@ git commit -m "feat(homebrain): HA-08 checked close script (stable-open guard, v
 **Interfaces:**
 - Consumes: `script.garage_notify`, `script.garage_close_checked`, `timer.garage_snooze`, `counter.garage_reminders`.
 - Produces: automation ids equal to file names. `automation.garage_notification_action` is the kill switch.
-  `automation.garage_closed_cleanup`'s `last_triggered` is the HA-start marker read by `script.garage_status`.
+  The **entity** `automation.garage_closed_cleanup`'s `last_changed` is the HA-start marker read by `script.garage_status`.
 
 - [ ] **Step 1: Write the failing tests** — add above `if __name__`:
 
@@ -580,9 +592,9 @@ class AutomationsTest(unittest.TestCase):
         self.assertEqual(conds.count(">= 300"), 2)
         self.assertEqual(notify_calls(a)[0]["data"]["buttons"], BUTTONS_CLOSE)
 
-    def test_handler_queued_and_exact_action_ids(self):
+    def test_handler_parallel_and_exact_action_ids(self):
         a = auto("garage_notification_action")
-        self.assertEqual(a["mode"], "queued")
+        self.assertEqual(a["mode"], "parallel", "queued would re-run a duplicate Close after the first finishes")
         self.assertEqual(len(a["triggers"]), 3)
         ids = set()
         for t in a["triggers"]:
@@ -598,10 +610,10 @@ class AutomationsTest(unittest.TestCase):
         self.assertIn({"condition": "not", "conditions": [{"condition": "state", "entity_id": DOOR, "state": "closed"}]},
                       snooze["conditions"])
 
-    def test_cleanup_runs_at_boot_without_conditions(self):
+    def test_cleanup_runs_at_boot_and_only_acts_when_closed(self):
         a = auto("garage_closed_cleanup")
         self.assertIn({"event": "start", "id": "boot", "trigger": "homeassistant"}, a["triggers"])
-        self.assertNotIn("conditions", a, "last_triggered must update at every boot (status marker)")
+        self.assertEqual(a["actions"][0]["if"], [{"condition": "state", "entity_id": DOOR, "state": "closed"}])
 
     def test_cleanup_clears_only_the_alert_tag(self):
         calls = notify_calls(auto("garage_closed_cleanup"))
@@ -723,10 +735,10 @@ class NotifyUsageTest(unittest.TestCase):
   ]}],
   "alias": "Garage: notification button handler",
   "automation_id": "garage_notification_action",
-  "description": "HA-08. Handles GARAGE_CLOSE / GARAGE_SNOOZE_1H / GARAGE_SNOOZE_3H taps. KILL SWITCH: disable this automation to stop all new remote closes (a close already running finishes within 60 s). Queued so a Snooze tap is not dropped while a close runs. Snooze is ignored if the door is already closed.",
+  "description": "HA-08. Handles GARAGE_CLOSE / GARAGE_SNOOZE_1H / GARAGE_SNOOZE_3H taps. KILL SWITCH: disable this automation to stop all new remote closes (a close already running finishes within 60 s). Parallel so a Snooze tap is never blocked behind a close; a duplicate Close is dropped silently by the close script's mode single. Snooze is ignored if the door is already closed.",
   "id": "garage_notification_action",
   "max": 10,
-  "mode": "queued",
+  "mode": "parallel",
   "triggers": [
     {"event_data": {"action": "GARAGE_CLOSE"}, "event_type": "mobile_app_notification_action", "id": "close", "trigger": "event"},
     {"event_data": {"action": "GARAGE_SNOOZE_1H"}, "event_type": "mobile_app_notification_action", "id": "snooze_1h", "trigger": "event"},
@@ -747,7 +759,7 @@ class NotifyUsageTest(unittest.TestCase):
     ]}],
   "alias": "Garage: cleanup when closed",
   "automation_id": "garage_closed_cleanup",
-  "description": "HA-08. When the garage door closes, or at HA start with it closed, clears the actionable 'garage' alert (never 'garage_result'), cancels the snooze and resets the reminder counter. Deliberately has no top-level conditions: its last_triggered marks HA start for script.garage_status.",
+  "description": "HA-08. When the garage door closes, or at HA start with it closed (covers a close missed while HA was down), clears the actionable 'garage' alert (never 'garage_result'), cancels the snooze and resets the reminder counter. This entity's last_changed marks HA start for script.garage_status; do not toggle it casually.",
   "id": "garage_closed_cleanup",
   "max": 5,
   "mode": "queued",
@@ -817,6 +829,19 @@ class HardRulesTest(unittest.TestCase):
                 continue
             for d in actions_in(obj):
                 self.assertFalse(d["action"].startswith("cover."), "%s calls %s" % (label, d["action"]))
+
+    def test_rule2_no_ui_device_action_touches_a_cover_or_the_door(self):
+        for label, obj in all_managed():
+            for d in device_actions_in(obj):
+                self.assertNotEqual(d.get("domain"), "cover", "%s: cover device action" % label)
+                self.assertNotIn(DOOR, json.dumps(d), "%s: device action mentions the door" % label)
+
+    def test_device_action_detector_sees_the_ui_shape(self):
+        ui = {"actions": [{"device_id": "abc", "domain": "cover", "entity_id": DOOR, "type": "close"}],
+              "conditions": [{"condition": "device", "device_id": "abc", "domain": "cover", "type": "is_open"}],
+              "triggers": [{"trigger": "device", "device_id": "abc", "domain": "cover", "type": "opened"}]}
+        found = device_actions_in(ui)
+        self.assertEqual(found, [ui["actions"][0]], "only the action, not the device trigger/condition")
 
     def test_rule2_rule4_only_the_handler_invokes_the_close_script(self):
         for label, obj in all_managed():
@@ -939,7 +964,7 @@ class FakeClient(object):
     def request(self, method, path, obj=None):
         self.calls.append((method, path))
         if self.fail_status and method == "POST":
-            return self.fail_status, None
+            return self.fail_status, {"_error_body": '{"message": "Message malformed: extra keys not allowed"}'}
         if method == "GET":
             return (200, json.loads(json.dumps(self.store[path]))) if path in self.store else (404, None)
         if method == "POST":
@@ -1019,9 +1044,10 @@ class ApplyTest(unittest.TestCase):
         p = self.write("s.json", {"object_id": "garage_notify", "alias": "n"})
         self.assertEqual(self.run_main([p], FakeClient(mutate_on_post=True)), 3)
 
-    def test_http_error_is_exit_2(self):
+    def test_http_error_is_exit_2_and_reports_the_servers_reason(self):
         p = self.write("s.json", {"object_id": "garage_notify", "alias": "n"})
         self.assertEqual(self.run_main([p], FakeClient(fail_status=400)), 2)
+        self.assertIn("extra keys not allowed", self.lines[-1])
 
     def test_delete_backs_up_removes_and_verifies(self):
         path = "/api/config/script/config/garage_status"
@@ -1127,7 +1153,9 @@ class HttpClient(object):
                 raw = resp.read()
                 return resp.status, (json.loads(raw.decode("utf-8")) if raw else None)
         except urllib.error.HTTPError as err:
-            return err.code, None
+            # HA's config API explains a rejection in the body ({"message": ...}); keep it for the error text.
+            detail = err.read().decode("utf-8", "replace")[:500]
+            return err.code, {"_error_body": detail}
         except (urllib.error.URLError, OSError) as err:
             raise ApplyError(2, "transport error on %s %s: %s" % (method, path, err))
 
@@ -1136,13 +1164,20 @@ def config_path(kind, rid):
     return "/api/config/%s/config/%s" % (kind, rid)
 
 
+def why(resp):
+    """The server's explanation of an error response, if it sent one."""
+    if isinstance(resp, dict) and resp.get("_error_body"):
+        return ": %s" % resp["_error_body"]
+    return ""
+
+
 def backup(client, kind, rid, backup_dir, stamp):
     """Save the live config before touching it. -> backup path, or None if the resource does not exist."""
     status, current = client.request("GET", config_path(kind, rid))
     if status == 404:
         return None
     if status != 200:
-        raise ApplyError(2, "GET %s -> HTTP %s" % (config_path(kind, rid), status))
+        raise ApplyError(2, "GET %s -> HTTP %s%s" % (config_path(kind, rid), status, why(current)))
     if not os.path.isdir(backup_dir):
         os.makedirs(backup_dir)
     path = os.path.join(backup_dir, "%s-%s-%s.json" % (kind, rid, stamp))
@@ -1163,17 +1198,17 @@ def apply_one(client, path, backup_dir, stamp, dry_run=False, delete=False, out=
         if saved is None:
             out("  not present: nothing to delete")
             return
-        status, _ = client.request("DELETE", config_path(kind, rid))
+        status, resp = client.request("DELETE", config_path(kind, rid))
         if status != 200:
-            raise ApplyError(2, "DELETE %s -> HTTP %s" % (config_path(kind, rid), status))
+            raise ApplyError(2, "DELETE %s -> HTTP %s%s" % (config_path(kind, rid), status, why(resp)))
         status, _ = client.request("GET", config_path(kind, rid))
         if status != 404:
             raise ApplyError(3, "%s.%s still present after DELETE (HTTP %s)" % (kind, rid, status))
         out("  deleted")
         return
-    status, _ = client.request("POST", config_path(kind, rid), body)
+    status, resp = client.request("POST", config_path(kind, rid), body)
     if status != 200:
-        raise ApplyError(2, "POST %s -> HTTP %s" % (config_path(kind, rid), status))
+        raise ApplyError(2, "POST %s -> HTTP %s%s" % (config_path(kind, rid), status, why(resp)))
     status, back = client.request("GET", config_path(kind, rid))
     if status != 200 or back != body:
         raise ApplyError(3, "%s.%s read-back differs from %s" % (kind, rid, path))
@@ -1233,7 +1268,21 @@ git commit -m "feat(homebrain): ha_apply — push repo HA config with backup and
 
 ---
 
+### Review checkpoint (before any live task)
+
+A fresh reviewer, on the most capable model, reviews the committed Tasks 1–5: the 9 configs, the policy tests,
+`ha_apply.py` and its tests. The brief is this plan, the spec, and `git diff origin/main...HEAD`. This is the last
+point where a wrong config can be caught without a live HA object to roll back. Findings are fixed and re-tested
+(`python -m unittest discover -s tests -p "test_*.py"`) before Task 6. A second, short review at the very end covers
+the records and docs (Task 9).
+
 ## Live stages
+
+**Workstation preflight (once, before Task 6):**
+- `python -c "import websockets; print(websockets.__version__)"` must print a version. The stage snippets use it; if
+  it's missing, stop and ask the operator (don't install packages unprompted).
+- If a heredoc fails from the agent's Bash tool with exit 127, the login profile is at fault (memory
+  `reference_bash_profile_breaks_cli`). Run it through PowerShell as `bash --noprofile --norc -c '…'` or a script file.
 
 **Before any live task:** the operator has approved starting the stage. The operator provides an HA long-lived token
 in a local file (`$HA_TOKEN_FILE`, never inside the repo), and loads the SSH key for exporter runs
@@ -1332,13 +1381,17 @@ async def main():
                 continue
             v = (m.get("event") or {}).get("variables", {}).get("trigger", {})
             if v:
-                print(v["to_state"]["last_changed"], v["from_state"]["state"], "->", v["to_state"]["state"],
-                      "obstruction=%s" % v["to_state"]["attributes"].get("obstruction-detected"), flush=True)
+                fs, ts = v["from_state"], v["to_state"]
+                kind = "ATTR-ONLY" if fs["state"] == ts["state"] else "STATE"
+                # last_updated moves on every write; last_changed only on a state change, so it would
+                # misdate attribute-only lines (e.g. obstruction-detected flipping).
+                print(ts["last_updated"], kind, fs["state"], "->", ts["state"],
+                      "obstruction=%s" % ts["attributes"].get("obstruction-detected"), flush=True)
 asyncio.run(main())
 PY
 ```
 
-From the file, record per cycle: whether `opening`/`closing` appear at all, how long each lasts, and the full
+From the file, ignoring `ATTR-ONLY` lines when timing transitions, record per cycle: whether `opening`/`closing` appear at all, how long each lasts, and the full
 travel time (closed→open settled, open→closed). **T = max(30, longest full travel + 10) seconds.** If T > 30, update
 `stable_open_s` in `ha/scripts/garage_close_checked.json` **and** the constant in `test_stable_open_guard_constants`,
 canonicalize, run the policy tests, and commit (`fix(homebrain): HA-08 stable-open guard T=<n>s from stage-1 measurement`)
@@ -1363,8 +1416,15 @@ Verify: `GET /api/hassio/core/logs?lines=200` contains no new `DEBUG (MainThread
   the export **exits 5**. That is expected at stage 1. Run instead with a temporary manifest limited to stage-1 resources:
 
 ```bash
-python -c "import json; m=json.load(open('../ha/MANIFEST.json',encoding='utf-8')); m['automations']=[a for a in m['automations'] if not a.startswith('garage_')]; open('/tmp/manifest-stage1.json','w',encoding='utf-8').write(json.dumps(m,indent=2))"
-scp /tmp/manifest-stage1.json costea@192.168.1.68:ha-state/MANIFEST.json
+# Not /tmp: inside Python on Windows that resolves to C:\tmp, which does not exist. Pass a real path as argv.
+python - "$HOME/homebrain-backups/ha08/manifest-stage1.json" <<'PY'
+import json, sys
+m = json.load(open("../ha/MANIFEST.json", encoding="utf-8"))
+m["automations"] = [a for a in m["automations"] if not a.startswith("garage_")]
+open(sys.argv[1], "wb").write((json.dumps(m, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+print("wrote", sys.argv[1])
+PY
+scp "$HOME/homebrain-backups/ha08/manifest-stage1.json" costea@192.168.1.68:ha-state/MANIFEST.json
 ssh costea@192.168.1.68 'python3 ~/mass-resolver/tools/ha_export.py --manifest ~/ha-state/MANIFEST.json --out ~/ha-state/managed'
 scp costea@192.168.1.68:ha-state/managed/scripts/garage_notify.json costea@192.168.1.68:ha-state/managed/scripts/garage_status.json ../ha/scripts/
 git diff --exit-code -- ../ha/scripts/garage_notify.json ../ha/scripts/garage_status.json && echo ROUNDTRIP_OK
@@ -1473,7 +1533,8 @@ import json, sys, urllib.request
 raw = open(sys.argv[1], encoding="utf-8-sig").read().strip()
 tok = raw.split(":", 1)[1].strip() if raw.lower().startswith("token:") else raw
 H = {"Authorization": "Bearer " + tok}; B = "http://192.168.1.104:8123"; DOOR = "cover.msg100_7982_garage_door"
-get = lambda p: json.loads(urllib.request.urlopen(urllib.request.Request(B + p, headers=H), timeout=20).read())
+def get(p):
+    return json.loads(urllib.request.urlopen(urllib.request.Request(B + p, headers=H), timeout=20).read())
 GENERIC = ("homeassistant.turn_on", "homeassistant.turn_off", "homeassistant.toggle")
 def walk(n):
     if isinstance(n, dict):
@@ -1483,29 +1544,51 @@ def walk(n):
     elif isinstance(n, list):
         for v in n:
             for s in walk(v): yield s
-bad = []
+# The door's device id: a UI "device action" names the device, not always the entity.
+import asyncio, urllib.error, websockets
+async def device_id():
+    async with websockets.connect("ws://192.168.1.104:8123/api/websocket") as ws:
+        await ws.recv(); await ws.send(json.dumps({"type": "auth", "access_token": tok})); await ws.recv()
+        await ws.send(json.dumps({"id": 1, "type": "config/entity_registry/get", "entity_id": DOOR}))
+        return json.loads(await ws.recv())["result"]["device_id"]
+DEV = asyncio.run(device_id())
+print("door device_id resolved:", bool(DEV))
+bad, skipped, checked = [], [], 0
 for s in get("/api/states"):
     eid = s["entity_id"]
-    if eid.startswith("script."):
-        cfg = get("/api/config/script/config/" + eid.split(".", 1)[1])
-    elif eid.startswith("automation.") and s["attributes"].get("id"):
-        cfg = get("/api/config/automation/config/" + s["attributes"]["id"])
-    else:
-        continue
+    try:
+        if eid.startswith("script."):
+            cfg = get("/api/config/script/config/" + eid.split(".", 1)[1])
+        elif eid.startswith("automation.") and s["attributes"].get("id"):
+            cfg = get("/api/config/automation/config/" + s["attributes"]["id"])
+        elif eid.startswith("automation."):
+            skipped.append(eid + " (no id attribute)"); continue
+        else:
+            continue
+    except urllib.error.HTTPError as e:              # YAML-defined scripts/automations are not in the config API
+        skipped.append("%s (HTTP %s)" % (eid, e.code)); continue
+    checked += 1
     for d in walk(cfg):
         act = d.get("action") if isinstance(d.get("action"), str) else ""
-        moves = act.startswith("cover.") or (act in GENERIC and DOOR in json.dumps(d))
-        calls_close = act in ("script.garage_close_checked", "script.turn_on") and "garage_close_checked" in json.dumps(d)
+        text = json.dumps(d)
+        is_device_action = ("device_id" in d and "domain" in d and "type" in d
+                            and not any(k in d for k in ("condition", "trigger", "platform")))
+        moves = (act.startswith("cover.") or (act in GENERIC and DOOR in text)
+                 or (is_device_action and (d.get("domain") == "cover" or d.get("device_id") == DEV or DOOR in text)))
+        calls_close = act in ("script.garage_close_checked", "script.turn_on") and "garage_close_checked" in text
         if moves and eid != "script.garage_close_checked":
-            bad.append((eid, act))
+            bad.append((eid, act or "device action"))
         if calls_close and eid != "automation.garage_notification_action":
             bad.append((eid, act))
+print("checked:", checked, "| skipped:", len(skipped), skipped)
 print("movement-path findings:", bad or "none")
 PY
 ```
 
-Expected: `none` (the close script doesn't exist yet). Then WS `homeassistant/expose_entity/list`: `cover.msg100_7982_garage_door`
-is **not** exposed to any assistant. Record both results. Any finding → **stop**.
+Expected: `door device_id resolved: True`, `movement-path findings: none` (the close script doesn't exist yet), and a
+`skipped` list that is **empty**, or whose every entry the operator confirms is not garage-related (a skipped item
+is unaudited, not clean). Then WS `homeassistant/expose_entity/list`: `cover.msg100_7982_garage_door` is **not**
+exposed to any assistant. Record all three results. Any finding → **stop**.
 
 - [ ] **Step 2: Push the close script, then its dry run**
 
@@ -1536,7 +1619,9 @@ Expected: six backups (the stage-2 variants) and six `read-back matches`.
 - [ ] **Step 5: Refusals live.**
   - Door closed → tap *Close* on a resent test alert → "Garage: already closed ✓", and the door does not move.
   - Door open > T s → the operator taps *Close* on **both** phones within 1 s → the door closes once, and exactly one
-    result message arrives (the second tap was dropped silently by `mode: single`).
+    result message arrives. The handler is `parallel`, so the second tap's call hits the close script while it's
+    running and is dropped silently by `mode: single` / `max_exceeded: silent`. (Under `queued` it would have run
+    ~15 s later and sent a second "already closed ✓"; that is why the handler isn't queued.)
   - Kill switch: disable `automation.garage_notification_action`, tap *Close* on a test alert with the door open →
     nothing happens. Re-enable it, and check that the automation's state is `on`.
 

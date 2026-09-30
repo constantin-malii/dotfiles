@@ -81,7 +81,7 @@ through the Companion app; button taps return as `mobile_app_notification_action
 | `automation.garage_left_open` | State trigger `to: [open, opening, closing]`, `for: 15 min`; then a `/15` time pattern whose condition checks the door is in one of the **same three states** (never `unavailable`/`unknown` — §4.4) | If `timer.garage_snooze` idle and `counter.garage_reminders` < 4 (the first alert does not count): notify (tag `garage`) with *Close* · *Snooze 1 h* · *Snooze 3 h*; increment the counter on reminders |
 | `automation.garage_bedtime_check` | Time 21:00 | If door not `closed`: notify with *Close*. Ignores the snooze |
 | `automation.garage_opened_while_away` | Door → `open`/`opening` | If `person.costea` **and** `person.vio` have both been `not_home` ≥ 5 min: notify immediately with *Close* |
-| `automation.garage_notification_action` | `mobile_app_notification_action` with `action` ∈ {`GARAGE_CLOSE`, `GARAGE_SNOOZE_1H`, `GARAGE_SNOOZE_3H`} | *Close* → `script.garage_close_checked`; *Snooze* → start the timer. **`mode: queued`** — the close call blocks this automation for up to 60 s (§4.2 step 4), and under the default `single` a *Snooze* tap from the other phone in that window would be dropped silently. **This is the kill switch** (§6.4) |
+| `automation.garage_notification_action` | `mobile_app_notification_action` with `action` ∈ {`GARAGE_CLOSE`, `GARAGE_SNOOZE_1H`, `GARAGE_SNOOZE_3H`} | *Close* → `script.garage_close_checked`; *Snooze* → start the timer. **`mode: parallel`** (max 10) — the close call blocks a run for up to 60 s (§4.2 step 4); under the default `single` a *Snooze* tap from the other phone in that window would be dropped silently, and under `queued` a duplicate *Close* would run ~15 s later and report "already closed". Parallel runs each tap at once: a duplicate *Close* hits the script's `mode: single` and is dropped silently. (Corrected from `queued` in plan review, 2026-09-29.) **This is the kill switch** (§6.4) |
 | `automation.garage_closed_cleanup` | Door → `closed` | `garage_notify` mode `clear` for tag **`garage` only** (the `garage_result` message survives, so the close outcome is not erased); `timer.cancel` snooze; `counter.reset` reminders |
 | `automation.garage_status_lost` | State trigger `from: [open, opening, closing]` → `to: [unavailable, unknown]`, `for: 10 min` | Notify "Garage status lost — last seen OPEN". The "last seen not closed" condition lives **in the trigger**, so no helper stores the last state, and `unavailable`↔`unknown` flapping cannot make `trigger.from_state` read `unavailable` |
 
@@ -136,7 +136,7 @@ Refusing a close in the first ~30 s after opening is a trivial cost. `opening` d
 it, is a bonus that enables stuck-on-opening; it is not what safety rests on.
 
 A second tap while the script runs is dropped by mode `single` (`max_exceeded: silent`, so no log warning); the
-tapper sees no new alert, and the in-flight run reports for both. The handler's `mode: queued` means the dropped
+tapper sees no new alert, and the in-flight run reports for both. The handler's `mode: parallel` means the dropped
 duplicate is a *close* only — a *Snooze* tap in the same window still runs.
 
 ⚠️ **Stuck-on-opening is not promised until measured.** The cover may flip from `opening` to `open` within
