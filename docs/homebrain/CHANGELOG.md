@@ -3,6 +3,71 @@
 Operational/administrative changes to the homebrain setup. (Architecture and feature
 design live in the per-topic docs; this log is for discrete operational changes.)
 
+## 2026-09-30 — HA-08 stage 1: garage helpers + notify/status scripts live (not exposed); door command path unreliable
+
+> Stage 1 of `plans/2026-09-29-ha-08-garage-door-alerts-plan.md` is done. Nothing garage-related is exposed, no
+> garage automation exists, and nothing in HA can move the door. **Finding that changes the plan:** the Meross
+> command path (MSG100 → RGR910 radio adapter → LiftMaster) fails roughly **half** of all open/close commands,
+> from the Meross app and from HA alike, and twice the door moved about 30 s after a command that had failed.
+> Alerts (stages 2 and 4) are unaffected, because they only read the door sensor. **Stage 3 (remote close) is
+> on hold** until the command path is reliable, and will be re-decided with the operator.
+
+- **Gate:** claimed for HA-08 (HA-live + exposure) via PR #68, merged before the first live call.
+- **Helpers (outside the managed export, so recorded here in full — spec §6.3).** Created over WS; no UI fallback
+  was needed:
+  - `timer/create` `{"name": "garage_snooze", "duration": "01:00:00", "restore": true, "icon": "mdi:garage-alert"}`
+    → `timer.garage_snooze`, `idle`.
+  - `counter/create` `{"name": "garage_reminders", "initial": 0, "step": 1, "minimum": 0, "maximum": 10, "restore": true, "icon": "mdi:counter"}`
+    → `counter.garage_reminders`, `0`.
+- **Scripts:** `script.garage_notify` and `script.garage_status` pushed with `tools/ha_apply.py` (dry run, then
+  real; `backup=none (not present)`; **read-back matched the file** for both, so HA stores the posted config as
+  written). **Exposure unchanged: 14 entities, nothing garage-related.**
+- **Notification tests, both Samsungs, operator-confirmed:** (1) alert with a button, delivered with the button;
+  (2) `garage_result` sent *with* a Close button, delivered with **no** button (stripped by the script); (3)
+  clearing tag `garage` removed the alert and **left the result**; (4) clearing `garage_result` removed it. Test 1
+  was re-sent once because the operator had dismissed it before test 3. No "phone not registered" persistent
+  notification was raised.
+- **Status script:** door closed → "The garage door is closed." ⏳ **The open-state replies ("it just opened" /
+  "open for N minutes") were not checked** in stage 1; carried to stage 2.
+- **Door behaviour measured (recorder: `subscribe_trigger` on the cover, log kept at
+  `~/homebrain-backups/ha08/door-transitions-stage1.txt`):**
+  - **Open: 7–8 s. Close: 16–17 s.** `opening` and `closing` are both reported, each well under 60 s, so the
+    close script's stuck check and the status wording work as designed in both directions.
+  - **T (stable-open guard) = longest travel + 10 = 27 s → the plan's 30 s default stands.** No code change.
+  - `obstruction-detected` is the MSG100's own "operation didn't finish in time" flag, not a sensor: it goes
+    `True` on every Meross timeout and clears on the next successful open.
+- **Command-path reliability (the finding).** Across 13 commands (Meross app and HA's door tile), about **6
+  failed**: the relay clicks, the door doesn't move, and the Meross times out. It isn't strictly alternating.
+  **Two uncommanded movements:** an open about 32 s after a failed open command, then a close at 18:29:00 UTC
+  about 33 s later that nothing sent (HA recorded `open → closed` with no `closing`). Not yet explained; candidates
+  are the opener's Timer-to-Close, or late transmissions from the adapter.
+- **How the Meross got working at all (hardware, for the record):**
+  - The opener is a **LiftMaster with a yellow learn button (Security+ 2.0), FCC ID HBW7675, with myQ**. It
+    ignores a plain contact closure, so the MSG100 alone could never drive it (this is also why an earlier direct
+    wiring attempt failed).
+  - The Meross-supplied adapter is an **RGR910** (a DIP-switch/learn universal radio remote). The MSG100's signal
+    cable triggers **its button 1 only** (Meross FAQ 258).
+  - **RGR910 configuration** (manual, Meross FAQ 258): hold the program button → solid blue (config mode), then
+    each press of button 1, *after the LED stops flashing*, selects the next opener type. **Chamberlain/LiftMaster
+    yellow is press 8.** The opener's 30 s learn window is shorter than 8 presses, so the yellow LEARN button is
+    pressed **after press 5**. Exit with one press of the program button **immediately** at the opener's
+    response: one extra press moves button 1 to type 9 and it silently stops working.
+  - The RGR910's **coin cell was nearly flat** (config mode died after 3, then 2 presses) and was replaced.
+  - **Meross "opening time" set to 25 s.** At 10 s the MSG100 declared closes failed mid-travel (a close takes
+    about 17 s), which corrupted its state for the next command.
+- **Debug logging turned off** by the operator (`logger.set_level` → `warning` for `zeroconf`,
+  `homeassistant.components.zeroconf`, `homeassistant.components.homekit_controller`, `aiohomekit`); no debug
+  lines after 13:12:32 MDT.
+- **Round-trip:** exporter on the host with a **stage-1 manifest**, written as a separate file
+  (`~/ha-state/manifest-stage1.json`) and exported to `~/ha-state/staging-managed-ha08s1`, so the deployed
+  `~/ha-state/MANIFEST.json` was not replaced. HA 2026.6.4, 39 files. **`garage_notify` and `garage_status` are
+  byte-identical to the repo.** The exporter also reported one unmanaged automation, `1790544577824`: not
+  HA-08's, left alone, noted for the manifest owner.
+- **Rulings:** the plan's stage-1 manifest snippet removed only the garage automations; `garage_close_checked` also
+  had to be removed (it isn't live yet and would have made the exporter exit 5). Plan to be corrected.
+- **Next:** stage 2 (alerts, Snooze only, no Close anywhere), including the carried-over open-state status check.
+  Before stage 3, the operator re-decides remote close with this reliability data in hand.
+
 ## 2026-09-29 — MR-08c resolver deploy: the queue survives a spoken reply (+ MR-08e miss log)
 
 > Voice replies during music no longer cut a playlist to one song: the reply clip is inserted into the Music

@@ -1499,6 +1499,7 @@ python - "$HOME/homebrain-backups/ha08/manifest-stage1.json" <<'PY'
 import json, sys
 m = json.load(open("../ha/MANIFEST.json", encoding="utf-8"))
 m["automations"] = [a for a in m["automations"] if not a.startswith("garage_")]
+m["scripts"] = [s for s in m["scripts"] if s != "garage_close_checked"]   # not live until stage 3 (exit 5 otherwise)
 open(sys.argv[1], "wb").write((json.dumps(m, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
 print("wrote", sys.argv[1])
 PY
