@@ -16,8 +16,11 @@ A host-side **`mass-resolver`** service (Python 3.5, on the host `costea@192.168
   - `script.play_music` — play from the **local** music library (MA `filesystem_smb`). Since **MR-08
     (2026-09-28)** this includes **curated Music Assistant playlists** by name or by an exact alias in
     `config.json` `playlist_aliases` (they play their local tracks only). Aliases must match what
-    speech-to-text actually produces — check HA's `script.play_music` trace for the real query. Known
-    limitation (`MR-08c`): a question during playback cuts the queue to the current song.
+    speech-to-text actually produces — check HA's `script.play_music` trace for the real query. Since
+    **MR-08c (2026-09-29)** a spoken reply keeps the MA queue: the clip is inserted, the interrupted item
+    resumes by queue id (with seek), the clip is deleted, and "pause → question → resume playing music"
+    continues the same song. Kill switch: `config.json` `say_queue_resume: false` + restart. A music miss
+    logs `MISS query=…` (MR-08e).
   - `script.play_radio` — radio (favorites-first → RadioBrowser; by station/genre/country/language).
   - `script.find_stations` — list stations (genre/country), and with **no filter** the favourites list.
   - `script.news` — read the latest world headlines (resolver `news` capability).

@@ -43,11 +43,53 @@ design live in the per-topic docs; this log is for discrete operational changes.
   deferred — one change at a time).
 - **Gate note:** these live changes (HA network adapters, HA core restart, MA add-on restart, `macvtap0`
   filter) were made **while MR-08c held the gate** (§10), and outside it. The resolver was **not** touched
-  (still running since 2026-09-28 20:41 MDT, `/command` bound). MR-08c's four live checks are still pending;
-  they should start from a clean baseline that accounts for the MA add-on restart above.
+  (still running since 2026-09-28 20:41 MDT, `/command` bound). MR-08c's four live checks ran **after** these
+  changes and all passed (entry below); MR-08c then released the gate.
 - **Still to do:** turn HA's temporary debug logging off (`logger.set_level` → `warning` for `zeroconf`,
   `homeassistant.components.zeroconf`, `homeassistant.components.homekit_controller`, `aiohomekit`; a restart
   also resets it) · DHCP reservation for `.64` · `INF-09` · `INF-10` · HA-08 design before any control path.
+
+||||||| 5ddf51b
+
+## 2026-09-29 — MR-08c resolver deploy: the queue survives a spoken reply (+ MR-08e miss log)
+
+> Voice replies during music no longer cut a playlist to one song: the reply clip is inserted into the Music
+> Assistant queue, the interrupted item resumes by queue id (seeking to its position for tracks), and the clip
+> is deleted. "Pause", a question, then "resume playing music" continues the same song in the same queue.
+> Kill switch: `config.json` `"say_queue_resume": false` + restart = the previous (replace-and-replay) reply.
+> Rollback: `~/mass-resolver/.bak/20260928-202625/` (last promote) or `.bak/20260928-164852/` (pre-MR-08c,
+> 52 files) + restart.
+
+- **Shipped** (branch `homebrain/mr-08c-queue-resume`, design `2026-09-28-mr-08c-queue-resume-design.md`,
+  final build `2976bdb`): queue-mode replies on the ceiling zone — capture before pause, `enqueue: "play"`,
+  exact position-anchored clip identity, resume by `play_index` with seek, phase-aware URI fallback, pending
+  resume for pause/question/resume, barge-in inheritance. **MR-08e:** a music miss logs
+  `MISS query=… media_type=… alias=…`.
+- **Four live spikes** (throwaway, operator-approved) measured MA before and after the first deploy. Spike 4
+  (design §3.3) found what the unit fakes could not: a ~0.75 s HA+MA flip back to the song mid-clip, a paused
+  station restarting ~1 s after a clip, and **MA 2.9 silently ignoring deletes at or below `index_in_buffer`**
+  while replying success.
+- **The first two deploys failed live checks and were rolled back by the kill switch** (2026-09-28 17:14 and
+  18:32): short answers ended early and left the clip behind the song (heard as "6:32 PM" at the song's end);
+  the station restarted by itself after "Paused." Amendments A1–A2 (design §4.8): a different item must
+  persist 1.5 s before a clip counts as finished; buffer-aware, fail-closed, verified deletes with bounded
+  retries; a 3 s re-pause watch that yields to a voice resume. The third deploy failed check 4 (20:09): the
+  question's clip was inserted after the *buffered* "Paused." clip, so it was never identified and resume fell
+  back to URI replay. **A3:** the first clip anchors on `index_in_buffer`.
+- **Deploy (final):** host tests on Python 3.5.2 **913 OK**, staged; sha256-verified promote (3 files); local
+  suite 1028 OK; operator restart 2026-09-28 20:41:40; `key=200`/`nokey=401`; no tracebacks; dry-runs silent
+  (`ANNOUNCE via` 100 before and after).
+- **Live checks 2026-09-29, all four passed:** (1) playlist + two questions → resumed at 27 s and 44 s, clips
+  deleted and verified absent; (2) radio + "what time is it?" → clean end after 1 s, station resumed;
+  (3) pause → resume on costa mix → same song; (4) pause → question → resume on **costa mix** (20:18–20:19)
+  → `anchor=1 (buffer)`, clip identified, both clips deleted, same song resumed at ~77 s, all 8 tracks intact
+  in order. The logs showed `index_in_buffer=0` right after every `play_index` — the buffer rule held on the
+  real player.
+- **Known behaviour:** after a "Paused." reply MA restarts the music by itself; the resolver pauses it again
+  ~2 s later (approved trade-off; `MR-08h`). Replies to "pause" or while paused take up to 3 s longer to finish.
+- **Not the resolver:** misheard commands ("Oz" started a Julio Iglesias track; "Resume" went to HA's
+  `HassUnpauseTimer`; "Costa Mix" sometimes routed to `play_radio`) — HA speech-to-text and agent routing
+  (`MR-08d`, `MR-08f`, `MR-08g`). Say "resume playing music".
 
 ## 2026-09-28 — MR-08 resolver deploy: curated playlists by voice, dry-runs silent
 
