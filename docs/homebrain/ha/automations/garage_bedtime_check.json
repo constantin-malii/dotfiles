@@ -13,7 +13,7 @@
       }
     }
   ],
-  "alias": "Garage: bedtime check (21:00)",
+  "alias": "Garage bedtime check",
   "automation_id": "garage_bedtime_check",
   "conditions": [
     {

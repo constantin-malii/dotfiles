@@ -13,7 +13,7 @@
       }
     }
   ],
-  "alias": "Garage: opened while nobody is home",
+  "alias": "Garage opened while away",
   "automation_id": "garage_opened_while_away",
   "conditions": [
     {

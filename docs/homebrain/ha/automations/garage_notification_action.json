@@ -53,7 +53,7 @@
       ]
     }
   ],
-  "alias": "Garage: notification button handler",
+  "alias": "Garage notification action",
   "automation_id": "garage_notification_action",
   "description": "HA-08. Handles GARAGE_CLOSE / GARAGE_SNOOZE_1H / GARAGE_SNOOZE_3H taps. KILL SWITCH: disable this automation to stop all new remote closes (a close already running finishes within 60 s). Parallel so a Snooze tap is never blocked behind a close; a duplicate Close is dropped silently by the close script's mode single. Snooze is ignored if the door is already closed.",
   "id": "garage_notification_action",

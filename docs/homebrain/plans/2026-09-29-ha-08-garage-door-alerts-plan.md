@@ -57,6 +57,12 @@ it first; this plan argues from it.
    to the automation's triggers.
 5. **`ha_apply.py`**, a small push/backup/read-back tool (Task 5), so each deploy is byte-for-byte the reviewed
    file rather than JSON pasted into a command.
+6. **Automation aliases slugify to their ids** (pre-live review, 2026-09-29). HA names an automation's entity after
+   its **alias** at creation, not its `id` (live evidence: `ma_health_probe` is `automation.ma_health_probe_auto_reload`).
+   The aliases are therefore plain ("Garage notification action", …), so the entities are exactly
+   `automation.garage_<id>`, which the kill switch and the status boot marker depend on. The implemented files
+   carry these aliases; the JSON blocks in Task 3 show the earlier, descriptive ones. Pinned by
+   `test_automation_entity_ids_will_equal_their_ids`. At stage 2, confirm each entity id after the first push.
 
 ## Review Focus
 
@@ -1649,8 +1655,15 @@ for s in get("/api/states"):
                 e = src.get("entity_id")
                 ents += [e] if isinstance(e, str) else [str(x) for x in (e or []) if isinstance(e, list)]
                 other = other or any(k in src for k in ("area_id", "device_id", "floor_id", "label_id"))
+        if "trigger" not in d and "platform" not in d and (
+                d.get("event") == "mobile_app_notification_action" or act == "event.fire"):
+            bad.append((eid, "fires the tap event (a close with no human tap)"))
         if is_device_action:
             moves = d.get("device_id") == DEV or DOOR in text
+        elif "{{" in act or "{%" in act:
+            moves = True                                   # templated action name: could render to cover.open_cover
+        elif act.startswith("scene."):
+            moves = DOOR in text                           # scene.apply / scene.create with the door in entities
         elif act.startswith("cover.") or act in GENERIC:
             # homeassistant.turn_on on a cover opens it, so generic calls get the same tail as cover.*
             moves = (any(DOOR in x for x in ents) or other or not ents or "all" in ents

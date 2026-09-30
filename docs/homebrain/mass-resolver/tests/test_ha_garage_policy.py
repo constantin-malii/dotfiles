@@ -358,6 +358,10 @@ def could_move_door(d):
     if is_device_action(d):
         return d.get("domain") == "cover" or DOOR in json.dumps(d)
     act = d.get("action") if isinstance(d.get("action"), str) else ""
+    if "{{" in act or "{%" in act:
+        return True           # a templated action name could render to cover.open_cover
+    if act.startswith("scene."):
+        return DOOR in json.dumps(d)   # scene.apply / scene.create with entities: {door: open}
     if not (act.startswith("cover.") or act in GENERIC_MOVES):
         return False
     ents, other = entity_targets(d)
@@ -377,7 +381,10 @@ class HardRulesTest(unittest.TestCase):
     def test_rule1_nothing_anywhere_opens_the_door(self):
         for label, obj in all_managed():
             for d in moving_actions(obj):
-                self.assertNotIn(d.get("action"), FORBIDDEN_MOVES, "%s: %s could open/move the door" % (label, d))
+                # GENERIC_MOVES too: homeassistant.turn_on/toggle on a cover opens it, and the close script is
+                # not exempt here (rule 2's test skips it; this one must not).
+                self.assertNotIn(d.get("action"), FORBIDDEN_MOVES | GENERIC_MOVES,
+                                 "%s: %s could open/move the door" % (label, d))
 
     def test_rule2_only_the_close_script_can_move_the_door(self):
         for label, obj in all_managed():
@@ -440,6 +447,101 @@ class ManifestTest(unittest.TestCase):
             self.assertIn(name, m["automations"])
         self.assertEqual(m["scripts"], sorted(m["scripts"]))
         self.assertEqual(m["automations"], sorted(m["automations"]))
+
+
+def ha_slugify(text):
+    """HA's entity-id slug for a plain ASCII alias: lowercase, runs of non-alphanumerics -> '_', trimmed."""
+    out, prev_us = [], False
+    for ch in text.lower():
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9"):
+            out.append(ch)
+            prev_us = False
+        elif not prev_us:
+            out.append("_")
+            prev_us = True
+    return "".join(out).strip("_")
+
+
+def option_by_message(close_obj, prefix):
+    for opt in close_obj["sequence"][1]["choose"]:
+        if opt["sequence"][0]["data"]["message"].startswith(prefix):
+            return opt
+    raise AssertionError("no refusal starting %r" % prefix)
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class ReviewFixesTest(unittest.TestCase):
+    """Gaps found by the pre-live review (2026-09-29): each pins a bug the earlier tests passed against."""
+
+    def test_automation_entity_ids_will_equal_their_ids(self):
+        # HA derives automation.<entity_id> from the alias at creation, not from "id". The kill switch
+        # (automation.garage_notification_action) and the status boot marker depend on these names.
+        for name in AUTOMATIONS:
+            self.assertEqual(ha_slugify(auto(name)["alias"]), name, "alias of %s must slugify to its id" % name)
+
+    def test_close_script_has_exactly_one_moving_action_the_close(self):
+        moving = moving_actions(load("scripts", "garage_close_checked")[1])
+        self.assertEqual([d.get("action") for d in moving], ["cover.close_cover"])
+
+    def test_could_move_door_sees_scenes_and_templated_action_names(self):
+        self.assertTrue(could_move_door({"action": "scene.apply", "data": {"entities": {DOOR: "open"}}}))
+        self.assertTrue(could_move_door({"action": "scene.create", "data": {"scene_id": "x", "entities": {DOOR: {"state": "open"}}}}))
+        self.assertTrue(could_move_door({"action": "{{ 'cover.open_cover' }}", "target": {"entity_id": "cover.x"}}))
+        self.assertFalse(could_move_door({"action": "scene.apply", "data": {"entities": {"light.porch": "on"}}}))
+
+    def test_nothing_fires_the_button_event(self):
+        # Firing mobile_app_notification_action with GARAGE_CLOSE would close the door with no human tap.
+        for label, obj in all_managed():
+            for d in walk(obj):
+                if "trigger" in d or "platform" in d:
+                    continue
+                self.assertNotEqual(d.get("event"), "mobile_app_notification_action", "%s fires the tap event" % label)
+                self.assertNotEqual(d.get("action"), "event.fire", label)
+
+    def test_garage_close_id_appears_only_in_buttons_and_the_handler_trigger(self):
+        for label, obj in all_managed():
+            # Identity within THIS loaded copy: the handler's own trigger dicts are the one permitted place.
+            handler_trigger_dicts = ([id(x) for x in walk(obj["triggers"])]
+                                     if label == "automations/garage_notification_action.json" else [])
+            for d in walk(obj):
+                if "GARAGE_CLOSE" not in [v for v in d.values() if isinstance(v, str)]:
+                    continue
+                is_button = sorted(d) == ["action", "title"]
+                self.assertTrue(is_button or id(d) in handler_trigger_dicts,
+                                "%s: GARAGE_CLOSE outside a button or the handler trigger: %r" % (label, d))
+
+    def test_close_script_guard_templates_are_exact(self):
+        c = load("scripts", "garage_close_checked")[1]
+        self.assertEqual(option_by_message(c, "Garage is stuck")["conditions"][0]["value_template"],
+                         "{{ st in ['opening', 'closing'] and age_s > stuck_s }}")
+        self.assertEqual(option_by_message(c, "Garage: obstruction detected")["conditions"][0]["value_template"],
+                         "{{ obstructed }}")
+        self.assertEqual(option_by_message(c, "Garage: door just opened")["conditions"][0]["value_template"],
+                         "{{ age_s < stable_open_s }}")
+        self.assertEqual(c["sequence"][0]["variables"]["obstructed"],
+                         "{{ state_attr('cover.msg100_7982_garage_door', 'obstruction-detected') in [true, 'true', 'True', 'on'] }}")
+
+    def test_handler_maps_each_button_to_its_own_branch(self):
+        a = auto("garage_notification_action")
+        mapping = dict((t["event_data"]["action"], t["id"]) for t in a["triggers"])
+        self.assertEqual(mapping, {"GARAGE_CLOSE": "close", "GARAGE_SNOOZE_1H": "snooze_1h", "GARAGE_SNOOZE_3H": "snooze_3h"})
+        branches = a["actions"][0]["choose"]
+        close = [b for b in branches if "garage_close_checked" in json.dumps(b["sequence"])]
+        self.assertEqual(len(close), 1)
+        self.assertEqual(close[0]["conditions"], [{"condition": "trigger", "id": "close"}])
+        snooze = [b for b in branches if "timer.start" in json.dumps(b["sequence"])]
+        self.assertEqual(len(snooze), 1)
+        self.assertEqual(snooze[0]["conditions"][0], {"condition": "trigger", "id": ["snooze_1h", "snooze_3h"]})
+
+    def test_cleanup_cancels_snooze_and_resets_counter(self):
+        then = auto("garage_closed_cleanup")["actions"][0]["then"]
+        self.assertIn({"action": "timer.cancel", "target": {"entity_id": "timer.garage_snooze"}}, then)
+        self.assertIn({"action": "counter.reset", "target": {"entity_id": "counter.garage_reminders"}}, then)
+
+    def test_away_templates_are_exact(self):
+        conds = auto("garage_opened_while_away")["conditions"]
+        want = "{%% set p = states.person.%s %%}{{ p is not none and p.state not in ['home', 'unknown', 'unavailable'] and (as_timestamp(now()) - as_timestamp(p.last_changed)) >= 300 }}"
+        self.assertEqual([c["value_template"] for c in conds], [want % "costea", want % "vio"])
 
 
 if __name__ == "__main__":

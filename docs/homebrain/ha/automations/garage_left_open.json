@@ -90,7 +90,7 @@
       ]
     }
   ],
-  "alias": "Garage: left-open alert",
+  "alias": "Garage left open",
   "automation_id": "garage_left_open",
   "conditions": [
     {
