@@ -84,7 +84,7 @@ def all_managed():
 class GarageFilesTest(unittest.TestCase):
     def test_script_files_exist_and_are_canonical(self):
         import ha_export
-        for name in SCRIPTS[:1] + SCRIPTS[2:]:
+        for name in SCRIPTS:
             raw, obj = load("scripts", name)
             self.assertEqual(obj.get("object_id"), name)
             self.assertEqual(raw, ha_export.render(obj), "%s is not canonical" % name)
@@ -138,6 +138,79 @@ class StatusScriptTest(unittest.TestCase):
     def test_unreachable_wording_has_no_last_seen(self):
         self.assertIn("I can't reach the garage door right now.", json.dumps(self.obj, ensure_ascii=False))
         self.assertNotIn("last seen", json.dumps(self.obj))
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class CloseScriptTest(unittest.TestCase):
+    def setUp(self):
+        self.obj = load("scripts", "garage_close_checked")[1]
+        self.seq = self.obj["sequence"]
+
+    def test_mode_single_and_silent(self):
+        self.assertEqual(self.obj["mode"], "single")
+        self.assertEqual(self.obj["max_exceeded"], "silent")
+
+    def test_only_cover_action_is_one_close_of_the_door(self):
+        covers = [d for d in actions_in(self.obj) if d["action"].startswith("cover.")]
+        self.assertEqual(len(covers), 1)
+        self.assertEqual(covers[0]["action"], "cover.close_cover")
+        self.assertEqual(covers[0]["target"], {"entity_id": DOOR})
+
+    def test_stable_open_guard_constants(self):
+        vars0 = self.seq[0]["variables"]
+        self.assertEqual(vars0["stable_open_s"], 30)
+        self.assertEqual(vars0["stuck_s"], 60)
+
+    def test_refusal_order(self):
+        options = self.seq[1]["choose"]
+        messages = []
+        for opt in options:
+            self.assertEqual(list(opt["sequence"][-1].keys()), ["stop"], "every refusal must stop the script")
+            messages.append(opt["sequence"][0]["data"]["message"])
+        expected_prefixes = [
+            "Garage: already closed",
+            "Garage: can't reach the door",
+            "Garage is stuck",
+            "Garage: already closing",
+            "Garage: door is opening",
+            "Garage: unexpected state",
+            "Garage: obstruction detected",
+            "Garage: door just opened",
+        ]
+        self.assertEqual(len(messages), len(expected_prefixes))
+        for got, want in zip(messages, expected_prefixes):
+            self.assertTrue(got.startswith(want), "%r should start with %r" % (got, want))
+
+    def test_every_refusal_and_result_uses_result_tag_without_buttons(self):
+        calls = notify_calls(self.obj)
+        self.assertGreaterEqual(len(calls), 11)
+        for d in calls:
+            self.assertEqual(d["data"].get("tag"), "garage_result")
+            self.assertNotIn("buttons", d["data"])
+
+    def test_guard_and_dry_run_come_before_the_close(self):
+        kinds = []
+        for step in self.seq:
+            if "choose" in step:
+                kinds.append("refusals")
+            elif "if" in step and "dry_run" in json.dumps(step["if"]):
+                kinds.append("dry_run")
+            elif step.get("action") == "cover.close_cover":
+                kinds.append("close")
+            elif "wait_template" in step:
+                kinds.append("wait")
+        self.assertEqual(kinds, ["refusals", "dry_run", "close", "wait"])
+
+    def test_waits_60s_and_reports_both_outcomes_without_retry(self):
+        wait = [s for s in self.seq if "wait_template" in s][0]
+        self.assertEqual(wait["timeout"], "00:01:00")
+        self.assertTrue(wait["continue_on_timeout"])
+        final = self.seq[-1]
+        self.assertIn("wait.completed", json.dumps(final["if"]))
+        self.assertTrue(final["then"][0]["data"]["message"].startswith("Garage closed"))
+        self.assertTrue(final["else"][0]["data"]["message"].startswith("Garage did NOT close"))
+        closes = [d for d in actions_in(self.obj) if d["action"] == "cover.close_cover"]
+        self.assertEqual(len(closes), 1, "no automatic retry")
 
 
 if __name__ == "__main__":
