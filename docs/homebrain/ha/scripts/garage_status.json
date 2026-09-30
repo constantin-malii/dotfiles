@@ -1,0 +1,27 @@
+{
+  "alias": "Garage: door status (read-only)",
+  "description": "Report whether the garage door is open or closed. This tool cannot open or close the door.",
+  "max": 5,
+  "mode": "parallel",
+  "object_id": "garage_status",
+  "sequence": [
+    {
+      "variables": {
+        "mins": "{% set s = states.cover.msg100_7982_garage_door %}{{ (((as_timestamp(now()) - as_timestamp(s.last_changed)) // 60) | int) if s else 0 }}",
+        "near_boot": "{% set s = states.cover.msg100_7982_garage_door %}{% set b = states.automation.garage_closed_cleanup %}{{ s is not none and b is not none and ((as_timestamp(s.last_changed) - as_timestamp(b.last_changed)) | abs) < 120 }}",
+        "st": "{{ states('cover.msg100_7982_garage_door') }}"
+      }
+    },
+    {
+      "variables": {
+        "resp": {
+          "chat_text": "{% if st == 'open' %}The garage door is open — {% if mins < 1 %}it just opened{% else %}it's been open for {{ 'at least ' if near_boot else '' }}{{ mins }} minute{{ '' if mins == 1 else 's' }}{% endif %}.{% elif st == 'closed' %}The garage door is closed.{% elif st in ['opening', 'closing'] and mins >= 1 %}The garage door has been {{ st }} for {{ mins }} minute{{ '' if mins == 1 else 's' }} — it may be stuck.{% elif st in ['opening', 'closing'] %}The garage door is {{ st }} right now.{% else %}I can't reach the garage door right now.{% endif %}"
+        }
+      }
+    },
+    {
+      "response_variable": "resp",
+      "stop": "done"
+    }
+  ]
+}

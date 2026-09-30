@@ -34,7 +34,8 @@ MODULES = ["interaction.py", "haconn.py", "config.py", "wsutil.py", "maconn.py",
 TEST_MODULES = ["tests/test_interaction.py", "tests/test_haconn.py",
                 "tests/test_config.py", "tests/test_wsutil.py",
                 "tests/test_py35_compat.py", "tests/test_queue_resume.py",
-                "tests/test_maconn.py", "tests/test_playlist.py"]
+                "tests/test_maconn.py", "tests/test_playlist.py",
+                "tests/test_ha_garage_policy.py"]
 
 
 def _node(name):

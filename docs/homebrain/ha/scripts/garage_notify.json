@@ -1,0 +1,107 @@
+{
+  "alias": "Garage: notify phones",
+  "description": "HA-08, internal. Sends or clears a garage notification on both household phones. Tag 'garage' = actionable alerts (the only tag that may carry buttons); 'garage_result' = close outcomes. Not exposed.",
+  "fields": {
+    "buttons": {
+      "default": [],
+      "description": "List of {action, title} buttons. Ignored unless tag is 'garage'.",
+      "selector": {
+        "object": {}
+      }
+    },
+    "clear": {
+      "default": false,
+      "description": "Clear the notification with this tag instead of sending.",
+      "selector": {
+        "boolean": {}
+      }
+    },
+    "message": {
+      "description": "Notification text.",
+      "selector": {
+        "text": {}
+      }
+    },
+    "tag": {
+      "default": "garage",
+      "description": "'garage' (actionable alert) or 'garage_result' (close outcome).",
+      "selector": {
+        "text": {}
+      }
+    }
+  },
+  "max": 10,
+  "mode": "parallel",
+  "object_id": "garage_notify",
+  "sequence": [
+    {
+      "variables": {
+        "btns": "{{ buttons | default([]) if (tag | default('garage')) == 'garage' else [] }}",
+        "is_clear": "{{ clear | default(false) | bool }}",
+        "t": "{{ tag | default('garage') }}"
+      }
+    },
+    {
+      "else": [
+        {
+          "action": "notify.mobile_app_sm_s948w_costea",
+          "continue_on_error": true,
+          "data": {
+            "data": {
+              "actions": "{{ btns }}",
+              "channel": "Garage",
+              "priority": "high",
+              "tag": "{{ t }}",
+              "ttl": 0
+            },
+            "message": "{{ message }}",
+            "title": "Garage"
+          }
+        },
+        {
+          "action": "notify.mobile_app_sm_s948w_vio",
+          "continue_on_error": true,
+          "data": {
+            "data": {
+              "actions": "{{ btns }}",
+              "channel": "Garage",
+              "priority": "high",
+              "tag": "{{ t }}",
+              "ttl": 0
+            },
+            "message": "{{ message }}",
+            "title": "Garage"
+          }
+        }
+      ],
+      "if": [
+        {
+          "condition": "template",
+          "value_template": "{{ is_clear }}"
+        }
+      ],
+      "then": [
+        {
+          "action": "notify.mobile_app_sm_s948w_costea",
+          "continue_on_error": true,
+          "data": {
+            "data": {
+              "tag": "{{ t }}"
+            },
+            "message": "clear_notification"
+          }
+        },
+        {
+          "action": "notify.mobile_app_sm_s948w_vio",
+          "continue_on_error": true,
+          "data": {
+            "data": {
+              "tag": "{{ t }}"
+            },
+            "message": "clear_notification"
+          }
+        }
+      ]
+    }
+  ]
+}
