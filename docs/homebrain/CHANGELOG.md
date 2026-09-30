@@ -49,8 +49,6 @@ design live in the per-topic docs; this log is for discrete operational changes.
   `homeassistant.components.zeroconf`, `homeassistant.components.homekit_controller`, `aiohomekit`; a restart
   also resets it) · DHCP reservation for `.64` · `INF-10` · `INF-11` · HA-08 design before any control path.
 
-||||||| 5ddf51b
-
 ## 2026-09-29 — MR-08c resolver deploy: the queue survives a spoken reply (+ MR-08e miss log)
 
 > Voice replies during music no longer cut a playlist to one song: the reply clip is inserted into the Music
