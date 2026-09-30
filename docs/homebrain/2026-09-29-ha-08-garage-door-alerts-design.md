@@ -1,8 +1,11 @@
 # HA-08 — Garage door: left-open alerts, checked remote close, read-only voice status
 
-> **Status:** design, agreed section by section with the operator 2026-09-29; revised after a peer review (five
-> required edits + notes, 2026-09-29); awaiting operator review of this written spec. **Merge order:** after the
-> pairing PR (`homebrain/ha-08-meross-pairing`), whose `CHANGELOG.md` entry this spec cites. **Track:** HA. **Live surface:** HA helpers, scripts, automations, and **one** exposure change
+> **Status:** design, agreed section by section with the operator 2026-09-29; revised after two reviews
+> (2026-09-29: a peer review's five required edits + notes, then a second review's five points, aligned with the
+> peer before editing); awaiting operator review of this written spec.
+> **Merge order:** after the pairing PR (`homebrain/ha-08-meross-pairing`), whose `CHANGELOG.md` entry this spec
+> cites.
+> **Track:** HA. **Live surface:** HA helpers, scripts, automations, and **one** exposure change
 > (`script.garage_status` → `conversation`). No resolver, host, or MA change.
 > **Device:** Meross MSG100 via HomeKit Controller (paired 2026-09-29 — see `CHANGELOG.md`), entity
 > `cover.msg100_7982_garage_door` (device class `garage`), area Garage.
@@ -30,9 +33,13 @@
 ### 1.1 Hard rules
 
 1. **Nothing opens the door.** No script, automation, button or voice path in this design issues an open.
-2. **Exactly one thing can move the door:** `script.garage_close_checked`, and it can only close.
+2. **Exactly one HA path can move the door:** `script.garage_close_checked`, and it can only close. The wall
+   control and the Meross app are outside HA and out of scope. A preflight audit (§6.2, before stage 3) proves no
+   other HA path exists.
 3. **The cover entity is never exposed** to any assistant. The only new exposure is the read-only status script.
 4. **No automatic closing.** A close happens only after a human taps *Close*.
+5. **Never close a door that has not been stably open.** `script.garage_close_checked` refuses unless the door has
+   been `open` for at least **T** seconds (§4.2), whatever the device reports about `opening`.
 
 ### 1.2 Deferred / rejected (recorded so they are not lost)
 
@@ -63,7 +70,7 @@ through the Companion app; button taps return as `mobile_app_notification_action
 
 | Entity | Role | Moves the door? | Exposed? |
 |---|---|---|---|
-| `script.garage_notify` | The **only** sender. Sends to both phones with `tag: garage` (a new alert replaces the old one), optional action buttons; mode `clear` sends `clear_notification` | No | No |
+| `script.garage_notify` | The **only** sender. Sends to both phones; field `tag` (default `garage`) so a new message replaces the previous one under the same tag; optional action buttons; mode `clear` sends `clear_notification` for the given tag. **Two tags:** `garage` = actionable alerts only; `garage_result` = close outcomes, **never with buttons**, so a stale result can never be tapped into a close | No | No |
 | `script.garage_close_checked` | Checked close (§4.2). Field `dry_run` (bool) runs every check and reports "would close" without calling the cover | **Yes — close only** | **No** |
 | `script.garage_status` | Read-only status for voice (§5) | No | **Yes** (`conversation` only) |
 
@@ -71,23 +78,31 @@ through the Companion app; button taps return as `mobile_app_notification_action
 
 | Entity | Trigger | Action |
 |---|---|---|
-| `automation.garage_left_open` | Door not `closed` for 15 min; then a 15-min time pattern while not closed | If `timer.garage_snooze` idle and `counter.garage_reminders` < 4 (the first alert does not count): notify with *Close* · *Snooze 1 h* · *Snooze 3 h*; increment the counter on reminders |
+| `automation.garage_left_open` | State trigger `to: [open, opening, closing]`, `for: 15 min`; then a `/15` time pattern whose condition checks the door is in one of the **same three states** (never `unavailable`/`unknown` — §4.4) | If `timer.garage_snooze` idle and `counter.garage_reminders` < 4 (the first alert does not count): notify (tag `garage`) with *Close* · *Snooze 1 h* · *Snooze 3 h*; increment the counter on reminders |
 | `automation.garage_bedtime_check` | Time 21:00 | If door not `closed`: notify with *Close*. Ignores the snooze |
 | `automation.garage_opened_while_away` | Door → `open`/`opening` | If `person.costea` **and** `person.vio` have both been `not_home` ≥ 5 min: notify immediately with *Close* |
 | `automation.garage_notification_action` | `mobile_app_notification_action` with `action` ∈ {`GARAGE_CLOSE`, `GARAGE_SNOOZE_1H`, `GARAGE_SNOOZE_3H`} | *Close* → `script.garage_close_checked`; *Snooze* → start the timer. **`mode: queued`** — the close call blocks this automation for up to 60 s (§4.2 step 4), and under the default `single` a *Snooze* tap from the other phone in that window would be dropped silently. **This is the kill switch** (§6.4) |
-| `automation.garage_closed_cleanup` | Door → `closed` | `garage_notify` mode `clear`; `timer.cancel` snooze; `counter.reset` reminders |
+| `automation.garage_closed_cleanup` | Door → `closed` | `garage_notify` mode `clear` for tag **`garage` only** (the `garage_result` message survives, so the close outcome is not erased); `timer.cancel` snooze; `counter.reset` reminders |
 | `automation.garage_status_lost` | State trigger `from: [open, opening, closing]` → `to: [unavailable, unknown]`, `for: 10 min` | Notify "Garage status lost — last seen OPEN". The "last seen not closed" condition lives **in the trigger**, so no helper stores the last state, and `unavailable`↔`unknown` flapping cannot make `trigger.from_state` read `unavailable` |
 
 Action identifiers are namespaced `GARAGE_*` so no other notification's buttons can reach the handler.
 
 **Flow of a tap:** phone → `mobile_app_notification_action` → `automation.garage_notification_action` →
-`script.garage_close_checked` → cover → result via `script.garage_notify`.
+`script.garage_close_checked` → cover → result via `script.garage_notify` (tag `garage_result`).
 
 ## 4. Behaviour and failure handling
 
 ### 4.1 "Not closed" is the alert condition
 
-`opening`, `open` and `closing` all count as not closed, so a door stopped part-way still alerts after 15 minutes.
+`opening`, `open` and `closing` count as not closed, so a door stopped part-way still alerts after 15 minutes.
+`unavailable` and `unknown` do **not** count (§4.4).
+
+**The 15 minutes count from the last transition between the listed states.** HA's state trigger compares each new
+state with the exact state that armed the `for` timer, so `opening` → `open` cancels the pending count and re-arms
+a fresh 15 minutes on `open` (`not_to: [...]` goes through the same code path and behaves the same). In practice the
+count starts when the door settles, a few seconds late, and a door bouncing `opening` ↔ `open` at an obstruction
+keeps resetting. Both are acceptable: the rule only needs a door **stable** part-way to alert. Stage 2 confirms this
+with the 1-min threshold: the alert should fire about 1 min after `open`, not after `opening`.
 
 ### 4.2 `script.garage_close_checked` (mode `single`, `max_exceeded: silent`)
 
@@ -99,23 +114,36 @@ Action identifiers are namespaced `GARAGE_*` so no other notification's buttons 
      is reported as stuck, not as "already closing".)
    - `closing` → reply **"Already closing"**, stop.
    - `opening` → reply **"Door is opening — try again when it stops"**, stop.
-   - `open` → continue.
+   - `open` for **less than T seconds** → reply **"Door just opened — try again in a moment"**, stop.
+     (**Stable-open guard, unconditional** — hard rule 5.)
+   - `open` for at least T seconds → continue.
 2. If `dry_run`: reply **"Would close now (dry run)"**, stop.
 3. `cover.close_cover`.
 4. Wait up to **60 s** for `closed`.
-   - Reached → **"Garage closed ✓"** (and the cleanup automation clears the alert).
+   - Reached → **"Garage closed ✓"**. The cleanup automation clears the `garage` alert; this result, under
+     `garage_result`, stays.
    - Not reached → **"Garage did NOT close — it's <state>"**. **No automatic retry**: a reversing door usually
      means something is in the way.
-5. Every reply goes to **both** phones, so each person knows what the other did.
+5. Every reply goes to **both** phones under tag **`garage_result`**, **without buttons**, so each person knows what
+   the other did.
+
+**Why the guard is unconditional.** It is what actually prevents a close sent to a door still travelling up. If the
+cover never reports `opening` (the MSG100 senses closed / not-closed only), a door in motion reads `open`, and the
+`opening` refusal above never triggers. The case that needs it is `automation.garage_opened_while_away`: it alerts
+the moment the door starts moving, so its *Close* can be tapped within seconds. Left-open (≥ 15 min) and bedtime
+alerts cannot. **T** = the measured full travel time plus a margin, **30 s by default** until stage 1 measures it.
+Refusing a close in the first ~30 s after opening is a trivial cost. `opening` detection, where the device provides
+it, is a bonus that enables stuck-on-opening; it is not what safety rests on.
 
 A second tap while the script runs is dropped by mode `single` (`max_exceeded: silent`, so no log warning); the
 tapper sees no new alert, and the in-flight run reports for both. The handler's `mode: queued` means the dropped
 duplicate is a *close* only — a *Snooze* tap in the same window still runs.
 
-⚠️ **Stuck-on-opening is not promised until measured.** The MSG100's sensor is closed / not-closed, so the cover
-may flip from `opening` to `open` within seconds, in which case the > 60 s stuck rule can only ever fire on
-`closing`. That is acceptable, but stage 1 measures how long each transitional state actually lasts (§7) before
-this rule or §5's "may be stuck" wording is relied on for `opening`.
+⚠️ **Stuck-on-opening is not promised until measured.** The cover may flip from `opening` to `open` within
+seconds, in which case the > 60 s stuck rule can only ever fire on `closing`. Stage 1 measures the transitional
+states over **3 open/close cycles** (§6.2). That measurement decides only two things: whether stuck-on-opening (here
+and in §5) is promised, and the value of T. It is **not** a safety go/no-go for stage 3, because the guard above
+protects regardless of what the device reports.
 
 ### 4.3 Snooze, repeats and closing
 
@@ -136,7 +164,9 @@ built, so today that case is silent.
 
 Helpers restore their state, so a snooze survives. With a `for: 15 min` trigger, an open door is re-alerted
 **15 minutes after boot**, not immediately. The cover's `last_changed` resets at boot, so §5's "open for N minutes"
-counts from the restart, not from when the door actually opened. Note `INF-11`: an HA core restart can leave Music
+counts from the restart, not from when the door actually opened. §5 words it "at least N minutes" in that case.
+The same reset applies to T in §4.2: after a restart the door counts as freshly open for T seconds, which only
+delays a close. Note `INF-11`: an HA core restart can leave Music
 Assistant down — garage alerts do not depend on MA.
 
 ### 4.6 Presence errors
@@ -151,11 +181,16 @@ return shape the agent already relays verbatim):
 
 | Door | `chat_text` |
 |---|---|
-| `open` | "The garage door is open — it's been open for N minutes." |
+| `open` | "The garage door is open — it's been open for N minutes." ("…for **at least** N minutes." when `last_changed` is within 2 min of HA start — §4.5) |
 | `closed` | "The garage door is closed." |
 | `opening`/`closing` (< 60 s) | "The garage door is <state> right now." |
 | `opening`/`closing` (≥ 60 s) | "The garage door has been <state> for N minutes — it may be stuck." (for `opening`, only once stage 1 shows the state can last that long — §4.2) |
-| `unavailable`/`unknown` | "I can't reach the garage door right now — it was last seen <last state>." |
+| `unavailable`/`unknown` | "I can't reach the garage door right now." |
+
+**Timing:** N = now − the cover's `last_changed`, in whole minutes. **No "last seen" state for voice:** once the
+entity is `unavailable`, nothing in HA keeps its previous state, and an `input_text` helper to hold it would be a
+third helper outside the managed export, for a nicety. (`automation.garage_status_lost` can still say "last seen
+OPEN", because its trigger encodes the previous state.)
 
 - **No actions** in the script — no `cover.*`, no other script calls, no TTS.
 - Description (what the agent sees): *"Report whether the garage door is open or closed. This tool cannot open or
@@ -179,10 +214,20 @@ first live object), hold it through stage 4, and release it on merge (§6.5).
 
 | Stage | Goes live | Verification | Door can move? |
 |---|---|---|---|
-| 1 | Helpers, `garage_notify`, `garage_status` (**not exposed**) | Run the status script in each real door state; one test notification to both phones | No |
-| 2 | `garage_left_open`, `garage_bedtime_check`, `garage_opened_while_away`, `garage_closed_cleanup`, `garage_status_lost`, and the handler with **Snooze only** (no *Close* button offered) | Thresholds temporarily **1 min** (restored to 15 after); operator opens the door and checks alert, repeats, cap, snooze, clear-on-close; bedtime fired via a temporary time | No |
-| 3 | `garage_close_checked` + *Close* button | `dry_run` first (every refusal case + "would close"); then **one real close with the operator at the garage**; then already-closed and double-tap refusals | **Yes — operator present** |
+| 1 | Helpers, `garage_notify`, `garage_status` (**not exposed**) | Run the status script in each real door state; test notifications to both phones under **both tags**, checking replace and clear per tag; **3 operator open/close cycles** watched read-only to record whether `opening`/`closing` appear and how long each state and the full travel last (sets T — §4.2). Then the operator turns HA's temporary debug logging off (§7) | No |
+| 2 | `garage_left_open`, `garage_bedtime_check`, `garage_opened_while_away`, `garage_closed_cleanup`, `garage_status_lost`, and the handler with **Snooze only** (no *Close* button offered) | Thresholds temporarily **1 min** (restored to 15 after); operator opens the door and checks alert, repeats, cap, snooze, clear-on-close; the trace shows the alert fired about 1 min after `open`, not after `opening` (§4.1); bedtime fired via a temporary time | No |
+| 3 | `garage_close_checked` + *Close* button | **Preflight audit first** (below). Then `dry_run` (every refusal case, including "Door just opened", plus "would close"); then **one real close with the operator at the garage**, checking that the `garage_result` message survives the cleanup; then already-closed and double-tap refusals | **Yes — operator present** |
 | 4 | Expose `script.garage_status`; update `assistant-capabilities.md` | "Okay Nabu, is the garage open?" with the door open and closed; pipeline debug trace shows the status tool was called | No |
+
+**Preflight audit (before stage 3, read-only).** It proves hard rule 2 before any HA path can move the door:
+
+1. No automation or script other than `script.garage_close_checked` references `cover.msg100_7982_garage_door`.
+2. No `cover.*` service call in any automation or script targets it, including by area or device.
+3. The cover is **not exposed** to any assistant (the exporter's exposure diff shows it). This closes the built-in
+   `HassOpenCover` / `HassCloseCover` intents, the one path that bypasses scripts entirely.
+
+(A read-only sweep on 2026-09-29, right after pairing, found 0 references and the cover unexposed. The audit
+repeats it against the live state at stage 3.)
 
 ### 6.3 Backups and managed state
 
@@ -212,11 +257,14 @@ released.
 
 ## 7. Open items for the implementation plan
 
-- Confirm the HomeKit Controller cover reports `opening`/`closing` (not just `open`/`closed`) during travel, and
-  **measure how long each state lasts** — the stuck-detection in §4.2 and the status table in §5 depend on it.
-  Verify read-only in stage 1 by watching the entity during one normal open/close by the operator.
+- Confirm whether the HomeKit Controller cover reports `opening`/`closing` during travel, and **measure how long
+  each state and the full travel last**, over 3 cycles in stage 1. This sets T (§4.2) and decides whether
+  stuck-on-opening is promised (§4.2, §5). It does not gate stage 3 (the stable-open guard is unconditional).
 - Confirm the legacy notify service ids `notify.mobile_app_sm_s948w_costea` / `…_vio` exist and deliver (§1).
-- Confirm the Companion app on both Samsungs delivers actionable buttons and the `tag` replace/clear behaviour
-  (stage 1 test notification).
-- DHCP reservation for the Meross (`192.168.1.64`) — not required by HomeKit Controller, but recommended before
-  relying on alerts.
+- Confirm the Companion app on both Samsungs delivers actionable buttons, and that replace/clear works **per tag**
+  (`garage` and `garage_result` independently).
+- **Turn off HA's temporary debug logging** (left on from the 2026-09-29 discovery work) once stage 1's traces are
+  captured: `logger.set_level` → `warning` for `zeroconf`, `homeassistant.components.zeroconf`,
+  `homeassistant.components.homekit_controller`, `aiohomekit`. This is a live HA call, so it's an operator action.
+- DHCP reservation for the Meross (`192.168.1.64`) on the router. Recommended before relying on alerts; not a
+  blocker (HomeKit Controller follows the device by mDNS).
