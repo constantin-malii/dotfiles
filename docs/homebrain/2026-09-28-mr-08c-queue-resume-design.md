@@ -420,3 +420,12 @@ data (the query is what was spoken).
 
 - The announce chime's MA queue form: covered by exact equality against the URL `_say` actually played
   (resolved before `_say`); confirm when AN-01 is re-enabled (announcements are disabled today).
+
+## 11. Release (2026-09-29)
+
+Live on the host since 2026-09-28 20:41:40 (build `2976bdb`, 913 host tests on Python 3.5.2). All four §8 checks
+passed on 2026-09-29; check 4 ran on costa mix (anchor from the buffer, both clips deleted, 8 tracks intact).
+Two earlier deploys and one A2-era deploy failed live checks and were rolled back with the kill switch; the
+evidence and corrections are §3.3 and §4.8 (A1, A2, A2.2a, A3). Deferred: `_queue_settle` late-clip search at
+`current_index - 1` (reviewed, not a live risk); a later clip of one turn anchoring on the previous clip when MA
+buffers mid-turn (fail-safe); the audible ~2 s restart after "Paused." (`MR-08h`).
