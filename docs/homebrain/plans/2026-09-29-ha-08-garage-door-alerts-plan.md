@@ -814,27 +814,78 @@ git commit -m "feat(homebrain): HA-08 alert, bedtime, away, handler, cleanup and
 - [ ] **Step 1: Write the failing tests** — add above `if __name__`:
 
 ```python
+NON_ENTITY_TARGETS = ("area_id", "device_id", "floor_id", "label_id")
+
+
+def entity_targets(d):
+    """(entity_ids, has_non_entity_target) for a service-call dict, merging top level, target and data."""
+    ents, other = [], False
+    for src in (d, d.get("target"), d.get("data")):
+        if not isinstance(src, dict):
+            continue
+        e = src.get("entity_id")
+        if isinstance(e, str):
+            ents.append(e)
+        elif isinstance(e, list):
+            ents.extend(str(x) for x in e)
+        other = other or any(k in src for k in NON_ENTITY_TARGETS)
+    return ents, other
+
+
+def could_move_door(d):
+    """True if this action might move THE GARAGE DOOR. Scoped to the door, not every cover.
+    Provably safe only when it is a service call with explicit, literal entity ids that are not the door.
+    Area/device/floor/label targets, templated or missing entity ids, 'all', and cover device actions
+    (offline their device id cannot be resolved) cannot be proven safe, so they count; stage 3's live
+    audit resolves the door's device id and is exact for device actions."""
+    if d in device_actions_in(d):
+        return d.get("domain") == "cover" or DOOR in json.dumps(d)
+    act = d.get("action") if isinstance(d.get("action"), str) else ""
+    if not (act.startswith("cover.") or act in GENERIC_MOVES):
+        return False
+    ents, other = entity_targets(d)
+    if DOOR in ents:
+        return True
+    if act in GENERIC_MOVES:
+        return other          # a generic turn_on/toggle by area could include the door
+    return other or not ents or "all" in ents or any("{{" in e or "{%" in e for e in ents)
+
+
+def moving_actions(obj):
+    return [d for d in actions_in(obj) + device_actions_in(obj) if could_move_door(d)]
+
+
 @unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
 class HardRulesTest(unittest.TestCase):
-    def test_rule1_nothing_anywhere_opens_or_otherwise_moves_the_door(self):
+    def test_rule1_nothing_anywhere_opens_the_door(self):
         for label, obj in all_managed():
-            for d in actions_in(obj):
-                self.assertNotIn(d["action"], FORBIDDEN_MOVES, label)
-                if d["action"] in GENERIC_MOVES:
-                    self.assertNotIn(DOOR, json.dumps(d), "%s: generic move targets the door" % label)
+            for d in moving_actions(obj):
+                self.assertNotIn(d.get("action"), FORBIDDEN_MOVES, "%s: %s could open/move the door" % (label, d))
 
-    def test_rule2_only_the_close_script_calls_any_cover_action(self):
+    def test_rule2_only_the_close_script_can_move_the_door(self):
         for label, obj in all_managed():
             if label == "scripts/garage_close_checked.json":
                 continue
-            for d in actions_in(obj):
-                self.assertFalse(d["action"].startswith("cover."), "%s calls %s" % (label, d["action"]))
+            self.assertEqual(moving_actions(obj), [], "%s has an action that could move the door" % label)
 
-    def test_rule2_no_ui_device_action_touches_a_cover_or_the_door(self):
-        for label, obj in all_managed():
-            for d in device_actions_in(obj):
-                self.assertNotEqual(d.get("domain"), "cover", "%s: cover device action" % label)
-                self.assertNotIn(DOOR, json.dumps(d), "%s: device action mentions the door" % label)
+    def test_could_move_door_is_scoped_to_the_door(self):
+        other = "cover.living_room_blinds"
+        safe = [{"action": "cover.close_cover", "target": {"entity_id": other}},
+                {"action": "cover.open_cover", "target": {"entity_id": [other, "cover.bedroom_blinds"]}},
+                {"action": "homeassistant.turn_on", "target": {"entity_id": "light.porch"}},
+                {"action": "light.turn_on", "target": {"area_id": "garage"}}]
+        risky = [{"action": "cover.close_cover", "target": {"entity_id": DOOR}},
+                 {"action": "cover.open_cover", "data": {"entity_id": [other, DOOR]}},
+                 {"action": "cover.close_cover", "target": {"area_id": "garage"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "all"}},
+                 {"action": "cover.close_cover", "target": {"entity_id": "{{ door }}"}},
+                 {"action": "cover.close_cover"},
+                 {"action": "homeassistant.toggle", "target": {"area_id": "garage"}},
+                 {"device_id": "abc", "domain": "cover", "entity_id": "0123uuid", "type": "open"}]
+        for d in safe:
+            self.assertFalse(could_move_door(d), d)
+        for d in risky:
+            self.assertTrue(could_move_door(d), d)
 
     def test_device_action_detector_sees_the_ui_shape(self):
         ui = {"actions": [{"device_id": "abc", "domain": "cover", "entity_id": DOOR, "type": "close"}],
@@ -908,10 +959,14 @@ Run: `python tests/test_ha_garage_policy.py -v` → Expected: all PASS.
 Run: `python tests/test_ha_export.py -v` → Expected: PASS, including `test_manifest_is_lf_only_with_a_trailing_newline`
 and the renamed count test.
 
-- [ ] **Step 6: Mutation check.** Temporarily add `{"action": "cover.open_cover", "target": {"entity_id": "cover.msg100_7982_garage_door"}}`
-  as the last step of `ha/scripts/garage_status.json`'s `sequence` (before the `stop`). Run: expected FAILs in
-  `test_rule1_…`, `test_rule2_only_the_close_script…` and `StatusScriptTest.test_read_only_no_actions_at_all`. Revert with
-  `git checkout -- ../ha/scripts/garage_status.json` → PASS.
+- [ ] **Step 6: Mutation checks.**
+  1. Temporarily add `{"action": "cover.open_cover", "target": {"entity_id": "cover.msg100_7982_garage_door"}}` as the
+     second-to-last step of `ha/scripts/garage_status.json`'s `sequence` (before the `stop`). Run: expected FAILs in
+     `test_rule1_nothing_anywhere_opens_the_door`, `test_rule2_only_the_close_script_can_move_the_door` and
+     `StatusScriptTest.test_read_only_no_actions_at_all`. Revert with `git checkout -- ../ha/scripts/garage_status.json` → PASS.
+  2. **Scoping:** temporarily add the same step, but targeting `cover.some_other_cover`, to a **non-garage**
+     automation (e.g. `ha/automations/ma_health_probe.json`'s `actions`). Run: the two rule tests **PASS**, because an
+     explicit other cover is not a door path. Revert with `git checkout -- ../ha/automations/ma_health_probe.json`.
 
 - [ ] **Step 7: Commit**
 
@@ -1336,6 +1391,13 @@ PY
 Expected: two `"success": true` results. Then check `GET /api/states/timer.garage_snooze` → `idle`, and
 `counter.garage_reminders` → `0`. If an entity id differs, **stop**: every file references these exact ids.
 
+⚠️ **`timer/create` / `counter/create` are the frontend's helper-editor WS commands, not a documented public API.**
+Treat this step as a live compatibility check. If either call fails (error, or `success: false`), **do not
+improvise payloads.** Use the **UI fallback**: Settings → Devices & services → Helpers → *Create helper* →
+**Timer**, name `garage_snooze`, duration `01:00:00`, *Restore* on, then **Counter**, name `garage_reminders`,
+initial 0, step 1, minimum 0, maximum 10, *Restore* on. Re-check both entity ids and states as above, and record in
+the CHANGELOG which path created them.
+
 - [ ] **Step 3: Push the two scripts**
 
 ```bash
@@ -1573,8 +1635,23 @@ for s in get("/api/states"):
         text = json.dumps(d)
         is_device_action = ("device_id" in d and "domain" in d and "type" in d
                             and not any(k in d for k in ("condition", "trigger", "platform")))
-        moves = (act.startswith("cover.") or (act in GENERIC and DOOR in text)
-                 or (is_device_action and (d.get("domain") == "cover" or d.get("device_id") == DEV or DOOR in text)))
+        # Same scoping as the offline could_move_door(), but exact for device actions: live, the door's
+        # device id is known, so another cover's device action is not flagged.
+        ents, other = [], False
+        for src in (d, d.get("target"), d.get("data")):
+            if isinstance(src, dict):
+                e = src.get("entity_id")
+                ents += [e] if isinstance(e, str) else [str(x) for x in (e or []) if isinstance(e, list)]
+                other = other or any(k in src for k in ("area_id", "device_id", "floor_id", "label_id"))
+        if is_device_action:
+            moves = d.get("device_id") == DEV or DOOR in text
+        elif act.startswith("cover."):
+            moves = (DOOR in ents or other or not ents or "all" in ents
+                     or any("{{" in x or "{%" in x for x in ents))
+        elif act in GENERIC:
+            moves = DOOR in ents or other
+        else:
+            moves = False
         calls_close = act in ("script.garage_close_checked", "script.turn_on") and "garage_close_checked" in text
         if moves and eid != "script.garage_close_checked":
             bad.append((eid, act or "device action"))
