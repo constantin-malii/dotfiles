@@ -1,0 +1,88 @@
+{
+  "actions": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "close"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "script.garage_close_checked",
+              "data": {
+                "dry_run": false
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": [
+                "snooze_1h",
+                "snooze_3h"
+              ]
+            },
+            {
+              "condition": "not",
+              "conditions": [
+                {
+                  "condition": "state",
+                  "entity_id": "cover.msg100_7982_garage_door",
+                  "state": "closed"
+                }
+              ]
+            }
+          ],
+          "sequence": [
+            {
+              "action": "timer.start",
+              "data": {
+                "duration": "{{ '01:00:00' if trigger.id == 'snooze_1h' else '03:00:00' }}"
+              },
+              "target": {
+                "entity_id": "timer.garage_snooze"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alias": "Garage: notification button handler",
+  "automation_id": "garage_notification_action",
+  "description": "HA-08. Handles GARAGE_CLOSE / GARAGE_SNOOZE_1H / GARAGE_SNOOZE_3H taps. KILL SWITCH: disable this automation to stop all new remote closes (a close already running finishes within 60 s). Parallel so a Snooze tap is never blocked behind a close; a duplicate Close is dropped silently by the close script's mode single. Snooze is ignored if the door is already closed.",
+  "id": "garage_notification_action",
+  "max": 10,
+  "mode": "parallel",
+  "triggers": [
+    {
+      "event_data": {
+        "action": "GARAGE_CLOSE"
+      },
+      "event_type": "mobile_app_notification_action",
+      "id": "close",
+      "trigger": "event"
+    },
+    {
+      "event_data": {
+        "action": "GARAGE_SNOOZE_1H"
+      },
+      "event_type": "mobile_app_notification_action",
+      "id": "snooze_1h",
+      "trigger": "event"
+    },
+    {
+      "event_data": {
+        "action": "GARAGE_SNOOZE_3H"
+      },
+      "event_type": "mobile_app_notification_action",
+      "id": "snooze_3h",
+      "trigger": "event"
+    }
+  ]
+}

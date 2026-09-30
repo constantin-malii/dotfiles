@@ -1,0 +1,53 @@
+{
+  "actions": [
+    {
+      "if": [
+        {
+          "condition": "state",
+          "entity_id": "cover.msg100_7982_garage_door",
+          "state": "closed"
+        }
+      ],
+      "then": [
+        {
+          "action": "script.garage_notify",
+          "data": {
+            "clear": true,
+            "tag": "garage"
+          }
+        },
+        {
+          "action": "timer.cancel",
+          "target": {
+            "entity_id": "timer.garage_snooze"
+          }
+        },
+        {
+          "action": "counter.reset",
+          "target": {
+            "entity_id": "counter.garage_reminders"
+          }
+        }
+      ]
+    }
+  ],
+  "alias": "Garage: cleanup when closed",
+  "automation_id": "garage_closed_cleanup",
+  "description": "HA-08. When the garage door closes, or at HA start with it closed (covers a close missed while HA was down), clears the actionable 'garage' alert (never 'garage_result'), cancels the snooze and resets the reminder counter. This entity's last_changed marks HA start for script.garage_status; do not toggle it casually.",
+  "id": "garage_closed_cleanup",
+  "max": 5,
+  "mode": "queued",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "id": "closed",
+      "to": "closed",
+      "trigger": "state"
+    },
+    {
+      "event": "start",
+      "id": "boot",
+      "trigger": "homeassistant"
+    }
+  ]
+}

@@ -213,5 +213,123 @@ class CloseScriptTest(unittest.TestCase):
         self.assertEqual(len(closes), 1, "no automatic retry")
 
 
+BUTTONS_ALL = [{"action": "GARAGE_CLOSE", "title": "Close"},
+               {"action": "GARAGE_SNOOZE_1H", "title": "Snooze 1 h"},
+               {"action": "GARAGE_SNOOZE_3H", "title": "Snooze 3 h"}]
+BUTTONS_CLOSE = [{"action": "GARAGE_CLOSE", "title": "Close"}]
+
+
+def auto(name):
+    return load("automations", name)[1]
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class AutomationsTest(unittest.TestCase):
+    def test_files_exist_canonical_and_ids_match(self):
+        import ha_export
+        for name in AUTOMATIONS:
+            raw, obj = load("automations", name)
+            self.assertEqual(obj["automation_id"], name)
+            self.assertEqual(obj["id"], name)
+            self.assertEqual(raw, ha_export.render(obj), "%s is not canonical" % name)
+
+    def test_left_open_trigger_states_and_timing(self):
+        a = auto("garage_left_open")
+        initial = [t for t in a["triggers"] if t.get("id") == "initial"][0]
+        tick = [t for t in a["triggers"] if t.get("id") == "tick"][0]
+        self.assertEqual(initial["to"], ALERT_STATES)
+        self.assertEqual(initial["for"], {"hours": 0, "minutes": 15, "seconds": 0})
+        self.assertEqual(tick["minutes"], "/15")
+        self.assertEqual(a["conditions"], [{"condition": "state", "entity_id": DOOR, "state": ALERT_STATES}])
+        tick_branch = [o for o in a["actions"][0]["choose"] if o["conditions"][0].get("id") == "tick"][0]
+        text = json.dumps(tick_branch["conditions"])
+        self.assertIn('"state": "idle"', text)
+        self.assertIn("timer.garage_snooze", text)
+        self.assertIn("< 4", text)
+        self.assertIn(">= 900", text)
+
+    def test_initial_alert_resets_counter(self):
+        a = auto("garage_left_open")
+        initial_branch = [o for o in a["actions"][0]["choose"] if o["conditions"][0].get("id") == "initial"][0]
+        self.assertEqual(initial_branch["sequence"][0]["action"], "counter.reset")
+
+    def test_left_open_alerts_carry_all_three_buttons(self):
+        for d in notify_calls(auto("garage_left_open")):
+            self.assertEqual(d["data"]["buttons"], BUTTONS_ALL)
+
+    def test_bedtime_at_2100_ignores_snooze(self):
+        a = auto("garage_bedtime_check")
+        self.assertEqual(a["triggers"], [{"at": "21:00:00", "trigger": "time"}])
+        self.assertEqual(a["conditions"], [{"condition": "state", "entity_id": DOOR, "state": ALERT_STATES}])
+        self.assertNotIn("garage_snooze", json.dumps(a))
+        self.assertEqual(notify_calls(a)[0]["data"]["buttons"], BUTTONS_CLOSE)
+
+    def test_away_alert_requires_both_known_away_5min(self):
+        a = auto("garage_opened_while_away")
+        self.assertEqual(a["triggers"], [{"entity_id": DOOR, "from": "closed", "to": ["opening", "open"], "trigger": "state"}])
+        conds = json.dumps(a["conditions"])
+        for person in ("person.costea", "person.vio"):
+            self.assertIn(person, conds)
+        self.assertIn("['home', 'unknown', 'unavailable']", conds)
+        self.assertEqual(conds.count(">= 300"), 2)
+        self.assertEqual(notify_calls(a)[0]["data"]["buttons"], BUTTONS_CLOSE)
+
+    def test_handler_parallel_and_exact_action_ids(self):
+        a = auto("garage_notification_action")
+        self.assertEqual(a["mode"], "parallel", "queued would re-run a duplicate Close after the first finishes")
+        self.assertEqual(len(a["triggers"]), 3)
+        ids = set()
+        for t in a["triggers"]:
+            self.assertEqual(t["trigger"], "event")
+            self.assertEqual(t["event_type"], "mobile_app_notification_action")
+            self.assertEqual(sorted(t["event_data"]), ["action"])
+            ids.add(t["event_data"]["action"])
+        self.assertEqual(ids, BUTTON_IDS)
+
+    def test_snooze_refused_when_door_closed(self):
+        a = auto("garage_notification_action")
+        snooze = [o for o in a["actions"][0]["choose"] if "snooze_1h" in json.dumps(o["conditions"])][0]
+        self.assertIn({"condition": "not", "conditions": [{"condition": "state", "entity_id": DOOR, "state": "closed"}]},
+                      snooze["conditions"])
+
+    def test_cleanup_runs_at_boot_and_only_acts_when_closed(self):
+        a = auto("garage_closed_cleanup")
+        self.assertIn({"event": "start", "id": "boot", "trigger": "homeassistant"}, a["triggers"])
+        self.assertEqual(a["actions"][0]["if"], [{"condition": "state", "entity_id": DOOR, "state": "closed"}])
+
+    def test_cleanup_clears_only_the_alert_tag(self):
+        calls = notify_calls(auto("garage_closed_cleanup"))
+        self.assertEqual(calls, [{"action": "script.garage_notify", "data": {"clear": True, "tag": "garage"}}])
+
+    def test_status_lost_trigger_and_no_buttons(self):
+        a = auto("garage_status_lost")
+        self.assertEqual(a["triggers"], [{"entity_id": DOOR, "for": {"hours": 0, "minutes": 10, "seconds": 0},
+                                          "from": ALERT_STATES, "to": ["unavailable", "unknown"], "trigger": "state"}])
+        for d in notify_calls(a):
+            self.assertNotIn("buttons", d["data"])
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class NotifyUsageTest(unittest.TestCase):
+    def garage_objs(self):
+        return [load("scripts", n)[1] for n in SCRIPTS] + [auto(n) for n in AUTOMATIONS]
+
+    def test_only_notify_script_calls_notify_services(self):
+        for obj in self.garage_objs():
+            if obj.get("object_id") == "garage_notify":
+                continue
+            for d in actions_in(obj):
+                self.assertFalse(d["action"].startswith("notify."), "%s sends directly" % d["action"])
+
+    def test_result_tag_never_carries_buttons_and_buttons_only_on_alert_tag(self):
+        for obj in self.garage_objs():
+            for d in notify_calls(obj):
+                tag = d["data"].get("tag", "garage")
+                if tag == "garage_result":
+                    self.assertNotIn("buttons", d["data"])
+                if "buttons" in d["data"]:
+                    self.assertEqual(tag, "garage")
+
+
 if __name__ == "__main__":
     unittest.main()

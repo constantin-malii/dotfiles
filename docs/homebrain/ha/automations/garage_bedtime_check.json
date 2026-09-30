@@ -1,0 +1,38 @@
+{
+  "actions": [
+    {
+      "action": "script.garage_notify",
+      "data": {
+        "buttons": [
+          {
+            "action": "GARAGE_CLOSE",
+            "title": "Close"
+          }
+        ],
+        "message": "Bedtime check: the garage door is {{ states('cover.msg100_7982_garage_door') }}."
+      }
+    }
+  ],
+  "alias": "Garage: bedtime check (21:00)",
+  "automation_id": "garage_bedtime_check",
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "cover.msg100_7982_garage_door",
+      "state": [
+        "open",
+        "opening",
+        "closing"
+      ]
+    }
+  ],
+  "description": "HA-08. At 21:00, if the garage door is not closed, alerts both phones with a Close button. Ignores the snooze. Never moves the door.",
+  "id": "garage_bedtime_check",
+  "mode": "single",
+  "triggers": [
+    {
+      "at": "21:00:00",
+      "trigger": "time"
+    }
+  ]
+}

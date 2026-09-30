@@ -1,0 +1,43 @@
+{
+  "actions": [
+    {
+      "action": "script.garage_notify",
+      "data": {
+        "buttons": [
+          {
+            "action": "GARAGE_CLOSE",
+            "title": "Close"
+          }
+        ],
+        "message": "The garage door opened while nobody is home."
+      }
+    }
+  ],
+  "alias": "Garage: opened while nobody is home",
+  "automation_id": "garage_opened_while_away",
+  "conditions": [
+    {
+      "condition": "template",
+      "value_template": "{% set p = states.person.costea %}{{ p is not none and p.state not in ['home', 'unknown', 'unavailable'] and (as_timestamp(now()) - as_timestamp(p.last_changed)) >= 300 }}"
+    },
+    {
+      "condition": "template",
+      "value_template": "{% set p = states.person.vio %}{{ p is not none and p.state not in ['home', 'unknown', 'unavailable'] and (as_timestamp(now()) - as_timestamp(p.last_changed)) >= 300 }}"
+    }
+  ],
+  "description": "HA-08. When the garage door starts opening from closed while person.costea and person.vio have both been away (known, not home) for at least 5 minutes, alerts both phones with a Close button. Never moves the door.",
+  "id": "garage_opened_while_away",
+  "max_exceeded": "silent",
+  "mode": "single",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "from": "closed",
+      "to": [
+        "opening",
+        "open"
+      ],
+      "trigger": "state"
+    }
+  ]
+}

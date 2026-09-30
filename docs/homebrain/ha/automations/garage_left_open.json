@@ -1,0 +1,132 @@
+{
+  "actions": [
+    {
+      "choose": [
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "initial"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "counter.reset",
+              "target": {
+                "entity_id": "counter.garage_reminders"
+              }
+            },
+            {
+              "action": "script.garage_notify",
+              "data": {
+                "buttons": [
+                  {
+                    "action": "GARAGE_CLOSE",
+                    "title": "Close"
+                  },
+                  {
+                    "action": "GARAGE_SNOOZE_1H",
+                    "title": "Snooze 1 h"
+                  },
+                  {
+                    "action": "GARAGE_SNOOZE_3H",
+                    "title": "Snooze 3 h"
+                  }
+                ],
+                "message": "The garage door has been open for 15 minutes."
+              }
+            }
+          ]
+        },
+        {
+          "conditions": [
+            {
+              "condition": "trigger",
+              "id": "tick"
+            },
+            {
+              "condition": "state",
+              "entity_id": "timer.garage_snooze",
+              "state": "idle"
+            },
+            {
+              "condition": "template",
+              "value_template": "{{ states('counter.garage_reminders') | int(0) < 4 }}"
+            },
+            {
+              "condition": "template",
+              "value_template": "{% set s = states.cover.msg100_7982_garage_door %}{{ s is not none and (as_timestamp(now()) - as_timestamp(s.last_changed)) >= 900 }}"
+            }
+          ],
+          "sequence": [
+            {
+              "action": "counter.increment",
+              "target": {
+                "entity_id": "counter.garage_reminders"
+              }
+            },
+            {
+              "action": "script.garage_notify",
+              "data": {
+                "buttons": [
+                  {
+                    "action": "GARAGE_CLOSE",
+                    "title": "Close"
+                  },
+                  {
+                    "action": "GARAGE_SNOOZE_1H",
+                    "title": "Snooze 1 h"
+                  },
+                  {
+                    "action": "GARAGE_SNOOZE_3H",
+                    "title": "Snooze 3 h"
+                  }
+                ],
+                "message": "The garage door is still open ({{ ((as_timestamp(now()) - as_timestamp(states.cover.msg100_7982_garage_door.last_changed)) // 60) | int }} min)."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "alias": "Garage: left-open alert",
+  "automation_id": "garage_left_open",
+  "conditions": [
+    {
+      "condition": "state",
+      "entity_id": "cover.msg100_7982_garage_door",
+      "state": [
+        "open",
+        "opening",
+        "closing"
+      ]
+    }
+  ],
+  "description": "HA-08. Alerts both phones when the garage door has been not closed (open/opening/closing) for 15 min, then every 15 min up to 4 reminders, unless timer.garage_snooze is active. Never moves the door.",
+  "id": "garage_left_open",
+  "max_exceeded": "silent",
+  "mode": "single",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "for": {
+        "hours": 0,
+        "minutes": 15,
+        "seconds": 0
+      },
+      "id": "initial",
+      "to": [
+        "open",
+        "opening",
+        "closing"
+      ],
+      "trigger": "state"
+    },
+    {
+      "id": "tick",
+      "minutes": "/15",
+      "trigger": "time_pattern"
+    }
+  ]
+}

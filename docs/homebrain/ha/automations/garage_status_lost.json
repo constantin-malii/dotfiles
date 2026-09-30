@@ -1,0 +1,35 @@
+{
+  "actions": [
+    {
+      "action": "script.garage_notify",
+      "data": {
+        "message": "Garage status lost — the door was last seen {{ trigger.from_state.state }} (not closed). Check it."
+      }
+    }
+  ],
+  "alias": "Garage: status lost while not closed",
+  "automation_id": "garage_status_lost",
+  "description": "HA-08. If the garage door goes unavailable/unknown from a not-closed state and stays so for 10 min, alerts both phones. No buttons: an unreachable door cannot be closed. Offline-while-closed is unhandled until HA-06 ships.",
+  "id": "garage_status_lost",
+  "mode": "single",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "for": {
+        "hours": 0,
+        "minutes": 10,
+        "seconds": 0
+      },
+      "from": [
+        "open",
+        "opening",
+        "closing"
+      ],
+      "to": [
+        "unavailable",
+        "unknown"
+      ],
+      "trigger": "state"
+    }
+  ]
+}
