@@ -12,6 +12,9 @@ Usage (run with `python -u scripts/arr.py ...`):
   arr.py get     <app> <endpoint> [k=v ..] [--out FILE]   raw GET as JSON (e.g. `get radarr movie/lookup term=dune`)
   arr.py send    <app> <METHOD> <endpoint> <json|@file> --confirm   raw write (POST/PUT/DELETE)
   arr.py poll    <app> [minutes]           one status line per minute: running commands, queue size, SAB speed
+  arr.py audit   [--sizes] [--top N]       read-only health review of the whole stack: disk, config gaps, stuck
+                                           queue rows, untracked library folders (--sizes walks them: slow),
+                                           wanted-list churn (series that are searched but never found), SAB warnings
 
 Keys: ~/.config/media-arr/credentials  (lines `radarr=KEY`, `sonarr=KEY`, `lidarr=KEY`, `sabnzbd=KEY`; chmod 600),
       or env MEDIA_ARR_<APP>_KEY, or MEDIA_ARR_KEYDIR=<dir> holding `.<app>_auth` files (`key:<value>`).
@@ -205,6 +208,179 @@ def cmd_poll(app, minutes=60):
         time.sleep(60)
 
 
+VIDEO_EXT = (".mkv", ".mp4", ".avi", ".m2ts", ".iso", ".mov", ".wmv", ".vob", ".ts", ".m4v")
+GB = 1e9
+
+
+def fs_walk(app, path, max_depth=4):
+    """Size a folder through the app's filesystem API (the only view of the NAS we have).
+
+    Two traps, both hit in practice: without a trailing slash the API answers with the PARENT listing, and
+    an odd path can do the same - so the path is always normalised and nothing outside it is ever followed.
+    Returns {"bytes", "files", "video": [(name, bytes)], "truncated"}.
+    """
+    acc = {"bytes": 0, "files": 0, "video": [], "truncated": False}
+
+    def walk(p, depth):
+        p = p.rstrip("/") + "/"
+        r = get(app, "filesystem", path=p, includeFiles="true") or {}
+        for f in r.get("files") or []:
+            if not (f.get("path") or p).startswith(p):
+                continue
+            acc["bytes"] += f.get("size") or 0
+            acc["files"] += 1
+            if f.get("name", "").lower().endswith(VIDEO_EXT):
+                acc["video"].append((f["name"], f.get("size") or 0))
+        subs = [d for d in r.get("directories") or [] if d.get("path", "").startswith(p) and d["path"].rstrip("/") != p.rstrip("/")]
+        if depth >= max_depth and subs:
+            acc["truncated"] = True
+            return
+        for d in subs:
+            walk(d["path"], depth + 1)
+
+    walk(path, 0)
+    return acc
+
+
+def classify_unmapped(name, acc):
+    if acc["files"] == 0:
+        return "empty"
+    if name.startswith(("_UNPACK_", "_FAILED_")):
+        return "leftover download"
+    if not acc["video"]:
+        return "no video"
+    return "content"
+
+
+def cmd_audit(args):
+    """Read-only review of the whole stack. Writes nothing; every finding names the fix."""
+    sizes, top = "--sizes" in args, 15
+    if "--top" in args:
+        top = int(args[args.index("--top") + 1])
+    findings = []
+
+    def flag(msg):
+        findings.append(msg)
+        out(f"   !! {msg}")
+
+    out("== health")
+    cmd_status("all")
+
+    out("== disk")
+    try:
+        for d in get("radarr", "diskspace"):
+            if d.get("totalSpace", 0) > 100 * GB:
+                free, total = d["freeSpace"] / GB, d["totalSpace"] / GB
+                out(f"   {d['path']}: free {free:,.0f} / {total:,.0f} GB ({100 * free / total:.0f}%)")
+                if free < 200:  # GB. SAB's floor is 50 GB; below 200 one 4K season fills the volume
+                    flag(f"{d['path']} only {free:,.0f} GB free - check #recycle and the *-recycle folders first")
+    except SystemExit as e:
+        out(f"   diskspace: {e}")
+
+    out("== config gaps")
+    for app in ("radarr", "sonarr", "lidarr"):
+        try:
+            mm = get(app, "config/mediamanagement")
+            if not mm.get("recycleBin"):
+                flag(f"{app}: no recycle bin - deletes are immediate (Settings > Media Management)")
+            if not mm.get("deleteEmptyFolders"):
+                flag(f"{app}: deleteEmptyFolders off - every upgrade/delete leaves an empty husk behind")
+            for h in get(app, "health"):
+                if h["type"] != "ok" and "AllowedHosts" not in h["source"]:
+                    flag(f"{app} health {h['type']}: {h['source']}: {h['message'][:120]}")
+        except SystemExit as e:
+            out(f"   {app}: {e}")
+    try:
+        misc = get("sabnzbd", mode="get_config", section="misc")["config"]["misc"]
+        for k in ("download_free", "complete_free"):
+            if not misc.get(k):
+                flag(f"SAB {k} blank - SAB will fill the volume to zero; set e.g. 50G (set_config section=misc keyword={k} value=50G)")
+        if str(misc.get("complete_dir", "")).startswith("/volume1/media"):
+            flag("SAB complete_dir is inside the library - run check-paths")
+    except SystemExit as e:
+        out(f"   sabnzbd: {e}")
+
+    out("== stuck queue rows")
+    for app in ("radarr", "sonarr", "lidarr"):
+        try:
+            recs = get(app, "queue", pageSize=500)["records"]
+            stuck = [r for r in recs if r.get("status") != "downloading" or r.get("trackedDownloadState") not in ("downloading", "importPending", "importing")]
+            out(f"   {app}: {len(recs)} rows, {len(stuck)} stuck")
+            for r in stuck:
+                flag(f"{app} queue: {r.get('title', '')[:50]} {r.get('status')}/{r.get('trackedDownloadState')} {(r.get('errorMessage') or '')[:60]} {reasons(r)[:1]}")
+        except SystemExit as e:
+            out(f"   {app}: {e}")
+
+    out("== untracked folders inside the libraries" + ("" if sizes else "  (add --sizes to measure them)"))
+    for app in ("radarr", "sonarr"):
+        try:
+            for root in get(app, "rootfolder"):
+                um = root.get("unmappedFolders") or []
+                out(f"   {app} {root['path']}: {len(um)} unmapped folder(s)")
+                if not sizes:
+                    for u in um[:top]:
+                        out(f"      {u['name'][:80]}")
+                    continue
+                rows = []
+                for u in um:
+                    acc = fs_walk(app, u["path"])
+                    rows.append((acc["bytes"], classify_unmapped(u["name"], acc), u["name"], acc))
+                by = {}
+                for b, kind, _, _ in rows:
+                    n, g = by.get(kind, (0, 0))
+                    by[kind] = (n + 1, g + b)
+                for kind, (n, g) in sorted(by.items(), key=lambda x: -x[1][1]):
+                    out(f"      {kind:18} {n:3} folder(s) {g / GB:8.1f} GB")
+                for b, kind, name, acc in sorted(rows, key=lambda x: -x[0])[:top]:
+                    big = max(acc["video"], key=lambda v: v[1])[0][:50] if acc["video"] else "-"
+                    out(f"      {b / GB:7.2f} GB {acc['files']:4} files {kind:18} {name[:55]}  | {big}{' (depth-limited)' if acc['truncated'] else ''}")
+                total = sum(r[0] for r in rows)
+                if total > 20 * GB:
+                    flag(f"{app}: {total / GB:,.0f} GB in {len(um)} folders no app manages - import the keepers, delete the rest in File Station")
+        except SystemExit as e:
+            out(f"   {app}: {e}")
+
+    out("== wanted-list churn (searched every RSS cycle, never found)")
+    try:
+        today = time.strftime("%Y-%m-%d")
+        recs = get("sonarr", "wanted/missing", pageSize=1000, includeSeries="true")["records"]
+        aired = [e for e in recs if (e.get("airDateUtc") or "9")[:10] <= today]
+        by = {}
+        for e in aired:
+            t = (e.get("series") or {}).get("title") or f"series {e.get('seriesId')}"
+            by[t] = by.get(t, 0) + 1
+        out(f"   sonarr: {len(aired)} aired episodes missing across {len(by)} series")
+        for t, n in sorted(by.items(), key=lambda x: -x[1])[:top]:
+            out(f"      {n:4} {t}")
+            if n >= 20:
+                flag(f"sonarr: {n} missing episodes of '{t}' - if it is not on Usenet, unmonitor it to stop burning indexer quota")
+        recs = get("radarr", "wanted/missing", pageSize=1000)["records"]
+        avail = [m for m in recs if m.get("isAvailable")]
+        out(f"   radarr: {len(recs)} missing movies, {len(avail)} already released (the rest are unreleased, fine)")
+    except SystemExit as e:
+        out(f"   wanted: {e}")
+
+    out("== SAB warnings")
+    try:
+        st = get("sabnzbd", mode="fullstatus")["status"]
+        out(f"   loadavg {st.get('loadavg')}")
+        warns = st.get("warnings") or []
+        kinds = {}
+        for w in warns:
+            k = (w.get("type"), w.get("text", "")[:50])
+            kinds[k] = kinds.get(k, 0) + 1
+        for (typ, txt), n in sorted(kinds.items(), key=lambda x: -x[1])[:top]:
+            out(f"   {n:3}x {typ} {txt}")
+            if typ == "ERROR" and "SQL" in txt:
+                flag("SAB 'SQL Command Failed' - database locked under NAS load; keep heavy imports and SAB unpacks from overlapping")
+    except SystemExit as e:
+        out(f"   sabnzbd: {e}")
+
+    out(f"== {len(findings)} finding(s)")
+    for f in findings:
+        out(f" - {f}")
+
+
 def main(argv):
     if len(argv) < 2 or argv[1] in ("-h", "--help"):
         out(__doc__); return
@@ -243,6 +419,8 @@ def main(argv):
         out(json.dumps(send(app, method, endpoint, body), indent=1)[:20000])
     elif c == "poll":
         cmd_poll(argv[2], argv[3] if len(argv) > 3 else 60)
+    elif c == "audit":
+        cmd_audit(argv[2:])
     else:
         sys.exit(f"unknown command {c}; see --help")
 

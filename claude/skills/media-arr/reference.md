@@ -25,6 +25,26 @@ All endpoints are relative to the app base in SKILL.md (`/api/v3` Radarr/Sonarr,
   (`MSYS_NO_PATHCONV=1`, or call it from a Python `subprocess`), and files written by Windows Python have CRLF
   — `for i in $(cat ids.txt)` then yields `12\r`.
 
+## Library hygiene (found by `audit`, 2026-10)
+- `filesystem?path=` **needs a trailing slash**; without it (and for some odd names even with it) the API returns
+  the PARENT listing. A naive recursive walk then crawls the whole library. `fs_walk` in arr.py normalises the path
+  and drops any entry whose path is not under it — use it, don't re-implement.
+- `rootfolder[].unmappedFolders` lists folders no app manages. Measured 2026-10-03: 81 folders, 328 GB — half were
+  empty husks left by upgrades (`deleteEmptyFolders` was off in all three apps; now on), the rest old hand-copied rips,
+  720p duplicates of titles already held at 1080p/2160p, and `_UNPACK_`/`_FAILED_` leftovers from when SAB's category
+  dir sat inside the library. Deletes are the user's, in File Station; the ones worth keeping go in via "Bringing
+  existing files under an *arr" below. Plex still plays untracked folders, so nothing is "missing" from the user's view.
+- `/volume1/media/#recycle` is Synology's share bin: hand deletes (File Station, SMB) land there and **nothing empties
+  it** unless a Recycle Bin task exists in DSM Task Scheduler. Deleting the contents of `radarr-recycle` by hand just
+  moves them there — space is freed only when `#recycle` is emptied.
+- SAB `download_free`/`complete_free` were blank (no free-space floor); set to 50G on 2026-10-03.
+- Wanted-list churn: 263 missing episodes, 186 of them Journey to the Microcosmos (YouTube) + MythBusters, searched
+  every RSS cycle against a single indexer. Unmonitored the three series; `audit` flags any series with ≥20 missing.
+- Disc images: three movies were stored as 58–64 GB BR-DISK .iso / raw .m2ts (Plex cannot play .iso). Radarr never
+  downgrades, so the swap is: user deletes the file in Radarr → `MoviesSearch` → 1080p lands. Profile now rejects these.
+- Lidarr "Has unmatched tracks" on a release with a bonus CD: `manualimport?downloadId=` scan, keep only files with
+  matched `tracks` and no `rejections`, `ManualImport` them; the queue row disappears by itself afterwards.
+
 ## Queue actions
 - Untrack only (files untouched): `DELETE queue/{id}?removeFromClient=false&blocklist=<bool>&skipRedownload=true`.
 - Failed download (partials in `incomplete/` only): `removeFromClient=true&blocklist=true&skipRedownload=true`, then
