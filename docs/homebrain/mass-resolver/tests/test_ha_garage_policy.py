@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(ROOT, "tools"))
 DOOR = "cover.msg100_7982_garage_door"
 SCRIPTS = ["garage_notify", "garage_close_checked", "garage_status"]
 AUTOMATIONS = ["garage_left_open", "garage_bedtime_check", "garage_opened_while_away",
-               "garage_notification_action", "garage_closed_cleanup", "garage_status_lost"]
+               "garage_notification_action", "garage_closed_cleanup", "garage_status_lost",
+               "garage_opened_notify", "garage_event_log"]
 LEGACY_NOTIFY = set(["notify.mobile_app_sm_s948w_costea", "notify.mobile_app_sm_s948w_vio"])
 ALERT_STATES = ["open", "opening", "closing"]
 BUTTON_IDS = set(["GARAGE_CLOSE", "GARAGE_SNOOZE_1H", "GARAGE_SNOOZE_3H"])
@@ -572,6 +573,57 @@ class ReviewFixesTest(unittest.TestCase):
         conds = auto("garage_opened_while_away")["conditions"]
         want = "{%% set p = states.person.%s %%}{{ p is not none and p.state not in ['home', 'unknown', 'unavailable'] and (as_timestamp(now()) - as_timestamp(p.last_changed)) >= 300 }}"
         self.assertEqual([c["value_template"] for c in conds], [want % "costea", want % "vio"])
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class OpenedNotifyTest(unittest.TestCase):
+    """Every opening of the door is reported, with its cause, as it happens (operator request 2026-10-05,
+    after an unexplained open while nobody was home)."""
+
+    def setUp(self):
+        self.a = auto("garage_opened_notify")
+
+    def test_fires_on_every_open_from_closed(self):
+        self.assertEqual(self.a["triggers"], [{"entity_id": DOOR, "from": "closed", "to": ["opening", "open"],
+                                               "trigger": "state"}])
+        self.assertNotIn("conditions", self.a, "every open is reported, whoever is home")
+        self.assertEqual(self.a["mode"], "queued")
+
+    def test_only_notifies_with_no_buttons_on_its_own_tag(self):
+        acts = actions_in(self.a)
+        self.assertEqual([d["action"] for d in acts], ["script.garage_notify"])
+        self.assertEqual(acts[0]["data"].get("tag"), "garage_event")
+        self.assertNotIn("buttons", acts[0]["data"])
+
+    def test_message_names_the_cause_from_the_state_shape(self):
+        msg = actions_in(self.a)[0]["data"]["message"]
+        # 'opening' first = the Meross (app/HA) commanded it; a direct jump to 'open' = something else.
+        self.assertIn("trigger.to_state.state == 'opening'", msg)
+        self.assertIn("NOT by the Meross or HA", msg)
+        self.assertIn("trigger.to_state.context.user_id", msg)
+
+
+@unittest.skipUnless(os.path.isdir(HA), "ha/ tree not present")
+class EventLogTest(unittest.TestCase):
+    """Every change of the door is written to the logbook with its likely cause (operator request 2026-10-05)."""
+
+    def setUp(self):
+        self.a = auto("garage_event_log")
+
+    def test_fires_on_every_change_of_the_door_including_attributes(self):
+        self.assertEqual(self.a["triggers"], [{"entity_id": DOOR, "trigger": "state"}])
+        self.assertNotIn("conditions", self.a)
+        self.assertEqual(self.a["mode"], "queued")
+
+    def test_only_writes_the_logbook(self):
+        acts = actions_in(self.a)
+        self.assertEqual([d["action"] for d in acts], ["logbook.log"])
+        self.assertEqual(acts[0]["data"]["entity_id"], DOOR)
+
+    def test_classifies_every_transition_shape(self):
+        msg = actions_in(self.a)[0]["data"]["message"]
+        for phrase in ("a Meross command", "NOT the Meross or HA", "Meross command FAILED", "obstruction flag"):
+            self.assertIn(phrase, msg)
 
 
 if __name__ == "__main__":

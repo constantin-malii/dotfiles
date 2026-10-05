@@ -1,0 +1,24 @@
+{
+  "actions": [
+    {
+      "action": "logbook.log",
+      "data": {
+        "entity_id": "cover.msg100_7982_garage_door",
+        "message": "{% set f = trigger.from_state.state if trigger.from_state else 'none' %}{% set t = trigger.to_state.state if trigger.to_state else 'none' %}{% set ob = trigger.to_state.attributes.get('obstruction-detected') if trigger.to_state else none %}{% if f == t %}obstruction flag {{ trigger.from_state.attributes.get('obstruction-detected') if trigger.from_state else none }} -> {{ ob }}, no movement{% elif t in ['opening', 'closing'] %}{{ f }} -> {{ t }}: a Meross command{{ ' (from HA)' if trigger.to_state.context.user_id else ' (Meross app or HA)' }}{% elif (f == 'opening' and t == 'closed') or (f == 'closing' and t == 'open') %}{{ f }} -> {{ t }}: Meross command FAILED (timed out; the door did not finish){% elif (f == 'opening' and t == 'open') or (f == 'closing' and t == 'closed') %}{{ f }} -> {{ t }}: Meross command completed{% elif (f == 'closed' and t == 'open') or (f == 'open' and t == 'closed') %}{{ f }} -> {{ t }}: NOT the Meross or HA (wall button, a remote, a car, or the adapter on its own){% else %}{{ f }} -> {{ t }}{% endif %} | obstruction={{ ob }}",
+        "name": "Garage door cause"
+      }
+    }
+  ],
+  "alias": "Garage event log",
+  "automation_id": "garage_event_log",
+  "description": "HA-08 (operator request 2026-10-05). Writes every change of the garage door, including attribute-only obstruction flips, to the logbook with its likely cause, read from the state shape: Meross commands pass through opening/closing; anything else jumps directly between open and closed; opening->closed or closing->open is a timed-out Meross command. Logbook only: no notification, never moves the door.",
+  "id": "garage_event_log",
+  "max": 20,
+  "mode": "queued",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "trigger": "state"
+    }
+  ]
+}

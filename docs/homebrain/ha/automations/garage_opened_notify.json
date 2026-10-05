@@ -1,0 +1,27 @@
+{
+  "actions": [
+    {
+      "action": "script.garage_notify",
+      "data": {
+        "message": "Garage door opened at {{ now().strftime('%H:%M:%S') }} — {% if trigger.to_state.state == 'opening' %}by the Meross{% if trigger.to_state.context.user_id %} (commanded from HA){% else %} (Meross app or HA){% endif %}{% else %}NOT by the Meross or HA (wall button, a remote, a car, or the adapter on its own){% endif %}.",
+        "tag": "garage_event"
+      }
+    }
+  ],
+  "alias": "Garage opened notify",
+  "automation_id": "garage_opened_notify",
+  "description": "HA-08 (operator request 2026-10-05). Reports EVERY opening of the garage door to both phones as it happens, with its likely cause: a Meross command shows 'opening' first, anything else (wall button, remotes, a car, the RGR910 on its own) jumps straight to 'open'. Own tag, no buttons. Never moves the door.",
+  "id": "garage_opened_notify",
+  "mode": "queued",
+  "triggers": [
+    {
+      "entity_id": "cover.msg100_7982_garage_door",
+      "from": "closed",
+      "to": [
+        "opening",
+        "open"
+      ],
+      "trigger": "state"
+    }
+  ]
+}
